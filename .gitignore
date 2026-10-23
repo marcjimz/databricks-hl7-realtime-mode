@@ -1,0 +1,34 @@
+# Session notes
+MEMORY.md
+
+# Phase 0 feasibility code (kept local, not part of the scaffold)
+spikes/
+
+# Databricks
+.databricks/
+
+# Terraform
+infra/.terraform/
+infra/*.tfstate
+infra/*.tfstate.*
+infra/*.tfvars
+!infra/*.tfvars.example
+infra/*.tfplan
+infra/.terraform.lock.hcl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+*.egg-info/
+
+# Tooling
+.isaac/
+.claude/settings.local.json
+.idea/
+.vscode/
+.DS_Store
