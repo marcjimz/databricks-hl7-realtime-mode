@@ -57,6 +57,7 @@ src/
 infra/                  Terraform: Azure Event Hubs
 tests/                  pytest with local Spark
 docs/                   latency results and design notes
+AGENTS.md               principles, patterns, and lessons for contributors and coding agents
 ```
 
 ## Configuration
