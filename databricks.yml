@@ -1,0 +1,72 @@
+# HL7 on Spark Real-Time Mode — Databricks Asset Bundle
+#
+#   raw HL7 ─► bronze ─► silver ─► gold ─► self-service subscriptions   (Event Hubs topics, Real-Time Mode)
+#                                  every topic ─► Delta                  (Lakeflow SDP, micro-batch)
+#
+# Everything environment-specific is a variable: Event Hubs namespace, secret scope/key, topic
+# names, catalog/schema. The Event Hubs connection string lives only in the secret scope.
+#
+# Resources are grouped by type under resources/ (jobs, pipelines, schemas, ...).
+# Usage: see the Makefile (`make help`).
+#
+# NOTE: targets deliberately do NOT use `mode: development`. Development mode turns off
+# `continuous` on pipelines, and Real-Time Mode pipelines must run continuously.
+
+bundle:
+  name: hl7_realtime
+
+include:
+  - resources/**/*.yml
+
+artifacts:
+  hl7rt:
+    type: whl
+    build: uv build --wheel
+    path: .
+
+variables:
+  # --- Unity Catalog ---------------------------------------------------------
+  catalog:
+    description: Existing catalog for all tables.
+  schema:
+    description: Schema for all tables (created by the bundle).
+    default: hl7_realtime
+
+  # --- Event Hubs (Kafka endpoint) -------------------------------------------
+  eh_namespace:
+    description: Event Hubs namespace name (terraform output `namespace`). Bootstrap is <namespace>.servicebus.windows.net:9093.
+  eh_secret_scope:
+    description: Secret scope holding the Event Hubs connection string (`make secrets <env>` writes it).
+    default: hl7-rtm
+  eh_secret_key:
+    description: Key in eh_secret_scope with the namespace connection string.
+    default: eh-connection-string
+
+  # --- Topics ----------------------------------------------------------------
+  epic_json_topic:
+    description: Topic carrying the existing Epic JSON feed (pre-parsed by the outside system).
+    default: epic.json
+
+  # --- Kafka source behavior -------------------------------------------------
+  kafka_starting_offsets:
+    description: >-
+      Where a NEW checkpoint starts reading (latest | earliest). Existing checkpoints always resume
+      where they left off; `make reset <env>` full-refreshes to start at the live edge (demo only).
+    default: latest
+  kafka_max_offsets_per_trigger:
+    description: Micro-batch cap for the Epic JSON (non-RTM) pipeline.
+    default: "50000"
+
+  # --- Generators ------------------------------------------------------------
+  generator_rate:
+    description: Events per second produced by the synthetic generators.
+    default: "50"
+
+targets:
+  dev:
+    default: true
+    workspace:
+      host: https://fevm-real-time-mode-demo.cloud.databricks.com
+    variables:
+      catalog: real_time_mode_demo_catalog
+      eh_namespace: hl7rtmp-ehns

@@ -45,9 +45,10 @@ variable "partition_count" {
 }
 
 variable "topics" {
-  description = "One hub per layer topic. The Standard tier allows at most 10 hubs per namespace."
+  description = "One hub per layer topic, plus the existing Epic JSON feed. (Standard tier: max 10 hubs.)"
   type        = list(string)
   default = [
+    "epic.json",
     "hl7.raw",
     "hl7.bronze",
     "hl7.silver",

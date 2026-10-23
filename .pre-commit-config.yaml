@@ -1,0 +1,32 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-added-large-files
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: terraform-fmt
+        name: terraform fmt
+        entry: terraform -chdir=infra fmt -check
+        language: system
+        files: ^infra/.*\.tf$
+        pass_filenames: false
+      - id: no-secrets
+        name: no Event Hubs connection strings
+        entry: uv run pytest -q tests/test_no_secrets.py
+        language: system
+        pass_filenames: false
+        always_run: true
