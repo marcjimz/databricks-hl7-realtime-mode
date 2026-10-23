@@ -64,6 +64,12 @@ docs/                 latency results + design notes
 
 ## Real-Time Mode rules (learned in Phase 0, see docs/latency.md)
 
+- **Use the shared wiring:** every RTM hop uses `hl7rt.rtm` (`read_topic`, `sink_options`, `flow_conf`) and the
+  `rtm_cluster` complex bundle variable. Don't hand-roll Kafka options or cluster specs per pipeline.
+  `tests/test_rtm_resources.py` enforces continuous, RTM flag, classic, no Photon, fixed workers, on-demand,
+  slot headroom ≥ 1.2×, and no development-mode targets.
+- **Route, don't fork:** a sink created without a `topic` routes each record by its `topic` column. Silver
+  writes `hl7.silver` and `hl7.quarantine` from **one** flow (one read, no extra slots), not two flows.
 - **Enable it in SDP:** pipeline `continuous: true` + `spark.databricks.streaming.realTimeMode.enabled: "true"`
   in `configuration`, and `@dp.update_flow(target=<kafka sink>, spark_conf={"pipelines.trigger": "RealTime",
   "pipelines.trigger.interval": "5 minutes"})`. Sinks are `dp.create_sink(name, "kafka", {..., "topic": ...})`.
@@ -85,16 +91,32 @@ docs/                 latency results + design notes
   `dropDuplicates`, `transformWithState` (row API), broadcast stream-static joins.
   **Not supported:** Delta source/sink, `foreachBatch`, session windows, `mapPartitions`,
   `transformWithStateInPandas`.
+- **A one-off `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT` seconds after a cold start** can happen. SDP retries it
+  and steady state is fine (seen once in Phase 2, then clean across every boundary). A repeat at 5-minute
+  boundaries means real under-sizing.
 - **Epoch boundaries:** every `pipelines.trigger.interval`, each pipeline pauses briefly (measured
   ~0.6–1.6 s, affecting ~0.1% of messages). p99 is unaffected, but max is. This is an open item.
 - **Event Hubs Premium is required.** Standard's multi-tenant tail missed 200 ms p99 on two hops;
   Premium gives ~31 ms p99 per hop.
+
+## Data contracts
+
+- **Silver keeps the customer's Epic silver contract**: the same 34 fields, names, order, and types, then
+  `payload`, `kafka_timestamp`, `_ingested_at`. Raw-HL7 silver (`hl7rt.hl7v2`) and the Epic JSON silver
+  (`hl7rt.epic_json`) produce the same shape. Extras (`observations`, lineage, latency) come **after** the contract.
+  The HL7 field → column mapping is documented at the top of `hl7rt/hl7v2.py`.
+- Build HL7 test messages by field number (`hl7rt.generators.hl7v2.segment`), never by hand-counting pipes.
+  One hand-written golden message checks the builder.
+- Each hot-path record carries the upstream broker timestamps (`raw_ts`, `bronze_ts`, ...). The lakehouse mirror
+  (`hl7rt.lakehouse`) turns them into `hop_ms` / `e2e_ms` columns.
 
 ## Measuring latency
 
 - Event Hubs stamps every record with **LogAppendTime** (`timestampType = 1`). Each layer carries the
   upstream topic's broker timestamp forward (`raw_ts`, `bronze_ts`, `silver_ts`, `gold_ts`), so
   `hop_ms = this_topic.timestamp - upstream_ts` uses broker clocks only, with no client clock skew.
+- **The producer → raw hop crosses clocks** (generator host vs broker), so it can read slightly negative.
+  Every other hop compares broker timestamps only.
 - **Resolution is ±16 ms** (Event Hubs timestamps tick in ~16 ms steps; broker clocks differ by a few
   ms). Readings of 0 ms are real "same tick" results, not bugs. For sub-16 ms precision use RTM's
   `processingLatencyMs`.
@@ -121,6 +143,17 @@ docs/                 latency results + design notes
 
 ## Spark patterns and pitfalls
 
+- **Watch for `grows beyond 64 KB` in driver logs.** If a projection's whole-stage code exceeds the JVM method
+  limit, the failed compile is retried at every RTM epoch boundary (silver: +3 s per boundary, p99 407 → 125 ms
+  once fixed). Set `rtm.NO_WHOLE_STAGE_CODEGEN` on that flow. Execution already falls back to non-fused code.
+- **Diagnose epoch pauses from driver logs.** RTM clusters deliver logs to the `cluster_logs` volume. Compare
+  `Finished task (4/4)` → `Committing sources` → next `Starting task` timestamps per boundary.
+- **Keep plans small: split once, read many.** Build parsed data in staged projections (`hl7v2.with_segments`):
+  split the message into segments once and each needed segment into fields once, then read fields from those
+  columns. Spark won't collapse a projection if that would duplicate an expensive expression. Inlining the
+  segment split inside every field produced a **379 KB plan with 290 `split()` calls per record**. The RTM
+  driver sat in `STARTING` with 55% GC. `tests/test_hl7v2.py::test_silver_plan_splits_each_segment_once` guards it.
+
 - **ANSI is on** (Spark 4 / DBR 18): use `try_to_timestamp`, `try_element_at`, `try_cast`. A single
   malformed value with `to_timestamp` fails the whole stream.
 - **Parse JSON once.** The optimizer pushes filters below projections and re-inlines `from_json`
@@ -130,6 +163,8 @@ docs/                 latency results + design notes
   formats in sequence (~5× slower).
 - `map_from_entries` + `spark.sql.mapKeyDedupPolicy=LAST_WIN` over a reversed array = first occurrence
   wins. That conf is set via the table's `spark_conf` (`epic_json.SPARK_CONF`).
+- **Delta stats cover the first 32 columns only.** A `cluster_by` column past #32 fails with
+  `DELTA_CLUSTERING_COLUMN_MISSING_STATS`. Set `delta.dataSkippingStatsColumns` (see `silver_hl7`).
 - Tests run with `TZ=UTC` and `spark.sql.session.timeZone=UTC` (collected timestamps convert to the
   process zone).
 

@@ -138,3 +138,75 @@ built-in `processingLatencyMs`.
   - `create_sink` takes a static `topic`, so there is one sink per output topic.
   - RTM progress metrics only reach the event log at the end of the long batch (5 min). Per-record latency comes from
     broker timestamps.
+
+---
+
+# Phase 2 — raw HL7 on the real pipelines (repo code, not the spike)
+
+Same environment (Event Hubs Premium, eastus; DBR 18.3; RTM hops on 2× m6id.xlarge = 8 slots for 4 tasks),
+continuous generator at 50 msg/s. Hot path: `hl7_bronze` (RTM) and `hl7_silver` (RTM, full HL7 parse, routes to
+`hl7.silver` / `hl7.quarantine` from one flow). Measured live from the near-real-time streaming tables
+(`raw_hl7`, `bronze_hl7`, `silver_hl7`, `quarantine_hl7`), which carry `hop_ms` / `e2e_ms` per record.
+
+## Findings while bringing it up
+- **Silver stuck in `STARTING` with 55% driver GC.** Root cause: the parse was inlined per field, giving a 379 KB
+  analyzed plan with 290 `split()` calls per record. The fix was staged projections (split once, read many):
+  25 KB plan, one whole-message split. A guard test now enforces it.
+- **Single flow, two topics works under RTM.** A sink without a fixed `topic` routes by the `topic` column.
+- **One `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT` on bronze, 6 s after its first cold start.** SDP retried, and the
+  flow was then clean across every epoch boundary. 2 workers are adequate in steady state.
+- **Lakehouse failed with `DELTA_CLUSTERING_COLUMN_MISSING_STATS`.** Delta stats cover the first 32 columns only,
+  and `kafka_timestamp` is #36 in the silver contract. Fixed with `delta.dataSkippingStatsColumns`.
+
+## 12-minute soak (≈35k msgs/hop, zero flow failures)
+| Hop | p50 | p95 | p99 | max |
+|---|---|---|---|---|
+| producer → raw (crosses clocks; see note) | −5 | 2 | 13 | 303 |
+| raw → bronze | 11 | 22 | **47** ✅ | 1,125 |
+| bronze → silver | 15 | 16 | **407** ❌ | 4,562 |
+| bronze → quarantine | 15 | 31 | 62 | 1,610 |
+
+**Epoch-boundary pauses** (every 5 min per pipeline) explain all the tail:
+
+| | Boundary 1 | Boundary 2 | Boundary 3 |
+|---|---|---|---|
+| bronze | 19:44:04 (1.1 s, 48 msgs) | 19:49:05 (1.0 s, 43) | 19:54:05 (0.6 s, 22) |
+| silver | 19:46:06–07 (4.6 s, 219 msgs) | 19:51:09–10 (3.3 s, 158) | |
+
+Bronze's pause hits ~0.3% of messages, so p99 survives. Silver's ~3–4.5 s pause hits ~1% and lifts p99 to 407 ms.
+That's above the runbook's "normal" inter-batch time (< 3 s). Planning cost is **not** the cause (measured
+locally: bronze 10 ms vs silver 35 ms per plan).
+
+Note: producer → raw compares the generator host's clock with the broker's, so it can read slightly negative.
+Every other hop uses broker timestamps only.
+
+## Root cause: silver's whole-stage codegen exceeded the JVM 64 KB method limit
+Driver logs (cluster log delivery to `/Volumes/<catalog>/<schema>/cluster_logs`) for one boundary:
+
+| Step | bronze | silver |
+|---|---|---|
+| Last task of epoch N finishes | 20:11:16 | 20:05:41 |
+| Offsets committed, epoch N+1 planning starts | 20:11:17 | 20:05:42 |
+| Epoch N+1 tasks launch | **20:11:17 (<1 s)** | **20:05:46 (4 s)** |
+
+Silver's gap includes `WARN CodeGenerator: Failed to compile ... Code of method "processNext()V" ... grows beyond
+64 KB` → `Whole-stage codegen disabled`. The failed compile isn't cached, so it is retried at **every** epoch
+boundary, while execution falls back to non-fused code anyway. Tasks finish on time, so it isn't slow-to-stop tasks.
+
+**Fix:** `spark.sql.codegen.wholeStage=false` on the silver flow only (`rtm.NO_WHOLE_STAGE_CODEGEN`).
+
+## After the fix (10-minute soak, ≈30k msgs/hop, zero flow failures, zero failed compiles)
+| Hop | p50 | p95 | p99 | max |
+|---|---|---|---|---|
+| producer → raw (crosses clocks) | −5 | 2 | 13 | 325 |
+| raw → bronze | 10 | 20 | **32** ✅ | 1,071 |
+| bronze → silver | 15 | 16 | **125** ✅ (was 407) | 2,844 |
+| bronze → quarantine (same flow, n=284) | 15 | 31 | 593 | 2,531 |
+
+Silver's handoff dropped from 4–5 s to ~2 s (bronze ~1 s). Every hop meets < 200 ms at p99. Quarantine's p99 is
+the same flow over a tiny sample, where one boundary pause dominates.
+
+## Still open
+- Silver's ~2 s boundary pause vs bronze's ~1 s: planning a larger projection each epoch. A further cut is
+  possible (fewer expressions); not needed for the p99 bar.
+- Max per hop is still the epoch-boundary pause (~1–3 s every 5 minutes, ~0.1–0.6% of messages).

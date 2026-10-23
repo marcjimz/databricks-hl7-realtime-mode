@@ -32,8 +32,9 @@ STACK   ?= eventhubs
 TF      := terraform -chdir=infra/$(STACK)
 TF_EH   := terraform -chdir=infra/eventhubs
 
-PIPELINES  := epic_json
-GENERATORS := epic_json_generator
+# Hot-path RTM pipelines first, then the near-real-time mirror and the Epic JSON feed.
+PIPELINES  := hl7_bronze hl7_silver lakehouse epic_json
+GENERATORS := hl7_generator epic_json_generator
 
 # Resolve a deployed resource id from the bundle summary: $(call resource_id,pipelines,epic_json)
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")

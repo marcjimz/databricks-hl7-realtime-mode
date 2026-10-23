@@ -12,7 +12,8 @@ for Structured Streaming, on Lakeflow Spark Declarative Pipelines and Azure Even
  every topic ─► Delta streaming tables (audit, replay, BI) + per-record latency telemetry
 ```
 
-**Measured** (Phase 0, Event Hubs Premium, 15-minute soak): each hop is **~31–47 ms at p99**. See
+**Measured** on the repo's pipelines (Phase 2, Event Hubs Premium): raw → bronze **32 ms** and bronze → silver
+(full HL7 parse) **125 ms** at p99. See
 [docs/latency.md](docs/latency.md) for every experiment, root cause, and open item.
 
 ## Status
@@ -20,8 +21,8 @@ for Structured Streaming, on Lakeflow Spark Declarative Pipelines and Azure Even
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Feasibility: RTM latency per hop, sizing, Event Hubs tier | ✅ [docs/latency.md](docs/latency.md) |
-| 1 | Scaffold + the existing Epic JSON feed (bronze/silver), improved | ✅ this repo |
-| 2 | Raw HL7 → bronze → silver on RTM (native Spark HL7 parsing) + Delta mirror + live telemetry | ⏳ |
+| 1 | Scaffold + the existing Epic JSON feed (bronze/silver), improved | ✅ |
+| 2 | Raw HL7 → bronze → silver on RTM (native Spark HL7 parsing) + Delta streaming tables + live telemetry | 🔄 in review |
 | 3 | Gold breakdown: encounters, observations (one row per OBX), orders | ⏳ |
 | 4 | Self-service subscription template (filters, windows) → Event Hubs + Delta | ⏳ |
 | 5 | Demo polish: dashboard, walkthrough | ⏳ |
@@ -49,8 +50,8 @@ make stop dev                                        # stop pipelines + generato
 databricks.yml          bundle: variables + targets; includes resources/**
 resources/              bundle resources, grouped by type
   jobs/                 generators (and later: subscription jobs)
-  pipelines/            SDP pipelines
-  schemas/              Unity Catalog schema
+  pipelines/            SDP pipelines: hl7_bronze, hl7_silver (RTM hot path), lakehouse (streaming tables), epic_json
+  schemas/              Unity Catalog schema + cluster_logs volume
 src/
   hl7rt/                shared library (pure transforms, Event Hubs helpers, generators) — unit-tested
   pipelines/            thin SDP pipeline sources that call into hl7rt
@@ -72,6 +73,10 @@ Everything environment-specific is a bundle variable (`databricks.yml`). Overrid
 | `eh_namespace` | — (per target) | Event Hubs namespace (`terraform output namespace`) |
 | `eh_secret_scope` / `eh_secret_key` | `hl7-rtm` / `eh-connection-string` | Where the connection string lives |
 | `epic_json_topic` | `epic.json` | Existing Epic JSON feed topic |
+| `hl7_raw_topic` / `hl7_bronze_topic` / `hl7_silver_topic` / `hl7_quarantine_topic` | `hl7.raw` / `hl7.bronze` / `hl7.silver` / `hl7.quarantine` | Hot-path topics |
+| `rtm_trigger_interval` | `5 minutes` | RTM checkpoint interval (epoch length) |
+| `rtm_max_partitions` | `4` | Kafka reader tasks per RTM flow (match hub partitions) |
+| `rtm_cluster` | 2 × m6id.xlarge, on-demand | Fixed RTM cluster (complex variable; override per target) |
 | `kafka_starting_offsets` | `latest` | Start point for a **new** checkpoint only |
 | `kafka_max_offsets_per_trigger` | `50000` | Micro-batch cap (Epic JSON pipeline) |
 | `generator_rate` | `50` | Synthetic events/second |
