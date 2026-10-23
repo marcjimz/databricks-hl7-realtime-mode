@@ -1,4 +1,4 @@
-# Continuous synthetic raw HL7 v2 feed into hl7.raw. Start/stop with `make generate <env>` / `make generate-stop <env>`.
+# Continuous synthetic raw HL7 v2 feed into the raw_hl7 topic. Start/stop with `make generate <env>` / `make generate-stop <env>`.
 resources:
   jobs:
     hl7_generator:

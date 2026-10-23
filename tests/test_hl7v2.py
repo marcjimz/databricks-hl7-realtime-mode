@@ -163,7 +163,18 @@ def test_quarantine_reasons(spark, msg, reason):
 
 def _kafka(spark, *values):
     return spark.createDataFrame(
-        [(f"k{i}".encode(), v.encode(), "hl7.raw", 0, i, datetime(2026, 10, 23, 12), 1) for i, v in enumerate(values)],
+        [
+            (
+                f"k{i}".encode(),
+                v.encode(),
+                "real_time_mode_demo_catalog.hl7_realtime.raw_hl7",
+                0,
+                i,
+                datetime(2026, 10, 23, 12),
+                1,
+            )
+            for i, v in enumerate(values)
+        ],
         "key binary, value binary, topic string, partition int, offset long, timestamp timestamp, timestampType int",
     )
 
@@ -181,11 +192,21 @@ def test_bronze_envelope(spark):
 def test_silver_records_route_by_topic(spark):
     bronze = hl7v2.to_bronze_records(_kafka(spark, s.oru_r01(), "garbage"))
     bronze_kafka = bronze.withColumn("timestamp", F.lit(datetime(2026, 10, 23, 12, 0, 1)))
-    out = hl7v2.to_silver_records(bronze_kafka, silver_topic="hl7.silver", quarantine_topic="hl7.quarantine")
+    out = hl7v2.to_silver_records(
+        bronze_kafka,
+        silver_topic="real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
+        quarantine_topic="real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
+    )
     assert out.columns == ["key", "value", "topic"]
     rows = {r.topic: json.loads(r.value) for r in out.collect()}
-    assert set(rows) == {"hl7.silver", "hl7.quarantine"}
-    silver, quarantine = rows["hl7.silver"], rows["hl7.quarantine"]
+    assert set(rows) == {
+        "real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
+        "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
+    }
+    silver, quarantine = (
+        rows["real_time_mode_demo_catalog.hl7_realtime.silver_hl7"],
+        rows["real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7"],
+    )
     assert silver["msg_control_id"] == "CTRL0002" and len(silver["observations"]) == 2
     assert silver["raw_ts"].startswith("2026-10-23T12:00:00") and silver["bronze_ts"].startswith("2026-10-23T12:00:01")
     assert silver["payload"] == s.oru_r01()
@@ -194,7 +215,15 @@ def test_silver_records_route_by_topic(spark):
 
 def test_silver_json_roundtrips_through_schema(spark):
     bronze = hl7v2.to_bronze_records(_kafka(spark, s.oru_r01())).withColumn("timestamp", F.current_timestamp())
-    value = hl7v2.to_silver_records(bronze, "hl7.silver", "hl7.quarantine").first().value
+    value = (
+        hl7v2.to_silver_records(
+            bronze,
+            "real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
+            "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
+        )
+        .first()
+        .value
+    )
     back = spark.createDataFrame([(value,)], "v string").select(F.from_json("v", hl7v2.SILVER_SCHEMA).alias("x"))
     assert back.first().x.observations[0].abnormal_flag == "HH"
 
@@ -208,7 +237,11 @@ def test_silver_plan_splits_each_segment_once(spark):
     # Materialize bronze first: in production bronze and silver are separate pipelines.
     bronze_value = hl7v2.to_bronze_records(_kafka(spark, s.oru_r01())).first().value
     bronze = _kafka(spark, bronze_value)
-    qe = hl7v2.to_silver_records(bronze, "hl7.silver", "hl7.quarantine")._jdf.queryExecution()
+    qe = hl7v2.to_silver_records(
+        bronze,
+        "real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
+        "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
+    )._jdf.queryExecution()
     optimized, analyzed = qe.optimizedPlan().toString(), qe.analyzed().toString()
     whole_message_splits = optimized.count("split(regexp_replace(")  # segments(): split of the full message
     assert whole_message_splits == 1, f"the full message is split {whole_message_splits}x per record"

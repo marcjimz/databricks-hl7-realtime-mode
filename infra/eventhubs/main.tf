@@ -24,9 +24,10 @@ resource "azurerm_eventhub_namespace" "this" {
   tags                = local.tags
 }
 
+# Hub name = the Delta table it lands in: <catalog>.<schema>.<table>.
 resource "azurerm_eventhub" "topics" {
-  for_each          = toset(var.topics)
-  name              = each.value
+  for_each          = toset(var.tables)
+  name              = "${var.catalog}.${var.schema}.${each.value}"
   namespace_id      = azurerm_eventhub_namespace.this.id
   partition_count   = var.partition_count
   message_retention = 1

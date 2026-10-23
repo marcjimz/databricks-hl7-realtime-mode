@@ -24,7 +24,7 @@ def _value(schema) -> Column:
 
 
 def raw_rows(raw: DataFrame) -> DataFrame:
-    """hl7.raw: the message as received; hop = producer send time (sent_ms header) -> broker."""
+    """raw_hl7 topic: the message as received; hop = producer send time (sent_ms header) -> broker."""
     sent_ms = F.expr("try_cast(cast(filter(headers, h -> h.key = 'sent_ms')[0].value AS STRING) AS BIGINT)")
     sent = F.timestamp_millis(sent_ms)
     return raw.select(
@@ -72,5 +72,17 @@ def quarantine_rows(quarantine: DataFrame) -> DataFrame:
         "q.*",
         "kafka_timestamp",
         _ms(F.col("kafka_timestamp"), F.col("q.bronze_ts")).alias("hop_ms"),
+        F.current_timestamp().alias("_ingested_at"),
+    )
+
+
+def gold_rows(gold_topic: DataFrame, schema) -> DataFrame:
+    """gold_* topics: the entity's fields (gold.*_SCHEMA order), then hop (silver -> gold) and end-to-end latency."""
+    g = gold_topic.select(_value(schema).alias("g"), F.col("timestamp").alias("kafka_timestamp"))
+    return g.select(
+        "g.*",
+        "kafka_timestamp",
+        _ms(F.col("kafka_timestamp"), F.col("g.silver_ts")).alias("hop_ms"),
+        _ms(F.col("kafka_timestamp"), F.col("g.raw_ts")).alias("e2e_ms"),
         F.current_timestamp().alias("_ingested_at"),
     )

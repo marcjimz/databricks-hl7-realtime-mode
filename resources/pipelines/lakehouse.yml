@@ -22,3 +22,6 @@ resources:
         hl7.topics.bronze: ${var.hl7_bronze_topic}
         hl7.topics.silver: ${var.hl7_silver_topic}
         hl7.topics.quarantine: ${var.hl7_quarantine_topic}
+        hl7.topics.gold_encounters: ${var.hl7_gold_encounters_topic}
+        hl7.topics.gold_observations: ${var.hl7_gold_observations_topic}
+        hl7.topics.gold_orders: ${var.hl7_gold_orders_topic}

@@ -44,20 +44,31 @@ variable "partition_count" {
   default     = 4
 }
 
-variable "topics" {
-  description = "One hub per layer topic, plus the existing Epic JSON feed. (Standard tier: max 10 hubs.)"
+variable "catalog" {
+  description = "Unity Catalog catalog the topics land in. Hubs are named <catalog>.<schema>.<table>, matching the Delta tables."
+  type        = string
+}
+
+variable "schema" {
+  description = "Unity Catalog schema the topics land in (the bundle's `schema` variable)."
+  type        = string
+  default     = "hl7_realtime"
+}
+
+variable "tables" {
+  description = "One hub per Delta table the hot path lands in, plus the existing Epic JSON feed. (Standard tier: max 10 hubs.)"
   type        = list(string)
   default = [
-    "epic.json",
-    "hl7.raw",
-    "hl7.bronze",
-    "hl7.silver",
-    "hl7.quarantine",
-    "hl7.gold.encounters",
-    "hl7.gold.observations",
-    "hl7.gold.orders",
-    "hl7.sub.critical_lab",
-    "hl7.sub.ed_arrival_surge",
+    "epic_near_realtime_json_from_eventhub",
+    "raw_hl7",
+    "bronze_hl7",
+    "silver_hl7",
+    "quarantine_hl7",
+    "gold_encounters",
+    "gold_observations",
+    "gold_orders",
+    "sub_critical_lab",
+    "sub_ed_arrival_surge",
   ]
 }
 

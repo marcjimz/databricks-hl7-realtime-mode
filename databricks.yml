@@ -1,16 +1,5 @@
-# HL7 on Spark Real-Time Mode — Databricks Asset Bundle
-#
-#   raw HL7 ─► bronze ─► silver ─► gold ─► self-service subscriptions   (Event Hubs topics, Real-Time Mode)
-#                                  every topic ─► Delta                  (Lakeflow SDP, micro-batch)
-#
-# Everything environment-specific is a variable: Event Hubs namespace, secret scope/key, topic
-# names, catalog/schema. The Event Hubs connection string lives only in the secret scope.
-#
-# Resources are grouped by type under resources/ (jobs, pipelines, schemas, ...).
-# Usage: see the Makefile (`make help`).
-#
-# NOTE: targets deliberately do NOT use `mode: development`. Development mode turns off
-# `continuous` on pipelines, and Real-Time Mode pipelines must run continuously.
+# HL7 on Spark Real-Time Mode. All environment settings are variables; see README.md.
+# No `mode: development`: it turns off `continuous`, which Real-Time Mode needs.
 
 bundle:
   name: hl7_realtime
@@ -18,8 +7,6 @@ bundle:
 include:
   - resources/**/*.yml
 
-# The hl7rt library (src/hl7rt) is packaged as a wheel for the jobs that import it. Build output goes
-# to .build/ (gitignored); `make clean` removes it.
 artifacts:
   hl7rt:
     type: whl
@@ -29,14 +16,14 @@ artifacts:
       - source: .build/hl7rt-*.whl
 
 variables:
-  # --- Unity Catalog ---------------------------------------------------------
+  # Unity Catalog
   catalog:
     description: Existing catalog for all tables.
   schema:
     description: Schema for all tables (created by the bundle).
     default: hl7_realtime
 
-  # --- Event Hubs (Kafka endpoint) -------------------------------------------
+  # Event Hubs (Kafka endpoint)
   eh_namespace:
     description: Event Hubs namespace name (terraform output `namespace`). Bootstrap is <namespace>.servicebus.windows.net:9093.
   eh_secret_scope:
@@ -46,38 +33,42 @@ variables:
     description: Key in eh_secret_scope with the namespace connection string.
     default: eh-connection-string
 
-  # --- Topics ----------------------------------------------------------------
+  # Topics
+  # Topic = the Delta table it lands in: <catalog>.<schema>.<table>
   epic_json_topic:
     description: Topic carrying the existing Epic JSON feed (pre-parsed by the outside system).
-    default: epic.json
+    default: ${var.catalog}.${var.schema}.epic_near_realtime_json_from_eventhub
   hl7_raw_topic:
     description: Raw HL7 v2 messages from the source system (one message per record).
-    default: hl7.raw
+    default: ${var.catalog}.${var.schema}.raw_hl7
   hl7_bronze_topic:
     description: Bronze, the raw message plus MSH envelope and raw-topic lineage.
-    default: hl7.bronze
+    default: ${var.catalog}.${var.schema}.bronze_hl7
   hl7_silver_topic:
     description: Silver, the parsed message (Epic silver contract + observations).
-    default: hl7.silver
+    default: ${var.catalog}.${var.schema}.silver_hl7
   hl7_quarantine_topic:
     description: Messages that could not be silvered, with the reason.
-    default: hl7.quarantine
+    default: ${var.catalog}.${var.schema}.quarantine_hl7
+  hl7_gold_encounters_topic:
+    description: Gold, one record per ADT event (admission, discharge, registration, update).
+    default: ${var.catalog}.${var.schema}.gold_encounters
+  hl7_gold_observations_topic:
+    description: Gold, one record per OBX result (numeric value parsed).
+    default: ${var.catalog}.${var.schema}.gold_observations
+  hl7_gold_orders_topic:
+    description: Gold, one record per ORM order.
+    default: ${var.catalog}.${var.schema}.gold_orders
 
-  # --- Real-Time Mode (hot path) ---------------------------------------------
+  # Real-Time Mode (hot path)
   rtm_trigger_interval:
-    description: >-
-      RTM checkpoint interval (pipelines.trigger.interval). Records flow continuously; each interval the
-      engine pauses briefly to checkpoint (see docs/latency.md).
+    description: RTM checkpoint interval (pipelines.trigger.interval).
     default: 5 minutes
   rtm_max_partitions:
-    description: >-
-      Kafka reader tasks per RTM flow (maxPartitions). Keep equal to the hub partition count.
-      Cluster slots must exceed the tasks with headroom (tests/test_rtm_resources.py enforces >= 1.2x).
+    description: Kafka reader tasks per RTM flow (maxPartitions); match the hub partition count.
     default: "4"
   rtm_cluster:
-    description: >-
-      Fixed-size classic cluster for each single-stage RTM hop (no autoscale, no Photon, on-demand).
-      Default: 2 x 4-core workers = 8 slots for 4 reader tasks.
+    description: Fixed classic cluster per RTM hop (2 x 4 cores = 8 slots for 4 tasks).
     type: complex
     default:
       label: default
@@ -90,20 +81,18 @@ variables:
         volumes:
           destination: /Volumes/${var.catalog}/${var.schema}/cluster_logs
 
-  # --- Kafka source behavior -------------------------------------------------
+  # Kafka source behavior
   kafka_starting_offsets:
-    description: >-
-      Where a NEW checkpoint starts reading (latest | earliest). Existing checkpoints always resume
-      where they left off; `make reset <env>` full-refreshes to start at the live edge (demo only).
+    description: Where a new checkpoint starts reading (latest | earliest).
     default: latest
   kafka_max_offsets_per_trigger:
     description: Micro-batch cap for the Epic JSON (non-RTM) pipeline.
     default: "50000"
 
-  # --- Generators ------------------------------------------------------------
+  # Generators
   generator_rate:
-    description: Events per second produced by the synthetic generators.
-    default: "50"
+    description: Events per second from the synthetic generators (below ~100/s, Event Hubs partitions stall; see docs/latency.md).
+    default: "200"
 
 targets:
   dev:
