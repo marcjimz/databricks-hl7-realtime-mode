@@ -47,7 +47,8 @@ databricks.yml        variables + targets; include: resources/**
 resources/<type>/     bundle resources grouped by type: jobs/, pipelines/, schemas/, (dashboards/)
 src/hl7rt/            shared library: pure DataFrame transforms, Event Hubs helpers, generators (unit-tested)
 src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path = src/)
-infra/                Terraform only (Azure Event Hubs). tfvars/state are gitignored.
+infra/<stack>/        Terraform, one small stack per folder (eventhubs/, later e.g. network/), each with
+                      its own state + versions.tf/variables.tf/main.tf/outputs.tf. tfvars/state gitignored.
 tests/                pytest with local Spark (.venv via uv)
 docs/                 latency results + design notes
 ```
@@ -55,8 +56,11 @@ docs/                 latency results + design notes
 - Put logic in `src/hl7rt` as functions of DataFrames, so it's testable without a cluster. Keep
   `src/pipelines/*` to decorators + wiring.
 - Throwaway experiments go in `spikes/` (gitignored, never committed).
-- Generators are console scripts in the `hl7rt` wheel (built by the bundle `artifacts:` block), run as
-  serverless `python_wheel_task` jobs with `environment_version: "3"` (Python 3.12).
+- Generators are console scripts in the `hl7rt` wheel. The bundle `artifacts:` block builds it into
+  `.build/` (gitignored; `make clean` removes it), and it runs as serverless `python_wheel_task` jobs with
+  `environment_version: "3"` (Python 3.12).
+- Don't grow a single Terraform folder. Add a new stack under `infra/<stack>/` and target it with
+  `make infra-plan STACK=<stack>`.
 
 ## Real-Time Mode rules (learned in Phase 0, see docs/latency.md)
 
@@ -137,7 +141,7 @@ docs/                 latency results + design notes
 - **Before pushing:** `make test`, `make lint`, `databricks bundle validate -t dev`. For pipeline changes,
   deploy to dev and verify against live data (row counts, quarantine reasons, event-log errors, latency),
   then `make stop dev`.
-- **Infra:** always `make infra-plan` → review → `make infra-apply` (applies only the saved plan).
+- **Infra:** always `make infra-plan [STACK=…]` → review → `make infra-apply [STACK=…]` (applies only the saved plan).
   Never auto-approve. Azure sandbox policy requires an `owner` tag (`var.owner`).
 - **Confirm before** creating paid or outward-facing resources (namespaces, tiers, new clusters), destroying
   anything, or forcing destructive bundle deploys (e.g. schema recreation). Don't bypass those prompts.

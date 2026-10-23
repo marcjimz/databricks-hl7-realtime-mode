@@ -18,11 +18,15 @@ bundle:
 include:
   - resources/**/*.yml
 
+# The hl7rt library (src/hl7rt) is packaged as a wheel for the jobs that import it. Build output goes
+# to .build/ (gitignored); `make clean` removes it.
 artifacts:
   hl7rt:
     type: whl
-    build: uv build --wheel
+    build: uv build --wheel --out-dir .build
     path: .
+    files:
+      - source: .build/hl7rt-*.whl
 
 variables:
   # --- Unity Catalog ---------------------------------------------------------

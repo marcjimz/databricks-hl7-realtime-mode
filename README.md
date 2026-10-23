@@ -32,7 +32,7 @@ Prereqs: Databricks CLI ≥ 0.285, Terraform ≥ 1.5, Azure CLI (logged in), [uv
 
 ```bash
 make install                                         # .venv with dev deps
-cp infra/terraform.tfvars.example infra/terraform.tfvars   # fill in subscription/owner
+cp infra/eventhubs/terraform.tfvars.example infra/eventhubs/terraform.tfvars   # fill in subscription/owner
 make infra-plan && make infra-apply                  # Event Hubs namespace + hubs (reviewed plan)
 make secrets dev                                     # connection string -> secret scope (never printed)
 make deploy dev                                      # bundle validate + deploy
@@ -54,7 +54,7 @@ resources/              bundle resources, grouped by type
 src/
   hl7rt/                shared library (pure transforms, Event Hubs helpers, generators) — unit-tested
   pipelines/            thin SDP pipeline sources that call into hl7rt
-infra/                  Terraform: Azure Event Hubs
+infra/<stack>/          Terraform, one stack per folder (today: eventhubs/), each with its own state
 tests/                  pytest with local Spark
 docs/                   latency results and design notes
 AGENTS.md               principles, patterns, and lessons for contributors and coding agents

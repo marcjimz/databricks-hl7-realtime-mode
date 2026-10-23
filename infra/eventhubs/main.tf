@@ -1,27 +1,12 @@
 # Azure Event Hubs for the HL7 Real-Time Mode demo.
 #
-# One namespace (Standard or Premium, Kafka endpoint enabled) with one hub per layer topic. A single
+# One namespace (Premium by default, Kafka endpoint enabled) with one hub per layer topic. A single
 # namespace-scoped SAS rule (send + listen) is used by every Databricks pipeline; its
 # connection string is never written to the repo. `make secrets <env>` reads the
-# sensitive output below and stores it in the Databricks secret scope.
-
-terraform {
-  required_version = ">= 1.5"
-  required_providers {
-    azurerm = {
-      source  = "hashicorp/azurerm"
-      version = "~> 4.0"
-    }
-  }
-}
+# sensitive output and stores it in the Databricks secret scope.
 
 locals {
   tags = merge(var.tags, { owner = var.owner })
-}
-
-provider "azurerm" {
-  features {}
-  subscription_id = var.subscription_id
 }
 
 resource "azurerm_resource_group" "this" {

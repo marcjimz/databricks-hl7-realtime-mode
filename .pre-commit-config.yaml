@@ -20,7 +20,7 @@ repos:
     hooks:
       - id: terraform-fmt
         name: terraform fmt
-        entry: terraform -chdir=infra fmt -check
+        entry: terraform fmt -check -recursive infra
         language: system
         files: ^infra/.*\.tf$
         pass_filenames: false
