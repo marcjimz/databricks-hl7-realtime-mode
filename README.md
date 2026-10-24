@@ -76,19 +76,23 @@ make generate dev                              # start synthetic HL7 traffic
 make stop dev                                  # stop everything (stops compute billing)
 ```
 
+Or run all of that and the feed in one go: `make demo dev` prints the live latency dashboard URL. The
+[walkthrough](docs/walkthrough.md) is a 20-minute demo script.
+
 All names and sizes are bundle variables in `databricks.yml`. `make help` lists every command.
 
 ## Repo
 
 ```
 databricks.yml     variables and targets
-resources/         pipelines, jobs, schemas (by type)
+resources/         pipelines, jobs, schemas, dashboards (by type)
 src/hl7rt/         the logic: HL7 parsing, gold, subscriptions, Event Hubs helpers, generators
 src/subscriptions/ self-service rule files (one YAML per subscription)
+src/dashboards/    the live latency dashboard (AI/BI)
 src/pipelines/     thin pipeline definitions
 infra/eventhubs/   Terraform for Event Hubs
 tests/             unit tests (local Spark)
-docs/              latency results, the Epic JSON feed improvements
+docs/              latency results, demo walkthrough, the Epic JSON feed improvements
 ```
 
 ## Status
@@ -99,7 +103,7 @@ docs/              latency results, the Epic JSON feed improvements
 | 1 | Scaffold + the existing Epic JSON feed, improved ([details](docs/epic-json.md)) | ✅ |
 | 2 | Raw HL7 → bronze → silver + Delta streaming tables | ✅ |
 | 3 | Gold: encounters, observations, orders | ✅ |
-| 4 | Self-service subscriptions (YAML rules, RTM or micro-batch) | 🔄 in review |
-| 5 | Dashboard and walkthrough | ⏳ |
+| 4 | Self-service subscriptions (YAML rules, RTM or micro-batch) | ✅ |
+| 5 | Live latency dashboard and demo walkthrough | 🔄 in review |
 
 Contributors and coding agents: see [AGENTS.md](AGENTS.md).

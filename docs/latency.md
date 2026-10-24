@@ -329,3 +329,37 @@ soak (03:36–03:48 UTC, ≥ 2 epoch boundaries per pipeline), zero flow WARN/ER
 
 Not verified: driver logs for the subscription clusters (the clusters were gone after stop); micro-batch mode on dev
 (templates are validated and unit-tested only).
+
+---
+
+# Phase 5 — micro-batch subscriptions, dashboard, at-least-once
+
+Same rule, ED registration then a critical lab within 60 minutes, in both modes side by side
+(`ed_critical_lab` RTM, `ed_critical_lab_nrt` micro-batch on serverless). 200 msg/s, 50,000 patients.
+
+12-minute soak (16:38–16:50 UTC), zero flow WARN/ERROR:
+
+| Hop | p50 | p99 | max |
+|---|---|---|---|
+| raw → bronze | 12 | **33** | 919 |
+| bronze → silver | 15 | **32** | 1,750 |
+| silver → gold | 15 | **32** | 953 |
+| gold → `sub_critical_lab` (RTM) | 15 | **31** | 953 |
+| gold → `sub_ed_critical_lab` (RTM join) | 32 | **79** | 1,953 |
+| gold → `sub_ed_critical_lab_nrt` Delta (micro-batch join, first 12 min) | 3,647 | 18,356 | 22,262 |
+| gold → `sub_ed_critical_lab_nrt` topic (micro-batch, via the table) | 14,142 | 33,630 | |
+
+After ~2 hours in steady state (dashboard, last 15 minutes), micro-batch is p50 **2.1 s** / p99 **5.4 s** to Delta.
+The first minutes are slower while join state builds.
+
+**Both modes agree exactly:** 20,297 matches each, 0 found by only one of them.
+
+**Spark's Kafka sink is at-least-once.** When gold resumed from its checkpoint at 15:27, it re-wrote ~17k records
+it had already sent before the previous stop. The micro-batch subscription was running and matched those
+duplicates (1,243 extra rows). The RTM subscriptions started later, from the live edge, and didn't see them.
+In steady state there were 0 duplicates. Consumers that need exactly-once should dedupe on
+`msg_control_id` (+ `set_id` for observations). Delta-side dedupe in the mirror is an open option.
+
+**Join fan-out follows the data.** The synthetic feed gives each patient ~3 ED registrations an hour at 200 msg/s,
+so each critical lab matches several registrations (~160 matches/s in steady state). That's correct for the rule as
+written; real ED traffic is far sparser.

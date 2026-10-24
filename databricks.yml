@@ -23,6 +23,9 @@ variables:
     description: Schema for all tables (created by the bundle).
     default: hl7_realtime
 
+  warehouse_id:
+    description: SQL warehouse for the dashboard (look it up by name per target).
+
   # Event Hubs (Kafka endpoint)
   eh_namespace:
     description: Event Hubs namespace name (terraform output `namespace`). Bootstrap is <namespace>.servicebus.windows.net:9093.
@@ -116,3 +119,6 @@ targets:
     variables:
       catalog: real_time_mode_demo_catalog
       eh_namespace: hl7rtmp-ehns
+      warehouse_id:
+        lookup:
+          warehouse: Serverless Starter Warehouse

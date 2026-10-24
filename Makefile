@@ -11,6 +11,8 @@
 #
 #   make validate dev            databricks bundle validate
 #   make deploy dev              validate + deploy (continuous pipelines start automatically)
+#   make start dev               start every pipeline (resumes checkpoints; already-running ones are left alone)
+#   make demo dev                deploy + start + generate, then print the dashboard URL
 #   make generate dev            start the continuous synthetic feed (runs until generate-stop)
 #   make generate-stop dev       cancel the synthetic feed
 #   make sub-new NAME=x [MODE=rtm|microbatch] [JOIN=1]   new subscription from the templates
@@ -42,11 +44,11 @@ GENERATORS := hl7_generator epic_json_generator
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")
 bundle_var  = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['variables']['$(1)']['value'])")
 
-.PHONY: help install test lint fmt clean infra-plan infra-apply secrets validate deploy generate generate-stop sub-new \
+.PHONY: help install test lint fmt clean infra-plan infra-apply secrets validate deploy start demo generate generate-stop sub-new \
         reset stop destroy guard-target $(ENVS)
 
 help:
-	@sed -n '3,23p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
+	@sed -n '3,25p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 	@echo "  <env> is one of: $(ENVS)"
 
 guard-target:
@@ -102,6 +104,13 @@ validate: guard-target
 deploy: guard-target
 	$(BUNDLE) validate -t $(TARGET)
 	$(BUNDLE) deploy   -t $(TARGET)
+
+start: guard-target
+	@for p in $(PIPELINES); do $(BUNDLE) run -t $(TARGET) --no-wait $$p >/dev/null 2>&1 && echo "started $$p" || echo "running $$p"; done
+
+demo: deploy start generate
+	@echo "dashboard: $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['dashboards']['hl7_latency']['url'])")"
+	@echo "classic RTM clusters take ~9 min to start; latency appears once they're RUNNING. Stop with: make stop $(TARGET)"
 
 generate: guard-target
 	@for j in $(GENERATORS); do $(BUNDLE) run -t $(TARGET) --no-wait $$j; done
