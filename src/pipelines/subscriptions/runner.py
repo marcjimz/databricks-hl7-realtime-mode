@@ -42,7 +42,8 @@ else:
         @dp.table(name=rule.table, comment=f"Subscription {rule.name} (src/subscriptions/{rule.name}.yml).")
         def _table():
             parsed = F.from_json("value", subscriptions.output_schema(rule)).alias("r")
-            return _records().select(F.col("key").cast("string").alias("key"), parsed).select("key", "r.*")
+            keyed = _records().select(F.col("key").cast("string").alias("key"), parsed)
+            return keyed.select("key", "r.*", F.current_timestamp().alias("_ingested_at"))
 
     if "eventhubs" in rule.destinations:
         dp.create_sink(f"{rule.table}_eventhubs", "kafka", rtm.sink_options(spark, topic))
@@ -51,6 +52,7 @@ else:
             if "delta" not in rule.destinations:
                 return _records()
             t = spark.readStream.table(rule.table)
-            return t.select("key", F.to_json(F.struct(*[c for c in t.columns if c != "key"])).alias("value"))
+            fields = [c for c in t.columns if c not in ("key", "_ingested_at")]
+            return t.select("key", F.to_json(F.struct(*fields)).alias("value"))
 
         dp.append_flow(name=f"{rule.table}_to_eventhubs", target=f"{rule.table}_eventhubs")(_to_kafka)

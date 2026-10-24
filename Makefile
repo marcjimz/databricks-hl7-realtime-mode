@@ -114,7 +114,8 @@ generate-stop: guard-target
 
 # New subscription: a rule file from src/subscriptions/_template.yml + a pipeline resource from the mode's template.
 MODE ?= rtm
-SUB_TEMPLATE := resources/pipelines/_templates/sub_$(MODE)$(if $(JOIN),_join).yml.tmpl
+# JOIN only matters for rtm (join settings + a bigger cluster); micro-batch joins need nothing extra.
+SUB_TEMPLATE := resources/pipelines/_templates/sub_$(MODE)$(if $(and $(JOIN),$(filter rtm,$(MODE))),_join).yml.tmpl
 sub-new:
 	@test -n "$(NAME)" || { echo "usage: make sub-new NAME=<name> [MODE=rtm|microbatch] [JOIN=1]"; exit 2; }
 	@test -f $(SUB_TEMPLATE) || { echo "error: no template $(SUB_TEMPLATE)"; exit 2; }
