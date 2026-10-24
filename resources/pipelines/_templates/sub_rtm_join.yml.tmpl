@@ -17,6 +17,11 @@ resources:
             include: ../../src/pipelines/subscriptions/**
       configuration:
         spark.databricks.streaming.realTimeMode.enabled: "true"
+        spark.databricks.streaming.realTimeMode.streamStreamJoin.enabled: "true"
+        spark.sql.streaming.join.stateFormatVersion: "4"
+        spark.sql.streaming.join.stateFormatV4.enabled: "true"
+        spark.sql.streaming.stateStore.rocksdb.mergeOperatorVersion: "2"
+        spark.sql.streaming.realTimeMode.controlMessage.enabled: "true"
         hl7.eh.namespace: ${var.eh_namespace}
         hl7.eh.secret_scope: ${var.eh_secret_scope}
         hl7.eh.secret_key: ${var.eh_secret_key}

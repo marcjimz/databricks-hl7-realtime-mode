@@ -32,8 +32,7 @@ def _records():
 
 
 if rule.mode == "rtm":
-    shuffle = {"spark.sql.shuffle.partitions": conf(spark, "rtm.shuffle_partitions")}
-    extra = {**subscriptions.RTM_JOIN_CONF, **shuffle} if rule.is_join else None
+    extra = {"spark.sql.shuffle.partitions": conf(spark, "rtm.shuffle_partitions")} if rule.is_join else None
     dp.create_sink(rule.table, "kafka", rtm.sink_options(spark, topic))
     dp.update_flow(name=rule.table, target=rule.table, spark_conf=rtm.flow_conf(spark, extra))(_records)
 

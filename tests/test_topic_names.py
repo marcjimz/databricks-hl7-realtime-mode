@@ -11,6 +11,8 @@ from pathlib import Path
 
 import yaml
 
+from hl7rt import subscriptions
+
 ROOT = Path(__file__).resolve().parents[1]
 TOPIC = re.compile(r"\$\{var\.catalog\}\.\$\{var\.schema\}\.(\w+)")
 
@@ -74,8 +76,6 @@ def test_terraform_creates_one_hub_per_table_with_the_same_pattern():
 
 
 def _rules():
-    from hl7rt import subscriptions
-
     return [subscriptions.load(p) for p in sorted((ROOT / "src/subscriptions").glob("[a-z]*.yml"))]
 
 
@@ -92,6 +92,8 @@ def test_each_subscription_rule_has_a_matching_pipeline():
         assert spec.get("serverless") is (rule.mode == "microbatch")
         if rule.is_join and rtm:
             assert int(conf.get("hl7.rtm.stage_tasks_multiplier", 1)) >= 3, f"{rule.name}: size for the join"
+            missing = {k: v for k, v in subscriptions.RTM_JOIN_CONF.items() if conf.get(k) != v}
+            assert not missing, f"{rule.name}: RTM joins need pipeline configuration {missing}"
 
 
 def test_every_subscription_pipeline_has_a_rule():

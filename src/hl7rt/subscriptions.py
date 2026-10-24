@@ -27,6 +27,7 @@ TIME = "msg_dt_tm"  # event time used for `within` and watermarks
 _INTERVAL = re.compile(r"\d+ (second|minute|hour)s?")
 
 # Spark settings Real-Time Mode requires for stream-stream joins (docs: structured-streaming/real-time/setup).
+# They must be pipeline configuration (read at startup), not flow spark_conf; tests/test_topic_names.py checks it.
 RTM_JOIN_CONF = {
     "spark.databricks.streaming.realTimeMode.streamStreamJoin.enabled": "true",
     "spark.sql.streaming.join.stateFormatVersion": "4",
