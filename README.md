@@ -46,15 +46,18 @@ Every field is explained in [`src/subscriptions/_template.yml`](src/subscription
 
 ## Results
 
-Measured on dev (Phase 3, Event Hubs Premium, 200 msg/s, 10 minutes, ~106k messages per hop):
+Measured on dev (200 msg/s, 12 minutes, ~144k messages per hop, Event Hubs Premium):
 
 | Hop | p50 | p99 |
 |---|---|---|
-| raw → bronze | 9 ms | **37 ms** |
+| raw → bronze | 12 ms | **38 ms** |
 | bronze → silver (full HL7 parse) | 15 ms | **47 ms** |
 | silver → gold (encounters, observations, orders) | 15 ms | **32 ms** |
+| gold → subscription: critical lab (one event) | 15 ms | **31 ms** |
+| gold → subscription: ED registration then critical lab within 60 min (join) | 32 ms | **79 ms** |
 
-Every hop is under 200 ms at p99. Each pipeline pauses ~1–2 s every 5 minutes to checkpoint; that's the max.
+Every hop is under 200 ms at p99, and both subscriptions match a SQL check exactly. Each pipeline pauses ~1–2 s every
+5 minutes to checkpoint; that's the max.
 
 Each number is the time from one Event Hubs topic to the next, measured from Event Hubs' own timestamps.
 Details, experiments, and open items: [docs/latency.md](docs/latency.md).
