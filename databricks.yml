@@ -91,7 +91,7 @@ variables:
 
   # Generators
   generator_rate:
-    description: Events per second from the synthetic generators (below ~100/s, Event Hubs partitions stall; see docs/latency.md).
+    description: Events per second from the synthetic generators.
     default: "200"
 
 targets:

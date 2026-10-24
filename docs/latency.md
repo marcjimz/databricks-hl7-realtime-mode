@@ -251,7 +251,7 @@ What it was **not**:
 - **Hot partition.** Partition 0 had the **fewest** records (keys are patient MRNs; 500 synthetic patients).
 - **Network.** All partitions share one endpoint and IP. A continuous probe saw p50 8 ms / p99 < 70 ms on every partition.
 
-## Root cause (observed): lightly written partitions stall
+## First explanation (superseded below): lightly written partitions stall
 During the minute the continuous probe was writing heavily to the bronze hub, Spark's slow partition-0 records
 dropped to **zero**. Re-running at **200 msg/s** (no other change) confirmed it:
 
@@ -276,3 +276,30 @@ intermittently takes 0.5–1 s to ack a write. We have not confirmed the service
 ## Still open
 - Max per hop is still the epoch-boundary pause (~1–2 s every 5 minutes).
 - Confirm the low-rate stall with Azure, and test 1 vs 2 partitions for low-volume hubs.
+
+## Correction: it was the Kafka client configuration
+Our Kafka clients didn't follow Microsoft's Event Hubs guidance
+([Apache Kafka client configurations](https://learn.microsoft.com/azure/event-hubs/apache-kafka-configurations)).
+Azure closes idle connections after 240 s, so `metadata.max.age.ms` and `connections.max.idle.ms` must stay below
+that. Ours were the Kafka defaults (300000 / 540000). Fixed in `hl7rt.eventhubs`:
+
+- Java (Spark source and sink): `metadata.max.age.ms=180000`, `connections.max.idle.ms=180000`,
+  `max.request.size=1000000`, `request.timeout.ms=60000` (already set)
+- librdkafka (generator): `socket.keepalive.enable=true`, `metadata.max.age.ms=180000`, `request.timeout.ms=60000`
+
+Same conditions as the failing run (50 msg/s, 500 patients, 2 PU), 12 minutes, zero flow failures:
+
+| Hop | p99 before | p99 after |
+|---|---|---|
+| raw → bronze | 547 ms | **39 ms** |
+| bronze → silver | 188–312 ms | **94 ms** |
+| silver → gold observations | 47 ms | **32 ms** |
+
+| Hub | partition 0 p99 before | partition 0 p99 after | partitions 1–3 after |
+|---|---|---|---|
+| bronze_hl7 | 875 ms | **35 ms** | 35–47 ms |
+| silver_hl7 | 719 ms | **110 ms** | 63–110 ms |
+
+So the "low-rate partition" explanation above was wrong, and the client config was the cause. The mechanism is
+inferred from the docs (a connection to one Event Hubs broker hitting the 240 s idle close before the client recycled
+it), not traced at the packet level. `tests/test_eventhubs.py` now enforces the limits.

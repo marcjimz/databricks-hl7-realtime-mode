@@ -143,11 +143,12 @@ docs/                 latency results + design notes
   ~800 ms while the other partitions sat at ~45 ms, with no Azure throttling or errors (`az monitor metrics`:
   ThrottledRequests / ServerErrors). Signature: a slow record is followed, from the *same input partition*, by
   on-time records, so the stall is on the output partition, not the Spark task.
-- **Lightly written Event Hubs partitions stall.** At ~10 records/s per partition, writes intermittently take
-  0.5–1 s to ack, and Spark isn't involved (an independent client sees it too). At 200 msg/s (~50/s per partition) it
-  disappears. So soak at realistic volume (`generator_rate` default 200), and give low-volume hubs fewer partitions.
+- **Follow Microsoft's Event Hubs Kafka client settings** (`eventhubs._JAVA_CLIENT` / `_LIBRDKAFKA`). With Kafka
+  defaults (`metadata.max.age.ms` 300 s, `connections.max.idle.ms` 540 s, both above Azure's 240 s idle close), one
+  output partition per hub stalled 0.5–1 s and pushed p99 to ~550–875 ms. With the settings, the same load gives
+  35–47 ms. Our first theory (low per-partition rate) was wrong: check client config before blaming the service.
 - **Uneven keys are expected and harmless at this rate.** Records are keyed by patient MRN (500 synthetic
-  patients), so partitions differ by ~15%. A slow partition with *fewer* records isn't overloaded; it may be underfed (see above).
+  patients), so partitions differ by ~15%. A slow partition with *fewer* records isn't overloaded.
 - **The target bar:** every hop under 200 ms at **p99**, over a soak that spans at least 2 epoch
   boundaries. Report max separately.
 
