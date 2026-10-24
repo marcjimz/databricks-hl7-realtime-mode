@@ -5,17 +5,23 @@ RTM can't write Delta, so this separate pipeline lands the topics for audit, rep
 telemetry (hop_ms / e2e_ms per record, from broker timestamps).
 """
 
+from pathlib import Path
+
 from pyspark import pipelines as dp
 
-from hl7rt import eventhubs, gold, lakehouse
+from hl7rt import eventhubs, gold, lakehouse, subscriptions
 from hl7rt.config import conf
 
 
 def _topic(key: str):
+    return _subscribe(conf(spark, key))
+
+
+def _subscribe(topic: str):
     return (
         spark.readStream.format("kafka")
         .options(**eventhubs.kafka_options_from_conf(spark))
-        .option("subscribe", conf(spark, key))
+        .option("subscribe", topic)
         .option("startingOffsets", conf(spark, "kafka.starting_offsets"))
         .option("maxOffsetsPerTrigger", conf(spark, "kafka.max_offsets_per_trigger"))
         .option("includeHeaders", "true")
@@ -71,3 +77,18 @@ def gold_observations():
           cluster_by=["kafka_timestamp"])  # fmt: skip
 def gold_orders():
     return lakehouse.gold_rows(_topic("topics.gold_orders"), gold.ORDER_SCHEMA)
+
+
+# Every Real-Time Mode subscription rule (src/subscriptions/*.yml) lands its topic in the table of the same name.
+def _subscription_table(rule):
+    @dp.table(name=rule.table, comment=f"Subscription {rule.name} (src/subscriptions/{rule.name}.yml), with latency.",
+              cluster_by=["kafka_timestamp"])  # fmt: skip
+    def _mirror():
+        topic = f"{conf(spark, 'topics.prefix')}.{rule.table}"
+        return lakehouse.subscription_rows(_subscribe(topic), subscriptions.output_schema(rule))
+
+
+for _path in sorted(Path(conf(spark, "subscriptions.dir")).glob("[a-z]*.yml")):
+    _rule = subscriptions.load(_path)
+    if _rule.mode == "rtm" and "delta" in _rule.destinations:
+        _subscription_table(_rule)

@@ -62,15 +62,21 @@ def _pipeline_resources():
             yield f, name, spec
 
 
+def _source_dir(spec) -> str:
+    """The src/pipelines/<dir> a resource runs (from its libraries glob). Subscriptions share one runner."""
+    (lib,) = spec["libraries"]
+    return lib["glob"]["include"].split("/pipelines/")[1].split("/")[0]
+
+
 def test_every_pipeline_has_resource():
-    names = {name for _, name, _ in _pipeline_resources()}
+    used = {_source_dir(spec) for _, _, spec in _pipeline_resources()}
     sources = {p.name for p in (SRC / "pipelines").iterdir() if p.is_dir() and not p.name.startswith("_")}
-    assert sources <= names, f"pipeline source dirs without a bundle resource: {sorted(sources - names)}"
+    assert sources <= used, f"pipeline source dirs without a bundle resource: {sorted(sources - used)}"
 
 
 def test_required_config_keys_are_wired():
     for f, name, spec in _pipeline_resources():
         configured = {k.removeprefix("hl7.") for k in spec.get("configuration", {}) if k.startswith("hl7.")}
-        needed = _keys_for(sorted((SRC / "pipelines" / name).rglob("*.py")))
+        needed = _keys_for(sorted((SRC / "pipelines" / _source_dir(spec)).rglob("*.py")))
         missing = needed - configured
         assert not missing, f"{f.name}:{name} is missing configuration for: {sorted('hl7.' + k for k in missing)}"

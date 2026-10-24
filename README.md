@@ -11,8 +11,8 @@ Lakeflow Spark Declarative Pipelines, and Azure Event Hubs (Kafka endpoint).
 ```
 HOT PATH (Real-Time Mode, ms)
   HL7 source ─► raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_hl7 ─► gold ─► gold_encounters
-                                                     │                          gold_observations
-                                                     └─► quarantine_hl7         gold_orders ─► subscriptions (Phase 4)
+                                                     │                          gold_observations ─► subscriptions ─► sub_*
+                                                     └─► quarantine_hl7         gold_orders
 
 NEAR-REAL-TIME PATH (seconds)
   every topic ─► the Delta streaming table of the same name (audit, BI, replay, latency telemetry)
@@ -25,6 +25,24 @@ NEAR-REAL-TIME PATH (seconds)
   and orders (ORM).
 - **Naming:** each topic is named after the table it lands in, `<catalog>.<schema>.<table>`
   (e.g. `real_time_mode_demo_catalog.hl7_realtime.silver_hl7`).
+
+## Subscribe (self-service)
+
+A team describes what it wants in one YAML file, and the platform runs it. Two rule shapes:
+
+- **One event:** "a critical lab result" (`src/subscriptions/critical_lab.yml`)
+- **Event A, then event B for the same patient within N minutes:** "ED registration, then a critical lab within
+  60 minutes" (`src/subscriptions/ed_critical_lab.yml`)
+
+```bash
+make sub-new NAME=my_alert MODE=rtm JOIN=1   # or MODE=microbatch; copies the templates
+#   edit src/subscriptions/my_alert.yml (sources, filters, window, output columns)
+make infra-plan && make infra-apply          # creates the Event Hubs topic sub_my_alert
+make deploy dev                              # runs it; results in topic + table <catalog>.<schema>.sub_my_alert
+```
+
+`rtm` delivers in milliseconds on a classic cluster. `microbatch` delivers in seconds on serverless.
+Every field is explained in [`src/subscriptions/_template.yml`](src/subscriptions/_template.yml).
 
 ## Results
 
@@ -62,7 +80,8 @@ All names and sizes are bundle variables in `databricks.yml`. `make help` lists 
 ```
 databricks.yml     variables and targets
 resources/         pipelines, jobs, schemas (by type)
-src/hl7rt/         the logic: HL7 parsing, gold, Event Hubs helpers, generators
+src/hl7rt/         the logic: HL7 parsing, gold, subscriptions, Event Hubs helpers, generators
+src/subscriptions/ self-service rule files (one YAML per subscription)
 src/pipelines/     thin pipeline definitions
 infra/eventhubs/   Terraform for Event Hubs
 tests/             unit tests (local Spark)
@@ -76,8 +95,8 @@ docs/              latency results, the Epic JSON feed improvements
 | 0 | Feasibility: Real-Time Mode latency, sizing, Event Hubs tier | ✅ |
 | 1 | Scaffold + the existing Epic JSON feed, improved ([details](docs/epic-json.md)) | ✅ |
 | 2 | Raw HL7 → bronze → silver + Delta streaming tables | ✅ |
-| 3 | Gold: encounters, observations, orders | 🔄 in review |
-| 4 | Self-service subscriptions | ⏳ |
+| 3 | Gold: encounters, observations, orders | ✅ |
+| 4 | Self-service subscriptions (YAML rules, RTM or micro-batch) | 🔄 in review |
 | 5 | Dashboard and walkthrough | ⏳ |
 
 Contributors and coding agents: see [AGENTS.md](AGENTS.md).

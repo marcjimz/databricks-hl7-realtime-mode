@@ -7,6 +7,8 @@
 
 locals {
   tags = merge(var.tags, { owner = var.owner })
+  # One hub per subscription rule file (src/subscriptions/<name>.yml -> sub_<name>); `_template.yml` is skipped.
+  subscriptions = [for f in fileset("${path.module}/../../src/subscriptions", "[a-z]*.yml") : "sub_${trimsuffix(f, ".yml")}"]
 }
 
 resource "azurerm_resource_group" "this" {
@@ -26,7 +28,7 @@ resource "azurerm_eventhub_namespace" "this" {
 
 # Hub name = the Delta table it lands in: <catalog>.<schema>.<table>.
 resource "azurerm_eventhub" "topics" {
-  for_each          = toset(var.tables)
+  for_each          = toset(concat(var.tables, local.subscriptions))
   name              = "${var.catalog}.${var.schema}.${each.value}"
   namespace_id      = azurerm_eventhub_namespace.this.id
   partition_count   = var.partition_count

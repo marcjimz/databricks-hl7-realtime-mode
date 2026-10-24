@@ -56,7 +56,7 @@ variable "schema" {
 }
 
 variable "tables" {
-  description = "One hub per Delta table the hot path lands in, plus the existing Epic JSON feed. (Standard tier: max 10 hubs.)"
+  description = "One hub per Delta table the hot path lands in, plus the Epic JSON feed. Subscription hubs come from src/subscriptions/."
   type        = list(string)
   default = [
     "epic_near_realtime_json_from_eventhub",
@@ -67,8 +67,6 @@ variable "tables" {
     "gold_encounters",
     "gold_observations",
     "gold_orders",
-    "sub_critical_lab",
-    "sub_ed_arrival_surge",
   ]
 }
 

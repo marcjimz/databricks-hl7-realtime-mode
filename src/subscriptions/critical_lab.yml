@@ -1,0 +1,9 @@
+name: critical_lab
+mode: rtm
+key: patient_id
+when:
+  source: gold_observations
+  filter: "abnormal_flag IN ('HH', 'LL')"
+output: [patient_id, visit_id, patient_facility, msg_control_id, observation_cd, observation_cd_desc, value_num,
+         units, abnormal_flag, observation_dt_tm]
+destinations: [eventhubs, delta]

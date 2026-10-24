@@ -1,0 +1,13 @@
+# An ED registration followed by a critical lab for the same patient within 60 minutes.
+name: ed_critical_lab
+mode: rtm
+key: patient_id
+when:
+  source: gold_encounters
+  filter: "event = 'A04' AND patient_class = 'E'"
+then:
+  source: gold_observations
+  filter: "abnormal_flag IN ('HH', 'LL')"
+within: 60 minutes
+output: [patient_id, patient_facility, when.visit_id, observation_cd, observation_cd_desc, value_num, abnormal_flag]
+destinations: [eventhubs, delta]
