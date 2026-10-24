@@ -126,8 +126,9 @@ docs/                 latency results + design notes
   - All subscriptions share the runner `src/pipelines/subscriptions/runner.py`.
   - Rule shapes: `when` only (stateless filter), or `when` + `then` + `within` (stream-stream inner join on `key`
     over `msg_dt_tm`, with watermarks).
-  - RTM joins need `subscriptions.RTM_JOIN_CONF` and the `rtm_join_cluster` (2 sources × 4 + 4 shuffle = 12 tasks
-    → 16 slots).
+  - RTM joins need `subscriptions.RTM_JOIN_CONF` in the **pipeline `configuration`** and the `rtm_join_cluster`
+    (2 sources × 4 + 4 shuffle = 12 tasks → 16 slots). Set as flow `spark_conf`, the join fails with
+    `STREAM_STREAM_JOIN_NOT_SUPPORTED`.
   - RTM rules land in Delta via the mirror; micro-batch rules write Delta directly.
   - Don't chain a second stateful operator after the join: RTM runs in update mode.
   - `tests/test_topic_names.py` keeps the rule, resource, hub, and mode consistent.
