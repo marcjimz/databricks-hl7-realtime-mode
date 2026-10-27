@@ -43,7 +43,16 @@ def bronze_df(spark):
 
     def _make(*event_values: str):
         rows = [
-            (f"key{i}", v, "epic.json", 0, i, "2026-10-23 12:00:00", 1, "2026-10-23 12:00:01")
+            (
+                f"key{i}",
+                v,
+                "real_time_mode_demo_catalog.hl7_realtime.epic_near_realtime_json_from_eventhub",
+                0,
+                i,
+                "2026-10-23 12:00:00",
+                1,
+                "2026-10-23 12:00:01",
+            )
             for i, v in enumerate(event_values)
         ]
         return spark.createDataFrame(

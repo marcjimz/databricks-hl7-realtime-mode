@@ -1,105 +1,83 @@
 # HL7 v2 on Spark Real-Time Mode
 
-A working reference for **millisecond HL7 processing on Databricks** with
-[Real-Time Mode](https://www.databricks.com/blog/introducing-real-time-mode-apache-sparktm-structured-streaming)
-for Structured Streaming, on Lakeflow Spark Declarative Pipelines and Azure Event Hubs.
+Millisecond HL7 processing on Databricks: raw HL7 v2 in, parsed and broken into clinical entities in tens of
+milliseconds per layer, with every layer also landed in Delta.
+
+Built on [Real-Time Mode](https://www.databricks.com/blog/introducing-real-time-mode-apache-sparktm-structured-streaming),
+Lakeflow Spark Declarative Pipelines, and Azure Event Hubs (Kafka endpoint).
+
+## What this does
 
 ```
-                     HOT PATH — Real-Time Mode, Event Hubs topics between layers
- HL7 source ─► hl7.raw ─► bronze ─► hl7.bronze ─► silver ─► hl7.silver ─► gold ─► hl7.gold.* ─► subscriptions ─► hl7.sub.*
-                                                                                                   (self-service teams)
-                     LAKEHOUSE PATH — SDP micro-batch, Unity Catalog
- every topic ─► Delta streaming tables (audit, replay, BI) + per-record latency telemetry
+HOT PATH (Real-Time Mode, ms)
+  HL7 source ─► raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_hl7 ─► gold ─► gold_encounters
+                                                     │                          gold_observations
+                                                     └─► quarantine_hl7         gold_orders ─► subscriptions (Phase 4)
+
+NEAR-REAL-TIME PATH (seconds)
+  every topic ─► the Delta streaming table of the same name (audit, BI, replay, latency telemetry)
 ```
 
-**Measured** on the repo's pipelines (Phase 2, Event Hubs Premium): raw → bronze **32 ms** and bronze → silver
-(full HL7 parse) **125 ms** at p99. See
-[docs/latency.md](docs/latency.md) for every experiment, root cause, and open item.
+- **Bronze** keeps the raw message and adds a small header (type, control id, facility).
+- **Silver** parses HL7 with plain Spark (no JARs or UDFs) into the customer's existing 34-column Epic silver
+  contract plus every lab result. Bad messages go to quarantine with a reason.
+- **Gold** splits each message into what teams consume: encounters (ADT), observations (one per lab result),
+  and orders (ORM).
+- **Naming:** each topic is named after the table it lands in, `<catalog>.<schema>.<table>`
+  (e.g. `real_time_mode_demo_catalog.hl7_realtime.silver_hl7`).
 
-## Status
+## Results
 
-| Phase | Scope | State |
+Measured on dev (Phase 3, Event Hubs Premium, 200 msg/s, 10 minutes, ~106k messages per hop):
+
+| Hop | p50 | p99 |
 |---|---|---|
-| 0 | Feasibility: RTM latency per hop, sizing, Event Hubs tier | ✅ [docs/latency.md](docs/latency.md) |
-| 1 | Scaffold + the existing Epic JSON feed (bronze/silver), improved | ✅ |
-| 2 | Raw HL7 → bronze → silver on RTM (native Spark HL7 parsing) + Delta streaming tables + live telemetry | 🔄 in review |
-| 3 | Gold breakdown: encounters, observations (one row per OBX), orders | ⏳ |
-| 4 | Self-service subscription template (filters, windows) → Event Hubs + Delta | ⏳ |
-| 5 | Demo polish: dashboard, walkthrough | ⏳ |
+| raw → bronze | 9 ms | **37 ms** |
+| bronze → silver (full HL7 parse) | 15 ms | **47 ms** |
+| silver → gold (encounters, observations, orders) | 15 ms | **32 ms** |
 
-## Quickstart
+Every hop is under 200 ms at p99. Each pipeline pauses ~1–2 s every 5 minutes to checkpoint; that's the max.
+
+Each number is the time from one Event Hubs topic to the next, measured from Event Hubs' own timestamps.
+Details, experiments, and open items: [docs/latency.md](docs/latency.md).
+
+## Setup
 
 Prereqs: Databricks CLI ≥ 0.285, Terraform ≥ 1.5, Azure CLI (logged in), [uv](https://docs.astral.sh/uv/).
 
 ```bash
-make install                                         # .venv with dev deps
-cp infra/eventhubs/terraform.tfvars.example infra/eventhubs/terraform.tfvars   # fill in subscription/owner
-make infra-plan && make infra-apply                  # Event Hubs namespace + hubs (reviewed plan)
-make secrets dev                                     # connection string -> secret scope (never printed)
-make deploy dev                                      # bundle validate + deploy
-make generate dev                                    # continuous synthetic feed (until generate-stop)
-make stop dev                                        # stop pipelines + generators when done
+make install                                   # local dev environment
+cp infra/eventhubs/terraform.tfvars.example infra/eventhubs/terraform.tfvars   # subscription, owner, catalog
+make infra-plan && make infra-apply            # Event Hubs namespace + one hub per table
+make secrets dev                               # connection string -> Databricks secret scope
+make deploy dev                                # deploy; pipelines start automatically
+make generate dev                              # start synthetic HL7 traffic
+make stop dev                                  # stop everything (stops compute billing)
 ```
 
-`make help` lists every target. If several CLI profiles match the workspace host, set
-`DATABRICKS_CONFIG_PROFILE`.
+All names and sizes are bundle variables in `databricks.yml`. `make help` lists every command.
 
-## Layout
+## Repo
 
 ```
-databricks.yml          bundle: variables + targets; includes resources/**
-resources/              bundle resources, grouped by type
-  jobs/                 generators (and later: subscription jobs)
-  pipelines/            SDP pipelines: hl7_bronze, hl7_silver (RTM hot path), lakehouse (streaming tables), epic_json
-  schemas/              Unity Catalog schema + cluster_logs volume
-src/
-  hl7rt/                shared library (pure transforms, Event Hubs helpers, generators) — unit-tested
-  pipelines/            thin SDP pipeline sources that call into hl7rt
-infra/<stack>/          Terraform, one stack per folder (today: eventhubs/), each with its own state
-tests/                  pytest with local Spark
-docs/                   latency results and design notes
-AGENTS.md               principles, patterns, and lessons for contributors and coding agents
+databricks.yml     variables and targets
+resources/         pipelines, jobs, schemas (by type)
+src/hl7rt/         the logic: HL7 parsing, gold, Event Hubs helpers, generators
+src/pipelines/     thin pipeline definitions
+infra/eventhubs/   Terraform for Event Hubs
+tests/             unit tests (local Spark)
+docs/              latency results, the Epic JSON feed improvements
 ```
 
-## Configuration
+## Status
 
-Everything environment-specific is a bundle variable (`databricks.yml`). Override per target or with
-`--var name=value`.
-
-| Variable | Default | Purpose |
+| Phase | Scope | |
 |---|---|---|
-| `catalog` | — (per target) | Existing UC catalog |
-| `schema` | `hl7_realtime` | Schema created by the bundle |
-| `eh_namespace` | — (per target) | Event Hubs namespace (`terraform output namespace`) |
-| `eh_secret_scope` / `eh_secret_key` | `hl7-rtm` / `eh-connection-string` | Where the connection string lives |
-| `epic_json_topic` | `epic.json` | Existing Epic JSON feed topic |
-| `hl7_raw_topic` / `hl7_bronze_topic` / `hl7_silver_topic` / `hl7_quarantine_topic` | `hl7.raw` / `hl7.bronze` / `hl7.silver` / `hl7.quarantine` | Hot-path topics |
-| `rtm_trigger_interval` | `5 minutes` | RTM checkpoint interval (epoch length) |
-| `rtm_max_partitions` | `4` | Kafka reader tasks per RTM flow (match hub partitions) |
-| `rtm_cluster` | 2 × m6id.xlarge, on-demand | Fixed RTM cluster (complex variable; override per target) |
-| `kafka_starting_offsets` | `latest` | Start point for a **new** checkpoint only |
-| `kafka_max_offsets_per_trigger` | `50000` | Micro-batch cap (Epic JSON pipeline) |
-| `generator_rate` | `50` | Synthetic events/second |
+| 0 | Feasibility: Real-Time Mode latency, sizing, Event Hubs tier | ✅ |
+| 1 | Scaffold + the existing Epic JSON feed, improved ([details](docs/epic-json.md)) | ✅ |
+| 2 | Raw HL7 → bronze → silver + Delta streaming tables | ✅ |
+| 3 | Gold: encounters, observations, orders | 🔄 in review |
+| 4 | Self-service subscriptions | ⏳ |
+| 5 | Dashboard and walkthrough | ⏳ |
 
-The connection string is only ever in the secret scope: `make secrets` pipes it from Terraform output, and
-`tests/test_no_secrets.py` (also a pre-commit hook) fails if one is ever committed.
-
-## The existing Epic JSON feed (Phase 1)
-
-`src/pipelines/epic_json/` is a drop-in replacement for the customer's current bronze/silver pipeline.
-Table names and the silver column contract (names, order, types) are unchanged. What changed:
-
-| | Before | After |
-|---|---|---|
-| Field extraction | 34× `get(filter(columns, x -> x.name = '…'), 0)` per row | `columns` → map once, one lookup per field |
-| Throughput (local, 300k rows) | ~46k rows/s | ~71–83k rows/s (**~1.7×**) |
-| Malformed timestamp | `to_timestamp` raises under ANSI → **the stream fails** | `NULL` (HL7 DTM + ISO-8601 parsed by shape) |
-| Bad payloads | All-null rows in silver | Quarantine table with `reason` + Kafka coordinates |
-| Config / secrets | Hardcoded namespace/hub, key inline | Bundle variables + secret scope |
-| Bronze layout | `pipelines.autoOptimize.zOrderCols` | Liquid clustering on `kafka_timestamp` |
-
-> Note for an existing deployment: switching bronze from Z-order to `cluster_by` applies to the new table; an
-> existing table keeps its layout until it's rebuilt.
-
-Starting offsets: Spark's Kafka source resumes from its **checkpoint**, not the consumer group. `make reset <env>`
-(full refresh) starts at the live edge, which is for demos only. In production, always resume from the checkpoint.
+Contributors and coding agents: see [AGENTS.md](AGENTS.md).

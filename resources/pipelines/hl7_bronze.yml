@@ -1,4 +1,4 @@
-# Hot path, bronze — Real-Time Mode: hl7.raw -> hl7.bronze. One RTM flow on its own fixed-size cluster.
+# Hot path, bronze — Real-Time Mode: raw_hl7 -> bronze_hl7 topics. One RTM flow on its own fixed-size cluster.
 resources:
   pipelines:
     hl7_bronze:

@@ -33,7 +33,7 @@ TF      := terraform -chdir=infra/$(STACK)
 TF_EH   := terraform -chdir=infra/eventhubs
 
 # Hot-path RTM pipelines first, then the near-real-time mirror and the Epic JSON feed.
-PIPELINES  := hl7_bronze hl7_silver lakehouse epic_json
+PIPELINES  := hl7_bronze hl7_silver hl7_gold lakehouse epic_json
 GENERATORS := hl7_generator epic_json_generator
 
 # Resolve a deployed resource id from the bundle summary: $(call resource_id,pipelines,epic_json)
@@ -104,8 +104,11 @@ deploy: guard-target
 generate: guard-target
 	@for j in $(GENERATORS); do $(BUNDLE) run -t $(TARGET) --no-wait $$j; done
 
+# Waits until the runs have actually stopped, so a following `make generate` doesn't queue behind them.
 generate-stop: guard-target
-	@for j in $(GENERATORS); do $(DBX) jobs cancel-all-runs --job-id $(call resource_id,jobs,$$j) >/dev/null && echo "cancelled $$j"; done
+	@for j in $(GENERATORS); do id=$(call resource_id,jobs,$$j); $(DBX) jobs cancel-all-runs --job-id $$id >/dev/null; \
+	  while [ "$$($(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))')" != "0" ]; do sleep 5; done; \
+	  echo "stopped $$j"; done
 
 # Demo-only: discards checkpoints so streams start at kafka_starting_offsets (latest) instead of
 # resuming. Production should always resume from the checkpoint so no message is skipped.

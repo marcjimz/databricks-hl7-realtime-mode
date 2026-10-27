@@ -110,7 +110,17 @@ def test_payload_column_is_original_event_value(bronze_df):
 
 def test_to_bronze_casts_kafka_record(spark):
     kafka = spark.createDataFrame(
-        [(b"k", b"v", "epic.json", 2, 7, datetime(2026, 10, 23, 12), 1)],
+        [
+            (
+                b"k",
+                b"v",
+                "real_time_mode_demo_catalog.hl7_realtime.epic_near_realtime_json_from_eventhub",
+                2,
+                7,
+                datetime(2026, 10, 23, 12),
+                1,
+            )
+        ],
         "key binary, value binary, topic string, partition int, offset long, timestamp timestamp, timestampType int",
     )
     out = epic_json.to_bronze(kafka)

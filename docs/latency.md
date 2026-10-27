@@ -210,3 +210,69 @@ the same flow over a tiny sample, where one boundary pause dominates.
 - Silver's ~2 s boundary pause vs bronze's ~1 s: planning a larger projection each epoch. A further cut is
   possible (fewer expressions); not needed for the p99 bar.
 - Max per hop is still the epoch-boundary pause (~1–3 s every 5 minutes, ~0.1–0.6% of messages).
+
+---
+
+# Phase 3 — gold, and the slow-partition investigation
+
+Hot path is now raw → bronze → silver → gold (3 topics) on RTM, each hop on its own 2-worker classic cluster.
+Topics were renamed to `<catalog>.<schema>.<table>` (hubs recreated), so every pipeline started from fresh
+checkpoints. Event Hubs Premium, eastus. The workspace is on AWS us-east-1, so every hop crosses clouds over the
+public internet (single namespace endpoint; ~8 ms per produce round trip).
+
+## Gold works first time
+- One flow explodes each silver record into encounter / observation / order records, routed by `topic`.
+- Driver logs show **zero** `grows beyond 64 KB` compile failures, so whole-stage codegen stays on.
+- silver → gold p99 **46–47 ms** on all three topics at 50 msg/s and **32 ms** at 200 msg/s.
+
+## The problem: one slow partition at 50 msg/s
+12-minute soak at 50 msg/s (≈42k msgs/hop, zero flow failures):
+
+| Hop | p50 | p99 | max |
+|---|---|---|---|
+| raw → bronze | 12 | **547** ❌ | 2,235 |
+| bronze → silver | 15 | **188** | 2,266 |
+| silver → gold (3 topics) | 15 | **46–47** ✅ | ~1,100 |
+
+Grouping by the **output** Event Hubs partition (read straight from the topic with `read_kafka` in SQL) isolated it:
+
+| Hub | partition 0 p99 | partitions 1–3 p99 |
+|---|---|---|
+| bronze_hl7 | 875 ms (631 slow) | 41–47 ms |
+| silver_hl7 | 719 ms (202 slow) | 32–47 ms |
+| gold_observations | 47 ms | 32–47 ms |
+
+What it was **not**:
+- **Spark.** A slow record was followed, from the same input partition, by on-time records written to other output
+  partitions, so the task never stalled. An independent librdkafka client (one-off serverless job, no Spark) writing
+  ~20 records/s per partition saw the same 700–900 ms acks on bronze-hub partitions.
+- **Capacity.** Raising the namespace from 1 to 2 PU changed nothing (bronze p0 p99 695 ms). Azure metrics showed no
+  ThrottledRequests, ServerErrors, or UserErrors.
+- **Hot partition.** Partition 0 had the **fewest** records (keys are patient MRNs; 500 synthetic patients).
+- **Network.** All partitions share one endpoint and IP. A continuous probe saw p50 8 ms / p99 < 70 ms on every partition.
+
+## Root cause (observed): lightly written partitions stall
+During the minute the continuous probe was writing heavily to the bronze hub, Spark's slow partition-0 records
+dropped to **zero**. Re-running at **200 msg/s** (no other change) confirmed it:
+
+| Hop (200 msg/s, 10 min, ≈106k msgs/hop) | p50 | p99 | max |
+|---|---|---|---|
+| producer → raw (crosses clocks) | −4 | 13 | 378 |
+| raw → bronze | 9 | **37** ✅ | 750 |
+| bronze → silver | 15 | **47** ✅ | 2,162 |
+| silver → gold encounters / observations / orders | 15 | **32** ✅ | ~900 |
+| raw → gold (3 hops, end to end) | 31 | **~290** | |
+
+Partition 0 now matches the others (bronze p0 p99 39 ms, silver p0 47 ms). At 50 msg/s each partition received ~12
+records/s, and partition 0, the lightest, received ~10/s. Below roughly that rate, an Event Hubs partition
+intermittently takes 0.5–1 s to ack a write. We have not confirmed the service-side mechanism with Azure.
+
+**Implications for production:**
+- A real Epic feed at hospital volume is well above this rate. For low-volume hubs, use **fewer partitions** so each
+  stays busy (RTM `maxPartitions` and slots shrink with it), or confirm the behaviour with Azure support.
+- The demo generator now defaults to 200 msg/s (`generator_rate`).
+- The namespace was left at 2 PU after the test; 1 PU handled the same load in Phase 0.
+
+## Still open
+- Max per hop is still the epoch-boundary pause (~1–2 s every 5 minutes).
+- Confirm the low-rate stall with Azure, and test 1 vs 2 partitions for low-volume hubs.

@@ -1,4 +1,4 @@
-# Hot path, silver — Real-Time Mode: hl7.bronze -> hl7.silver | hl7.quarantine (routed per record by one flow).
+# Hot path, silver — Real-Time Mode: bronze_hl7 -> silver_hl7 | quarantine_hl7 topics (routed per record by one flow).
 resources:
   pipelines:
     hl7_silver:

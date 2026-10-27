@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from pyspark.sql import functions as F
 
 import hl7_samples as s
-from hl7rt import hl7v2, lakehouse
+from hl7rt import gold, hl7v2, lakehouse
 from test_epic_json import CUSTOMER_SILVER_COLUMNS
 
 T0 = datetime(2026, 10, 23, 12, 0, 0)
@@ -31,7 +31,15 @@ def _bronze_value(spark, msg, raw_ts):
 
 def _silver_value(spark, msg, raw_ts, bronze_ts):
     bronze = _kafka(spark, [(_bronze_value(spark, msg, raw_ts), bronze_ts)])
-    return hl7v2.to_silver_records(bronze, "hl7.silver", "hl7.quarantine").first().value
+    return (
+        hl7v2.to_silver_records(
+            bronze,
+            "real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
+            "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
+        )
+        .first()
+        .value
+    )
 
 
 def test_raw_mirror_measures_producer_to_broker(spark):
@@ -60,8 +68,12 @@ def test_silver_mirror_keeps_contract_and_measures(spark):
 
 def test_quarantine_mirror(spark):
     bronze = _kafka(spark, [(_bronze_value(spark, "garbage", T0), T0 + timedelta(milliseconds=5))])
-    q = hl7v2.to_silver_records(bronze, "hl7.silver", "hl7.quarantine").first()
-    assert q.topic == "hl7.quarantine"
+    q = hl7v2.to_silver_records(
+        bronze,
+        "real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
+        "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
+    ).first()
+    assert q.topic == "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7"
     row = lakehouse.quarantine_rows(_kafka(spark, [(q.value, T0 + timedelta(milliseconds=9))])).first()
     assert (row.reason, row.hl7, row.hop_ms) == ("not_hl7", "garbage", 4.0)
 
@@ -71,3 +83,15 @@ def test_mirror_rows_have_ingest_time(spark):
     out = lakehouse.bronze_rows(_kafka(spark, [(v, T0)]))
     assert "_ingested_at" in out.columns
     assert out.select(F.col("_ingested_at").isNotNull()).first()[0]
+
+
+def test_gold_mirror_measures_silver_to_gold(spark):
+    silver = _kafka(spark, [(_silver_value(spark, s.oru_r01(), T0, T0 + timedelta(milliseconds=20)),
+                             T0 + timedelta(milliseconds=35))])  # fmt: skip
+    obs = gold.to_gold_records(silver, "e", "real_time_mode_demo_catalog.hl7_realtime.gold_observations", "o").first()
+    out = lakehouse.gold_rows(_kafka(spark, [(obs.value, T0 + timedelta(milliseconds=50))]), gold.OBSERVATION_SCHEMA)
+    assert out.columns[: len(gold.OBSERVATION_SCHEMA)] == gold.OBSERVATION_SCHEMA.fieldNames()
+    row = out.first()
+    assert (row.observation_cd, row.value_num) == ("2823-3", 6.8)
+    assert (row.hop_ms, row.e2e_ms) == (15.0, 50.0)
+    assert row.kafka_timestamp == T0 + timedelta(milliseconds=50)

@@ -11,9 +11,9 @@ A customer-facing reference for **millisecond HL7 v2 processing** on Databricks 
 
 ```
 HOT PATH (RTM, Event Hubs topics between every layer)
-  hl7.raw ─► bronze ─► hl7.bronze ─► silver ─► hl7.silver ─► gold ─► hl7.gold.* ─► subscriptions ─► hl7.sub.*
+  raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_hl7 ─► gold ─► gold_* ─► subscriptions ─► sub_*
 LAKEHOUSE PATH (SDP micro-batch, off the hot path)
-  every topic ─► Delta streaming tables (audit, replay, BI) + per-record latency telemetry
+  every topic ─► the Delta streaming table of the same name (audit, replay, BI) + per-record latency telemetry
 ```
 
 - Layers are **raw → bronze → silver → gold → self-service subscriptions**. Call the last layer
@@ -27,17 +27,22 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
    scope/key, catalog/schema, offsets, rates, and sizing. Bundle variables (`databricks.yml`) flow into
    pipeline `configuration:` as `hl7.<key>` and are read with `hl7rt.config.conf(spark, "<key>")`.
    `tests/test_config_wiring.py` enforces this. Never hardcode names in `src/`.
-2. **No secrets anywhere in the repo.** The Event Hubs connection string lives only in a Databricks
+2. **A topic is named after the Delta table it lands in: `<catalog>.<schema>.<table>`.** Bundle topic variables
+   default to `${var.catalog}.${var.schema}.<table>`, Terraform names hubs from `catalog`/`schema`/`tables`, and the
+   mirror lands each topic in the table of that name. New layers and subscriptions follow the same rule.
+   `tests/test_topic_names.py` enforces it. Renaming a hub recreates it (data is dropped), so pipelines then need
+   `make reset` (new checkpoints).
+3. **No secrets anywhere in the repo.** The Event Hubs connection string lives only in a Databricks
    secret scope (`make secrets <env>` pipes it from Terraform output). `tests/test_no_secrets.py` enforces
    this. Don't print secrets in logs or command output.
-3. **Native Spark for parsing; no JARs or UDFs on the hot path.** HL7 v2 is delimited text, so use
+4. **Native Spark for parsing; no JARs or UDFs on the hot path.** HL7 v2 is delimited text, so use
    `split` / `try_element_at` / `try_to_timestamp`. A full parse costs less than the 16 ms measurement
    resolution.
-4. **Delta is never an RTM source or sink.** RTM hops go Kafka → Kafka. Delta tables are written by
+5. **Delta is never an RTM source or sink.** RTM hops go Kafka → Kafka. Delta tables are written by
    separate non-RTM SDP pipelines that read the topics.
-5. **Measure before claiming.** Performance "improvements" must be benchmarked against the original.
+6. **Measure before claiming.** Performance "improvements" must be benchmarked against the original.
    Phase 1's first "improved" silver was 2.4× *slower* until measured and fixed.
-6. **Honesty in reporting.** Report p99 *and* max, say what wasn't verified, and correct earlier
+7. **Honesty in reporting.** Report p99 *and* max, say what wasn't verified, and correct earlier
    conclusions in `docs/latency.md` when evidence changes them.
 
 ## Repo layout
@@ -69,7 +74,7 @@ docs/                 latency results + design notes
   `tests/test_rtm_resources.py` enforces continuous, RTM flag, classic, no Photon, fixed workers, on-demand,
   slot headroom ≥ 1.2×, and no development-mode targets.
 - **Route, don't fork:** a sink created without a `topic` routes each record by its `topic` column. Silver
-  writes `hl7.silver` and `hl7.quarantine` from **one** flow (one read, no extra slots), not two flows.
+  writes the silver and quarantine topics from **one** flow (one read, no extra slots), not two flows.
 - **Enable it in SDP:** pipeline `continuous: true` + `spark.databricks.streaming.realTimeMode.enabled: "true"`
   in `configuration`, and `@dp.update_flow(target=<kafka sink>, spark_conf={"pipelines.trigger": "RealTime",
   "pipelines.trigger.interval": "5 minutes"})`. Sinks are `dp.create_sink(name, "kafka", {..., "topic": ...})`.
@@ -97,7 +102,9 @@ docs/                 latency results + design notes
 - **Epoch boundaries:** every `pipelines.trigger.interval`, each pipeline pauses briefly (measured
   ~0.6–1.6 s, affecting ~0.1% of messages). p99 is unaffected, but max is. This is an open item.
 - **Event Hubs Premium is required.** Standard's multi-tenant tail missed 200 ms p99 on two hops;
-  Premium gives ~31 ms p99 per hop.
+  Premium gives ~31–47 ms p99 per hop. More PUs didn't fix the low-rate partition stall.
+- **The dev workspace is AWS us-east-1 and Event Hubs is Azure eastus:** every hop crosses clouds (~8 ms produce
+  round trip). For production, co-locate them (Azure Databricks in the Event Hubs region).
 
 ## Data contracts
 
@@ -107,6 +114,10 @@ docs/                 latency results + design notes
   The HL7 field → column mapping is documented at the top of `hl7rt/hl7v2.py`.
 - Build HL7 test messages by field number (`hl7rt.generators.hl7v2.segment`), never by hand-counting pipes.
   One hand-written golden message checks the builder.
+- **Gold** (`hl7rt.gold`) is one entity per topic: encounters (ADT), observations (one per OBX, `value_num` for
+  `NM`), orders (ORM). One flow writes all three: build an array of `(topic, value)` per silver record and
+  `explode` it. Gold JSON uses `to_json(..., {"ignoreNullFields": "false"})` so every record has the full shape
+  subscribers code against. (Spark's default drops null fields.) Change a gold schema only additively.
 - Each hot-path record carries the upstream broker timestamps (`raw_ts`, `bronze_ts`, ...). The lakehouse mirror
   (`hl7rt.lakehouse`) turns them into `hop_ms` / `e2e_ms` columns.
 
@@ -126,6 +137,17 @@ docs/                 latency results + design notes
   restart looks exactly like a latency spike.
 - **Exclude backlog replay:** after downtime, hops drain backlog at "minutes" of apparent latency.
   Filter on fresh records (`upstream_ts` within the window), or `make reset` for demos.
+- **Break a bad tail down by Event Hubs partition before blaming Spark.** The mirror tables don't keep the output
+  partition, so read the topic directly from SQL with `read_kafka(...)` (SASL via `secret('hl7-rtm', ...)`) and
+  group `timestamp - upstream_ts` by `partition`. In Phase 3 one partition of two freshly recreated hubs had p99
+  ~800 ms while the other partitions sat at ~45 ms, with no Azure throttling or errors (`az monitor metrics`:
+  ThrottledRequests / ServerErrors). Signature: a slow record is followed, from the *same input partition*, by
+  on-time records, so the stall is on the output partition, not the Spark task.
+- **Lightly written Event Hubs partitions stall.** At ~10 records/s per partition, writes intermittently take
+  0.5–1 s to ack, and Spark isn't involved (an independent client sees it too). At 200 msg/s (~50/s per partition) it
+  disappears. So soak at realistic volume (`generator_rate` default 200), and give low-volume hubs fewer partitions.
+- **Uneven keys are expected and harmless at this rate.** Records are keyed by patient MRN (500 synthetic
+  patients), so partitions differ by ~15%. A slow partition with *fewer* records isn't overloaded; it may be underfed (see above).
 - **The target bar:** every hop under 200 ms at **p99**, over a soak that spans at least 2 epoch
   boundaries. Report max separately.
 
@@ -145,7 +167,8 @@ docs/                 latency results + design notes
 
 - **Watch for `grows beyond 64 KB` in driver logs.** If a projection's whole-stage code exceeds the JVM method
   limit, the failed compile is retried at every RTM epoch boundary (silver: +3 s per boundary, p99 407 → 125 ms
-  once fixed). Set `rtm.NO_WHOLE_STAGE_CODEGEN` on that flow. Execution already falls back to non-fused code.
+  once fixed). Set `rtm.NO_WHOLE_STAGE_CODEGEN` on that flow. Execution already falls back to non-fused code. This **doesn't
+  reproduce on local open-source Spark** (silver compiles fine there), so check the driver logs of every new RTM flow on dev.
 - **Diagnose epoch pauses from driver logs.** RTM clusters deliver logs to the `cluster_logs` volume. Compare
   `Finished task (4/4)` → `Committing sources` → next `Starting task` timestamps per boundary.
 - **Keep plans small: split once, read many.** Build parsed data in staged projections (`hl7v2.with_segments`):

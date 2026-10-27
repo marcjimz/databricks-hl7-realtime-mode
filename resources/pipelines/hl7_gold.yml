@@ -1,0 +1,29 @@
+# Hot path, gold — Real-Time Mode: silver_hl7 -> gold_{encounters,observations,orders} topics (one flow, routed per record).
+resources:
+  pipelines:
+    hl7_gold:
+      name: hl7rt-${bundle.target}-hl7-gold
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.hl7.name}
+      serverless: false
+      photon: false
+      edition: ADVANCED
+      continuous: true
+      clusters:
+        - ${var.rtm_cluster}
+      root_path: ../../src
+      libraries:
+        - glob:
+            include: ../../src/pipelines/hl7_gold/**
+      configuration:
+        spark.databricks.streaming.realTimeMode.enabled: "true"
+        hl7.rtm.trigger_interval: ${var.rtm_trigger_interval}
+        hl7.rtm.max_partitions: ${var.rtm_max_partitions}
+        hl7.eh.namespace: ${var.eh_namespace}
+        hl7.eh.secret_scope: ${var.eh_secret_scope}
+        hl7.eh.secret_key: ${var.eh_secret_key}
+        hl7.kafka.starting_offsets: ${var.kafka_starting_offsets}
+        hl7.topics.silver: ${var.hl7_silver_topic}
+        hl7.topics.gold_encounters: ${var.hl7_gold_encounters_topic}
+        hl7.topics.gold_observations: ${var.hl7_gold_observations_topic}
+        hl7.topics.gold_orders: ${var.hl7_gold_orders_topic}
