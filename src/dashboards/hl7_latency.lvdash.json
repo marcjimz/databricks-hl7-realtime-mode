@@ -11,11 +11,8 @@
         "FROM (SELECT '1 raw → bronze' AS hop, kafka_timestamp AS ts, hop_ms, e2e_ms FROM bronze_hl7\n",
         "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_hl7\n",
         "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations\n",
-        "UNION ALL SELECT '4 gold → critical_lab', kafka_timestamp, hop_ms, e2e_ms FROM sub_critical_lab\n",
-        "UNION ALL SELECT '4 gold → ed_critical_lab', kafka_timestamp, hop_ms, e2e_ms FROM sub_ed_critical_lab\n",
-        "UNION ALL SELECT '5 gold → ed_critical_lab_nrt (micro-batch)', _ingested_at,\n",
-        "  (unix_micros(_ingested_at) - unix_micros(gold_ts)) / 1000, (unix_micros(_ingested_at) - unix_micros(raw_ts)) / 1000\n",
-        "  FROM sub_ed_critical_lab_nrt) WHERE ts >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000 GROUP BY hop ORDER BY hop\n"
+        "UNION ALL SELECT concat('4 gold → ', subscription, CASE WHEN mode = 'microbatch' THEN ' (micro-batch)' ELSE '' END),\n",
+        "  kafka_timestamp, hop_ms, e2e_ms FROM subscription_latency) WHERE ts >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000 GROUP BY hop ORDER BY hop\n"
       ]
     },
     {
@@ -27,11 +24,8 @@
         "FROM (SELECT '1 raw → bronze' AS hop, kafka_timestamp AS ts, hop_ms, e2e_ms FROM bronze_hl7\n",
         "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_hl7\n",
         "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations\n",
-        "UNION ALL SELECT '4 gold → critical_lab', kafka_timestamp, hop_ms, e2e_ms FROM sub_critical_lab\n",
-        "UNION ALL SELECT '4 gold → ed_critical_lab', kafka_timestamp, hop_ms, e2e_ms FROM sub_ed_critical_lab\n",
-        "UNION ALL SELECT '5 gold → ed_critical_lab_nrt (micro-batch)', _ingested_at,\n",
-        "  (unix_micros(_ingested_at) - unix_micros(gold_ts)) / 1000, (unix_micros(_ingested_at) - unix_micros(raw_ts)) / 1000\n",
-        "  FROM sub_ed_critical_lab_nrt) WHERE ts >= timestampadd(MINUTE, -60, current_timestamp()) AND hop_ms < 600000 GROUP BY hop, date_trunc('MINUTE', ts)\n"
+        "UNION ALL SELECT concat('4 gold → ', subscription, CASE WHEN mode = 'microbatch' THEN ' (micro-batch)' ELSE '' END),\n",
+        "  kafka_timestamp, hop_ms, e2e_ms FROM subscription_latency) WHERE ts >= timestampadd(MINUTE, -60, current_timestamp()) AND hop_ms < 600000 GROUP BY hop, date_trunc('MINUTE', ts)\n"
       ]
     },
     {
@@ -41,7 +35,7 @@
         "SELECT\n",
         "  (SELECT round(count(*) / 900.0, 1) FROM raw_hl7 WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS msgs_per_sec,\n",
         "  (SELECT round(percentile_approx(e2e_ms, 0.99)) FROM gold_observations WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp()) AND e2e_ms < 600000) AS raw_to_gold_p99_ms,\n",
-        "  (SELECT count(*) FROM sub_ed_critical_lab WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS ed_critical_lab_matches,\n",
+        "  (SELECT count(*) FROM subscription_latency WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS subscription_records,\n",
         "  (SELECT count(*) FROM quarantine_hl7 WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS quarantined\n"
       ]
     },
@@ -192,8 +186,8 @@
                   "datasetName": "kpis",
                   "fields": [
                     {
-                      "name": "ed_critical_lab_matches",
-                      "expression": "`ed_critical_lab_matches`"
+                      "name": "subscription_records",
+                      "expression": "`subscription_records`"
                     }
                   ],
                   "disaggregated": true
@@ -205,13 +199,13 @@
               "widgetType": "counter",
               "encodings": {
                 "value": {
-                  "fieldName": "ed_critical_lab_matches",
-                  "displayName": "ED → critical lab alerts (15 min)"
+                  "fieldName": "subscription_records",
+                  "displayName": "Subscription records delivered (15 min)"
                 }
               },
               "frame": {
                 "showTitle": true,
-                "title": "ED → critical lab alerts (15 min)"
+                "title": "Subscription records delivered (15 min)"
               }
             }
           },

@@ -241,6 +241,8 @@ SILVER_SCHEMA = StructType(
         StructField("payload", StringType()),
         StructField("raw_ts", TimestampType()),
         StructField("bronze_ts", TimestampType()),
+        StructField("raw_partition", IntegerType()),
+        StructField("raw_offset", LongType()),
     ]
 )
 QUARANTINE_SCHEMA = StructType(
@@ -288,6 +290,8 @@ def to_silver_records(bronze: DataFrame, silver_topic: str, quarantine_topic: st
         hl7.alias("payload"),
         F.col("b.raw_ts").alias("raw_ts"),
         F.col("bronze_ts"),
+        F.col("b.raw_partition").alias("raw_partition"),
+        F.col("b.raw_offset").alias("raw_offset"),
     )
     quarantine = F.struct(
         why.alias("reason"),

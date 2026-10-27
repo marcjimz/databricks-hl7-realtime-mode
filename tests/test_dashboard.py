@@ -18,8 +18,9 @@ def _datasets():
 def _produced_tables() -> set[str]:
     """Tables written by the lakehouse mirror (constant @dp.table names) and by subscription rules."""
     tree = ast.parse((ROOT / "src/pipelines/lakehouse/mirror.py").read_text())
-    names = {k.value.value for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "table"
-             for k in n.keywords if k.arg == "name" and isinstance(k.value, ast.Constant)}  # fmt: skip
+    names = {n.args[0].value for n in ast.walk(tree) if isinstance(n, ast.Call) and n.args
+             and getattr(n.func, "id", getattr(n.func, "attr", "")) in ("_layer", "create_streaming_table")
+             and isinstance(n.args[0], ast.Constant)}  # fmt: skip
     rules = {f"sub_{p.stem}" for p in (ROOT / "src/subscriptions").glob("[a-z]*.yml")}
     return names | rules
 

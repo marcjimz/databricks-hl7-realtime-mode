@@ -95,3 +95,20 @@ def test_gold_mirror_measures_silver_to_gold(spark):
     assert (row.observation_cd, row.value_num) == ("2823-3", 6.8)
     assert (row.hop_ms, row.e2e_ms) == (15.0, 50.0)
     assert row.kafka_timestamp == T0 + timedelta(milliseconds=50)
+
+
+def test_every_mirror_table_has_its_upsert_key_columns(spark):
+    """Delivery is at-least-once; each table upserts on lakehouse.KEYS, so those columns must exist and be set."""
+    raw_ts, bronze_ts, silver_ts = T0, T0 + timedelta(milliseconds=10), T0 + timedelta(milliseconds=20)
+    silver = _kafka(spark, [(_silver_value(spark, s.oru_r01(), raw_ts, bronze_ts), silver_ts)])
+    obs = gold.to_gold_records(silver, "e", "o", "r").first()
+    rows = {
+        "raw_hl7": lakehouse.raw_rows(_kafka(spark, [(s.adt_a04(), T0, 0)], with_headers=True)),
+        "bronze_hl7": lakehouse.bronze_rows(_kafka(spark, [(_bronze_value(spark, s.adt_a04(), T0), T0)])),
+        "silver_hl7": lakehouse.silver_rows(silver),
+        "gold_observations": lakehouse.gold_rows(_kafka(spark, [(obs.value, T0)]), gold.OBSERVATION_SCHEMA),
+    }
+    for table, df in rows.items():
+        keys = lakehouse.KEYS[table]
+        assert set(keys) <= set(df.columns), f"{table} lacks {set(keys) - set(df.columns)}"
+        assert all(v is not None for v in df.select(*keys).first()), f"{table}: null upsert key"

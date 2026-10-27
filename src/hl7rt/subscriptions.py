@@ -12,7 +12,7 @@ from pathlib import Path
 import yaml
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType, StructField, StructType, TimestampType
+from pyspark.sql.types import DoubleType, StringType, StructField, StructType, TimestampType
 
 from hl7rt import gold
 
@@ -126,7 +126,8 @@ _LINEAGE = [("gold_ts", TimestampType()), ("raw_ts", TimestampType())]
 
 def output_schema(rule: Rule) -> StructType:
     """Schema of a subscription record (for the lakehouse mirror)."""
-    fields = [StructField(_alias(c), _field(rule, c)[1].dataType) for c in rule.output]
+    fields = [StructField("record_id", StringType())]
+    fields += [StructField(_alias(c), _field(rule, c)[1].dataType) for c in rule.output]
     extra = (_JOIN_FIELDS if rule.is_join else []) + _LINEAGE
     return StructType(fields + [StructField(n, t or SOURCES[rule.when.source]["msg_control_id"].dataType)
                                 for n, t in extra])  # fmt: skip
@@ -142,11 +143,19 @@ def _ms(later: Column, earlier: Column) -> Column:
     return (F.unix_micros(later) - F.unix_micros(earlier)) / 1000.0
 
 
+def _record_id(event: Event, side: str | None = None) -> Column:
+    """Raw-topic coordinates of the event (+ OBX set id): identical when an at-least-once hop re-sends it."""
+    col = (lambda c: F.col(f"{side}.{c}")) if side else F.col
+    parts = [col("raw_partition"), col("raw_offset")] + ([col("set_id")] if event.source == "gold_observations" else [])
+    return F.concat_ws("-", *parts)
+
+
 def build(rule: Rule, read) -> DataFrame:
     """(key, value) records for the subscription topic. `read(table)` returns that gold topic's Kafka stream."""
     when = _events(read(rule.when.source), rule.when.source).where(F.expr(rule.when.filter))
     if not rule.is_join:
-        out = when.select(*[F.col(c).alias(_alias(c)) for c in rule.output], "gold_ts", "raw_ts")
+        out = when.select(_record_id(rule.when).alias("record_id"), *[F.col(c).alias(_alias(c)) for c in rule.output],
+                          "gold_ts", "raw_ts")  # fmt: skip
         return out.select(F.col(_alias(rule.key)).alias("key"), F.to_json(F.struct("*")).alias("value"))
 
     then = _events(read(rule.then.source), rule.then.source).where(F.expr(rule.then.filter))
@@ -163,6 +172,7 @@ def build(rule: Rule, read) -> DataFrame:
     cols = [F.col(f"{_field(rule, c)[0]}.{c.rpartition('.')[2]}").alias(_alias(c)) for c in rule.output]
     out = joined.select(
         F.col(f"when.{rule.key}").alias("_key"),
+        F.concat_ws("|", _record_id(rule.when, "when"), _record_id(rule.then, "then")).alias("record_id"),
         *cols,
         F.col("when.msg_control_id").alias("when_msg_control_id"),
         F.col("then.msg_control_id").alias("then_msg_control_id"),

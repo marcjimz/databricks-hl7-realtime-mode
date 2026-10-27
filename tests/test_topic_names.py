@@ -35,18 +35,13 @@ def test_topic_variables_are_catalog_schema_table():
 
 
 def _mirror_tables() -> dict[str, str]:
-    """lakehouse table name -> the hl7.topics.* config key it reads (`_topic("topics.x")`)."""
-    out = {}
-    for fn in ast.walk(ast.parse((ROOT / "src/pipelines/lakehouse/mirror.py").read_text())):
-        if not isinstance(fn, ast.FunctionDef):
-            continue
-        names = [k.value.value for d in fn.decorator_list if isinstance(d, ast.Call) for k in d.keywords
-                 if k.arg == "name"]  # fmt: skip
-        keys = [c.args[0].value for c in ast.walk(fn)
-                if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "_topic"]  # fmt: skip
-        if names and keys:
-            out[names[0]] = keys[0]
-    return out
+    """lakehouse table name -> the hl7.topics.* config key it reads (`_layer("table", "topics.x", ...)`)."""
+    tree = ast.parse((ROOT / "src/pipelines/lakehouse/mirror.py").read_text())
+    return {
+        c.args[0].value: c.args[1].value
+        for c in ast.walk(tree)
+        if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "_layer"
+    }
 
 
 def test_each_mirror_table_reads_the_topic_of_the_same_name():
