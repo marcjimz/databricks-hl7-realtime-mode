@@ -1,0 +1,9 @@
+# Live latency dashboard over the lakehouse streaming tables (queries: src/dashboards/hl7_latency.lvdash.json).
+resources:
+  dashboards:
+    hl7_latency:
+      display_name: HL7 Real-Time Mode - live latency (${bundle.target})
+      file_path: ../../src/dashboards/hl7_latency.lvdash.json
+      warehouse_id: ${var.warehouse_id}
+      dataset_catalog: ${var.catalog}
+      dataset_schema: ${resources.schemas.hl7.name}

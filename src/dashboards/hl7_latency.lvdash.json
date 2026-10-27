@@ -1,0 +1,665 @@
+{
+  "datasets": [
+    {
+      "name": "hop_summary",
+      "displayName": "Per-hop latency, last 15 minutes",
+      "queryLines": [
+        "SELECT hop, count(*) AS messages,\n",
+        "  round(percentile_approx(hop_ms, 0.5)) AS p50_ms, round(percentile_approx(hop_ms, 0.95)) AS p95_ms,\n",
+        "  round(percentile_approx(hop_ms, 0.99)) AS p99_ms, round(max(hop_ms)) AS max_ms,\n",
+        "  round(avg(CASE WHEN hop_ms < 200 THEN 1.0 ELSE 0.0 END), 4) AS under_200ms\n",
+        "FROM (SELECT '1 raw → bronze' AS hop, kafka_timestamp AS ts, hop_ms, e2e_ms FROM bronze_hl7\n",
+        "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_hl7\n",
+        "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations\n",
+        "UNION ALL SELECT '4 gold → critical_lab', kafka_timestamp, hop_ms, e2e_ms FROM sub_critical_lab\n",
+        "UNION ALL SELECT '4 gold → ed_critical_lab', kafka_timestamp, hop_ms, e2e_ms FROM sub_ed_critical_lab\n",
+        "UNION ALL SELECT '5 gold → ed_critical_lab_nrt (micro-batch)', _ingested_at,\n",
+        "  (unix_micros(_ingested_at) - unix_micros(gold_ts)) / 1000, (unix_micros(_ingested_at) - unix_micros(raw_ts)) / 1000\n",
+        "  FROM sub_ed_critical_lab_nrt) WHERE ts >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000 GROUP BY hop ORDER BY hop\n"
+      ]
+    },
+    {
+      "name": "hop_trend",
+      "displayName": "Per-hop p99 by minute, last hour",
+      "queryLines": [
+        "SELECT hop, date_trunc('MINUTE', ts) AS minute,\n",
+        "  round(percentile_approx(hop_ms, 0.99)) AS p99_ms\n",
+        "FROM (SELECT '1 raw → bronze' AS hop, kafka_timestamp AS ts, hop_ms, e2e_ms FROM bronze_hl7\n",
+        "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_hl7\n",
+        "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations\n",
+        "UNION ALL SELECT '4 gold → critical_lab', kafka_timestamp, hop_ms, e2e_ms FROM sub_critical_lab\n",
+        "UNION ALL SELECT '4 gold → ed_critical_lab', kafka_timestamp, hop_ms, e2e_ms FROM sub_ed_critical_lab\n",
+        "UNION ALL SELECT '5 gold → ed_critical_lab_nrt (micro-batch)', _ingested_at,\n",
+        "  (unix_micros(_ingested_at) - unix_micros(gold_ts)) / 1000, (unix_micros(_ingested_at) - unix_micros(raw_ts)) / 1000\n",
+        "  FROM sub_ed_critical_lab_nrt) WHERE ts >= timestampadd(MINUTE, -60, current_timestamp()) AND hop_ms < 600000 GROUP BY hop, date_trunc('MINUTE', ts)\n"
+      ]
+    },
+    {
+      "name": "kpis",
+      "displayName": "Headline numbers, last 15 minutes",
+      "queryLines": [
+        "SELECT\n",
+        "  (SELECT round(count(*) / 900.0, 1) FROM raw_hl7 WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS msgs_per_sec,\n",
+        "  (SELECT round(percentile_approx(e2e_ms, 0.99)) FROM gold_observations WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp()) AND e2e_ms < 600000) AS raw_to_gold_p99_ms,\n",
+        "  (SELECT count(*) FROM sub_ed_critical_lab WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS ed_critical_lab_matches,\n",
+        "  (SELECT count(*) FROM quarantine_hl7 WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS quarantined\n"
+      ]
+    },
+    {
+      "name": "alerts",
+      "displayName": "Latest ED → critical lab matches",
+      "queryLines": [
+        "SELECT kafka_timestamp AS delivered_at, patient_id, patient_facility,\n",
+        "  observation_cd_desc, value_num, abnormal_flag, round(matched_after_ms / 60000.0, 1) AS minutes_after_registration,\n",
+        "  round(hop_ms) AS gold_to_sub_ms\n",
+        "FROM sub_ed_critical_lab ORDER BY kafka_timestamp DESC LIMIT 50\n"
+      ]
+    },
+    {
+      "name": "quarantine",
+      "displayName": "Quarantine reasons, last hour",
+      "queryLines": [
+        "SELECT reason, count(*) AS messages FROM quarantine_hl7\n",
+        "WHERE kafka_timestamp >= timestampadd(MINUTE, -60, current_timestamp()) GROUP BY reason\n"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "latency",
+      "displayName": "Live latency",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## HL7 v2 on Spark Real-Time Mode: live latency"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "subtitle",
+            "multilineTextboxSpec": {
+              "lines": [
+                "Every hop is one Event Hubs topic to the next, measured from Event Hubs timestamps. Target: p99 < 200 ms. Backlog replay (> 10 min) is excluded."
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-rate",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpis",
+                  "fields": [
+                    {
+                      "name": "msgs_per_sec",
+                      "expression": "`msgs_per_sec`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "msgs_per_sec",
+                  "displayName": "Raw HL7 messages / second (15 min)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Raw HL7 messages / second (15 min)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-e2e",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpis",
+                  "fields": [
+                    {
+                      "name": "raw_to_gold_p99_ms",
+                      "expression": "`raw_to_gold_p99_ms`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "raw_to_gold_p99_ms",
+                  "displayName": "Raw → gold end-to-end p99 (ms)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Raw → gold end-to-end p99 (ms)"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-matches",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpis",
+                  "fields": [
+                    {
+                      "name": "ed_critical_lab_matches",
+                      "expression": "`ed_critical_lab_matches`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "ed_critical_lab_matches",
+                  "displayName": "ED → critical lab alerts (15 min)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "ED → critical lab alerts (15 min)"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 2,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "hdr-hops",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Per-hop latency, last 15 minutes"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 5,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "p99-by-hop",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "hop_summary",
+                  "fields": [
+                    {
+                      "name": "hop",
+                      "expression": "`hop`"
+                    },
+                    {
+                      "name": "p99_ms",
+                      "expression": "`p99_ms`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "hop",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "natural-order"
+                    }
+                  },
+                  "displayName": "Hop"
+                },
+                "y": {
+                  "fieldName": "p99_ms",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "p99 (ms)"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "p99 per hop (ms)"
+              },
+              "mark": {
+                "colors": [
+                  "#00A972"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 6,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "hop-table",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "hop_summary",
+                  "fields": [
+                    {
+                      "name": "hop",
+                      "expression": "`hop`"
+                    },
+                    {
+                      "name": "messages",
+                      "expression": "`messages`"
+                    },
+                    {
+                      "name": "p50_ms",
+                      "expression": "`p50_ms`"
+                    },
+                    {
+                      "name": "p95_ms",
+                      "expression": "`p95_ms`"
+                    },
+                    {
+                      "name": "p99_ms",
+                      "expression": "`p99_ms`"
+                    },
+                    {
+                      "name": "max_ms",
+                      "expression": "`max_ms`"
+                    },
+                    {
+                      "name": "under_200ms",
+                      "expression": "`under_200ms`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "hop",
+                    "displayName": "Hop"
+                  },
+                  {
+                    "fieldName": "messages",
+                    "displayName": "Messages"
+                  },
+                  {
+                    "fieldName": "p50_ms",
+                    "displayName": "p50 ms"
+                  },
+                  {
+                    "fieldName": "p95_ms",
+                    "displayName": "p95 ms"
+                  },
+                  {
+                    "fieldName": "p99_ms",
+                    "displayName": "p99 ms"
+                  },
+                  {
+                    "fieldName": "max_ms",
+                    "displayName": "max ms"
+                  },
+                  {
+                    "fieldName": "under_200ms",
+                    "displayName": "Share < 200 ms"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Percentiles per hop"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 6,
+            "width": 3,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "hdr-trend",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### p99 by minute, last hour"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 12,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "p99-trend",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "hop_trend",
+                  "fields": [
+                    {
+                      "name": "minute",
+                      "expression": "`minute`"
+                    },
+                    {
+                      "name": "hop",
+                      "expression": "`hop`"
+                    },
+                    {
+                      "name": "p99_ms",
+                      "expression": "`p99_ms`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "line",
+              "encodings": {
+                "x": {
+                  "fieldName": "minute",
+                  "scale": {
+                    "type": "temporal"
+                  },
+                  "displayName": "Minute"
+                },
+                "y": {
+                  "fieldName": "p99_ms",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "p99 (ms)"
+                },
+                "color": {
+                  "fieldName": "hop",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "Hop"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "p99 per hop by minute (ms)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 13,
+            "width": 6,
+            "height": 6
+          }
+        },
+        {
+          "widget": {
+            "name": "hdr-subs",
+            "multilineTextboxSpec": {
+              "lines": [
+                "### Subscriptions"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 19,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "alerts",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "alerts",
+                  "fields": [
+                    {
+                      "name": "delivered_at",
+                      "expression": "`delivered_at`"
+                    },
+                    {
+                      "name": "patient_id",
+                      "expression": "`patient_id`"
+                    },
+                    {
+                      "name": "patient_facility",
+                      "expression": "`patient_facility`"
+                    },
+                    {
+                      "name": "observation_cd_desc",
+                      "expression": "`observation_cd_desc`"
+                    },
+                    {
+                      "name": "value_num",
+                      "expression": "`value_num`"
+                    },
+                    {
+                      "name": "abnormal_flag",
+                      "expression": "`abnormal_flag`"
+                    },
+                    {
+                      "name": "minutes_after_registration",
+                      "expression": "`minutes_after_registration`"
+                    },
+                    {
+                      "name": "gold_to_sub_ms",
+                      "expression": "`gold_to_sub_ms`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "delivered_at",
+                    "displayName": "Delivered"
+                  },
+                  {
+                    "fieldName": "patient_id",
+                    "displayName": "Patient"
+                  },
+                  {
+                    "fieldName": "patient_facility",
+                    "displayName": "Facility"
+                  },
+                  {
+                    "fieldName": "observation_cd_desc",
+                    "displayName": "Lab"
+                  },
+                  {
+                    "fieldName": "value_num",
+                    "displayName": "Value"
+                  },
+                  {
+                    "fieldName": "abnormal_flag",
+                    "displayName": "Flag"
+                  },
+                  {
+                    "fieldName": "minutes_after_registration",
+                    "displayName": "Min after ED registration"
+                  },
+                  {
+                    "fieldName": "gold_to_sub_ms",
+                    "displayName": "gold → alert ms"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Latest ED registration → critical lab alerts"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 20,
+            "width": 4,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "quarantine",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "quarantine",
+                  "fields": [
+                    {
+                      "name": "reason",
+                      "expression": "`reason`"
+                    },
+                    {
+                      "name": "messages",
+                      "expression": "`messages`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "reason",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "Reason"
+                },
+                "y": {
+                  "fieldName": "messages",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Messages"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Quarantined messages, last hour"
+              },
+              "mark": {
+                "colors": [
+                  "#FF3621"
+                ]
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 20,
+            "width": 2,
+            "height": 7
+          }
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}

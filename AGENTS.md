@@ -149,6 +149,9 @@ docs/                 latency results + design notes
   percentiles over them; don't build one-shot probe jobs.
 - **Always check the pipeline event log for flow `WARN`/`ERROR` before reading latency.** A crash and
   restart looks exactly like a latency spike.
+- **The Kafka sink is at-least-once.** A pipeline that restarts from its checkpoint re-writes records sent since the
+  last commit (Phase 5: ~17k gold records). Downstream joins and counts see duplicates. Dedupe on `msg_control_id`
+  (+ `set_id`) where exactly-once matters, and start new subscriptions at `latest`.
 - **Exclude backlog replay:** after downtime, hops drain backlog at "minutes" of apparent latency.
   Filter on fresh records (`upstream_ts` within the window), or `make reset` for demos.
 - **Break a bad tail down by Event Hubs partition before blaming Spark.** The mirror tables don't keep the output
@@ -176,6 +179,11 @@ docs/                 latency results + design notes
 - Spark's Kafka source **resumes from its checkpoint, not the consumer group**. `kafka_starting_offsets`
   only applies to a new checkpoint. `make reset <env>` (full refresh) starts at the live edge, for demos
   only. Production must resume from the checkpoint so no HL7 message is skipped.
+- **Dashboard** (`resources/dashboards/hl7_latency.yml` → `src/dashboards/hl7_latency.lvdash.json`): queries use
+  unqualified table names, and the bundle sets `dataset_catalog` / `dataset_schema`. The warehouse is a
+  `lookup` by name per target. `tests/test_dashboard.py` enforces portability and that every table it reads is
+  produced. New subscriptions don't appear on it automatically; add them to the `HOPS` union.
+- `make demo <env>` = deploy + start + generate. `make start <env>` leaves running pipelines alone.
 - Several CLI profiles can match one host. Set `DATABRICKS_CONFIG_PROFILE`.
 
 ## Spark patterns and pitfalls
