@@ -1,0 +1,27 @@
+# Hot path, bronze — Real-Time Mode: hl7.raw -> hl7.bronze. One RTM flow on its own fixed-size cluster.
+resources:
+  pipelines:
+    hl7_bronze:
+      name: hl7rt-${bundle.target}-hl7-bronze
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.hl7.name}
+      serverless: false
+      photon: false
+      edition: ADVANCED
+      continuous: true
+      clusters:
+        - ${var.rtm_cluster}
+      root_path: ../../src
+      libraries:
+        - glob:
+            include: ../../src/pipelines/hl7_bronze/**
+      configuration:
+        spark.databricks.streaming.realTimeMode.enabled: "true"
+        hl7.rtm.trigger_interval: ${var.rtm_trigger_interval}
+        hl7.rtm.max_partitions: ${var.rtm_max_partitions}
+        hl7.eh.namespace: ${var.eh_namespace}
+        hl7.eh.secret_scope: ${var.eh_secret_scope}
+        hl7.eh.secret_key: ${var.eh_secret_key}
+        hl7.kafka.starting_offsets: ${var.kafka_starting_offsets}
+        hl7.topics.raw: ${var.hl7_raw_topic}
+        hl7.topics.bronze: ${var.hl7_bronze_topic}

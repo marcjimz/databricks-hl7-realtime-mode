@@ -50,6 +50,45 @@ variables:
   epic_json_topic:
     description: Topic carrying the existing Epic JSON feed (pre-parsed by the outside system).
     default: epic.json
+  hl7_raw_topic:
+    description: Raw HL7 v2 messages from the source system (one message per record).
+    default: hl7.raw
+  hl7_bronze_topic:
+    description: Bronze, the raw message plus MSH envelope and raw-topic lineage.
+    default: hl7.bronze
+  hl7_silver_topic:
+    description: Silver, the parsed message (Epic silver contract + observations).
+    default: hl7.silver
+  hl7_quarantine_topic:
+    description: Messages that could not be silvered, with the reason.
+    default: hl7.quarantine
+
+  # --- Real-Time Mode (hot path) ---------------------------------------------
+  rtm_trigger_interval:
+    description: >-
+      RTM checkpoint interval (pipelines.trigger.interval). Records flow continuously; each interval the
+      engine pauses briefly to checkpoint (see docs/latency.md).
+    default: 5 minutes
+  rtm_max_partitions:
+    description: >-
+      Kafka reader tasks per RTM flow (maxPartitions). Keep equal to the hub partition count.
+      Cluster slots must exceed the tasks with headroom (tests/test_rtm_resources.py enforces >= 1.2x).
+    default: "4"
+  rtm_cluster:
+    description: >-
+      Fixed-size classic cluster for each single-stage RTM hop (no autoscale, no Photon, on-demand).
+      Default: 2 x 4-core workers = 8 slots for 4 reader tasks.
+    type: complex
+    default:
+      label: default
+      num_workers: 2
+      node_type_id: m6id.xlarge
+      aws_attributes:
+        availability: ON_DEMAND
+        first_on_demand: 3
+      cluster_log_conf:
+        volumes:
+          destination: /Volumes/${var.catalog}/${var.schema}/cluster_logs
 
   # --- Kafka source behavior -------------------------------------------------
   kafka_starting_offsets:

@@ -1,0 +1,25 @@
+# Continuous synthetic raw HL7 v2 feed into hl7.raw. Start/stop with `make generate <env>` / `make generate-stop <env>`.
+resources:
+  jobs:
+    hl7_generator:
+      name: hl7rt-${bundle.target}-hl7-generator
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: generate
+          environment_key: generator
+          python_wheel_task:
+            package_name: hl7rt
+            entry_point: hl7-generator
+            parameters:
+              - --namespace=${var.eh_namespace}
+              - --secret-scope=${var.eh_secret_scope}
+              - --secret-key=${var.eh_secret_key}
+              - --topic=${var.hl7_raw_topic}
+              - --rate=${var.generator_rate}
+      environments:
+        - environment_key: generator
+          spec:
+            environment_version: "3"
+            dependencies:
+              - ../../.build/*.whl
+              - confluent-kafka>=2.6

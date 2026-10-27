@@ -14,6 +14,10 @@ from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, StringType, StructField, StructType
 
+from hl7rt.dtm import hl7_timestamp
+
+__all__ = ["FIELDS", "PAYLOAD_SCHEMA", "SPARK_CONF", "hl7_timestamp", "to_bronze", "to_quarantine", "to_silver"]
+
 # map_from_entries over the *reversed* array with LAST_WIN keeps the first occurrence of a
 # duplicated name, matching the original get(filter(...), 0) semantics. Set on the silver table.
 SPARK_CONF = {"spark.sql.mapKeyDedupPolicy": "LAST_WIN"}
@@ -73,25 +77,7 @@ FIELDS: list[tuple[str, str]] = [
     ("document_completion_status", "string"),
 ]
 
-# HL7 v2 DTM is YYYY[MM[DD[HH[MM[SS[.S[S[S[S]]]]]]]]][+/-ZZZZ]; fractional seconds are dropped.
-# The format is chosen from the value's shape so each value is parsed exactly once (trying
-# formats in turn is ~5x slower). Anything else falls back to ISO-8601; unparseable -> NULL.
-_HL7_SHAPES = [
-    (r"^\d{14}[+-]\d{4}$", "yyyyMMddHHmmssZ"),
-    (r"^\d{14}$", "yyyyMMddHHmmss"),
-    (r"^\d{12}$", "yyyyMMddHHmm"),
-    (r"^\d{8}$", "yyyyMMdd"),
-]
-
 _CORRUPT = "_corrupt_record"
-
-
-def hl7_timestamp(c: Column) -> Column:
-    v = F.regexp_replace(F.trim(c), r"^(\d{14})\.\d+", "$1")
-    parsed = F.when(v == "", None)
-    for shape, fmt in _HL7_SHAPES:
-        parsed = parsed.when(v.rlike(shape), F.try_to_timestamp(v, F.lit(fmt)))
-    return parsed.otherwise(F.try_to_timestamp(v))
 
 
 def to_bronze(kafka: DataFrame) -> DataFrame:

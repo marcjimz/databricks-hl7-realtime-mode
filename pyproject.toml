@@ -9,6 +9,7 @@ generators = ["confluent-kafka>=2.6"]
 
 [project.scripts]
 epic-json-generator = "hl7rt.generators.epic_json:main"
+hl7-generator = "hl7rt.generators.hl7v2:main"
 
 [dependency-groups]
 dev = [
