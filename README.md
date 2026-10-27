@@ -1,85 +1,95 @@
+<div align="center">
+  <img src="./docs/images/dbx-banner.jpeg" alt="Databricks" style="width:100%; height:auto;">
+</div>
+
+<br>
+
 # HL7 v2 on Spark Real-Time Mode
 
 Millisecond HL7 processing on Databricks: raw HL7 v2 in, parsed and broken into clinical entities in tens of
-milliseconds per layer, with every layer also landed in Delta.
+milliseconds per layer, with every layer also landed in Delta. Built on
+[Real-Time Mode](https://www.databricks.com/blog/introducing-real-time-mode-apache-sparktm-structured-streaming),
+Lakeflow Spark Declarative Pipelines, and Azure Event Hubs.
 
-Built on [Real-Time Mode](https://www.databricks.com/blog/introducing-real-time-mode-apache-sparktm-structured-streaming),
-Lakeflow Spark Declarative Pipelines, and Azure Event Hubs (Kafka endpoint).
-
-## What this does
+## What it does
 
 ```
 HOT PATH (Real-Time Mode, ms)
-  HL7 source ─► raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_hl7 ─► gold ─► gold_encounters
-                                                     │                          gold_observations ─► subscriptions ─► sub_*
-                                                     └─► quarantine_hl7         gold_orders
+  HL7 ─► raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_hl7 ─► gold ─► gold_* ─► subscriptions ─► sub_*
+                                               └─► quarantine_hl7
 
 NEAR-REAL-TIME PATH (seconds)
-  every topic ─► the Delta streaming table of the same name (audit, BI, replay, latency telemetry)
+  every topic ─► the Delta table of the same name (upserted; audit, BI, latency telemetry)
 ```
 
-- **Bronze** keeps the raw message and adds a small header (type, control id, facility).
-- **Silver** parses HL7 with plain Spark (no JARs or UDFs) into the customer's existing 34-column Epic silver
-  contract plus every lab result. Bad messages go to quarantine with a reason.
-- **Gold** splits each message into what teams consume: encounters (ADT), observations (one per lab result),
-  and orders (ORM).
-- **Naming:** each topic is named after the table it lands in, `<catalog>.<schema>.<table>`
-  (e.g. `real_time_mode_demo_catalog.hl7_realtime.silver_hl7`).
-
-## Subscribe (self-service)
-
-A team describes what it wants in one YAML file, and the platform runs it. Two rule shapes:
-
-- **One event:** "a critical lab result" (`src/subscriptions/critical_lab.yml`)
-- **Event A, then event B for the same patient within N minutes:** "ED registration, then a critical lab within
-  60 minutes" (`src/subscriptions/ed_critical_lab.yml`)
-
-```bash
-make sub-new NAME=my_alert MODE=rtm JOIN=1   # or MODE=microbatch; copies the templates
-#   edit src/subscriptions/my_alert.yml (sources, filters, window, output columns)
-make infra-plan && make infra-apply          # creates the Event Hubs topic sub_my_alert
-make deploy dev                              # runs it; results in topic + table <catalog>.<schema>.sub_my_alert
-```
-
-`rtm` delivers in milliseconds on a classic cluster. `microbatch` delivers in seconds on serverless.
-Every field is explained in [`src/subscriptions/_template.yml`](src/subscriptions/_template.yml).
+- **Silver** parses HL7 with plain Spark into the existing 34-column Epic silver contract. Bad messages go to quarantine.
+- **Gold** splits each message into encounters, observations (one per lab result), and orders.
+- **Subscriptions** are YAML rules teams write themselves, in milliseconds (RTM) or seconds (micro-batch).
+- Each topic is named after the table it lands in: `<catalog>.<schema>.<table>`.
 
 ## Results
 
-Measured on dev (200 msg/s, 12 minutes, ~144k messages per hop, Event Hubs Premium):
+Measured on dev at 200 msg/s over 12 minutes (~144k messages per hop):
 
 | Hop | p50 | p99 |
 |---|---|---|
-| raw → bronze | 12 ms | **38 ms** |
-| bronze → silver (full HL7 parse) | 15 ms | **47 ms** |
-| silver → gold (encounters, observations, orders) | 15 ms | **32 ms** |
-| gold → subscription: critical lab (one event) | 15 ms | **31 ms** |
-| gold → subscription: ED registration then critical lab within 60 min (join) | 32 ms | **79 ms** |
+| raw → bronze | 12 ms | **33 ms** |
+| bronze → silver (full HL7 parse) | 15 ms | **32 ms** |
+| silver → gold | 15 ms | **32 ms** |
+| gold → subscription: critical lab | 15 ms | **31 ms** |
+| gold → subscription: ED registration, then a critical lab within 60 min | 32 ms | **79 ms** |
+| same subscription in micro-batch | 2.1 s | 5.4 s |
 
-Every hop is under 200 ms at p99, and both subscriptions match a SQL check exactly. Each pipeline pauses ~1–2 s every
-5 minutes to checkpoint; that's the max.
+Every Real-Time Mode hop is under 200 ms at p99. Each pipeline pauses ~1–3 s every 5 minutes to checkpoint, which
+sets the max. Details: [docs/latency.md](docs/latency.md).
 
-Each number is the time from one Event Hubs topic to the next, measured from Event Hubs' own timestamps.
-Details, experiments, and open items: [docs/latency.md](docs/latency.md).
-
-## Setup
+## Setup (once)
 
 Prereqs: Databricks CLI ≥ 0.285, Terraform ≥ 1.5, Azure CLI (logged in), [uv](https://docs.astral.sh/uv/).
 
 ```bash
-make install                                   # local dev environment
-cp infra/eventhubs/terraform.tfvars.example infra/eventhubs/terraform.tfvars   # subscription, owner, catalog
-make infra-plan && make infra-apply            # Event Hubs namespace + one hub per table
-make secrets dev                               # connection string -> Databricks secret scope
-make deploy dev                                # deploy; pipelines start automatically
-make generate dev                              # start synthetic HL7 traffic
-make stop dev                                  # stop everything (stops compute billing)
+make install                                             # local Python env
+cp infra/eventhubs/terraform.tfvars.example infra/eventhubs/terraform.tfvars   # then edit it
+make infra-plan && make infra-apply                      # Event Hubs namespace + topics
+make secrets dev                                         # connection string -> Databricks secret scope
 ```
 
-Or run all of that and the feed in one go: `make demo dev` prints the live latency dashboard URL. The
-[walkthrough](docs/walkthrough.md) is a 20-minute demo script.
+## Operate (from your machine)
 
-All names and sizes are bundle variables in `databricks.yml`. `make help` lists every command.
+```bash
+make demo dev            # deploy, start everything, start the HL7 feed, print the dashboard URL
+make stop dev            # stop all pipelines and the feed (stops Databricks billing)
+
+make start dev           # start pipelines only
+make generate dev        # start the HL7 feed       |  make generate-stop dev
+make reset dev           # restart from the live edge with fresh checkpoints (demo only)
+make help                # everything else
+```
+
+Classic Real-Time Mode clusters take ~9 minutes to start. Event Hubs keeps billing until you `terraform destroy`.
+
+## Configure
+
+| What | Where |
+|---|---|
+| Azure: subscription, region, namespace, tier, capacity, catalog | `infra/eventhubs/terraform.tfvars` |
+| Databricks: workspace, catalog, schema, Event Hubs namespace, warehouse | `databricks.yml` → `targets.dev.variables` |
+| Topic names, cluster sizes, feed rate, checkpoint interval | `databricks.yml` → `variables` (defaults) |
+| Subscriptions | `src/subscriptions/<name>.yml` |
+
+To add an environment, copy the `dev` target in `databricks.yml` and add its name to `ENVS` in the `Makefile`.
+
+## Subscribe (self-service)
+
+```bash
+make sub-new NAME=my_alert MODE=rtm      # or MODE=microbatch; JOIN=1 for "event A then event B"
+# edit src/subscriptions/my_alert.yml: source, filter, optional window, output columns
+make infra-plan && make infra-apply      # creates topic sub_my_alert
+make deploy dev                          # runs it: topic + table <catalog>.<schema>.sub_my_alert, on the dashboard
+```
+
+Every field is explained in [`src/subscriptions/_template.yml`](src/subscriptions/_template.yml). The
+[walkthrough](docs/walkthrough.md) is a 20-minute demo script.
 
 ## Repo
 
@@ -87,23 +97,12 @@ All names and sizes are bundle variables in `databricks.yml`. `make help` lists 
 databricks.yml     variables and targets
 resources/         pipelines, jobs, schemas, dashboards (by type)
 src/hl7rt/         the logic: HL7 parsing, gold, subscriptions, Event Hubs helpers, generators
-src/subscriptions/ self-service rule files (one YAML per subscription)
-src/dashboards/    the live latency dashboard (AI/BI)
 src/pipelines/     thin pipeline definitions
+src/subscriptions/ self-service rule files
+src/dashboards/    live latency dashboard
 infra/eventhubs/   Terraform for Event Hubs
 tests/             unit tests (local Spark)
-docs/              latency results, demo walkthrough, the Epic JSON feed improvements
+docs/              latency results, walkthrough, Epic JSON notes
 ```
-
-## Status
-
-| Phase | Scope | |
-|---|---|---|
-| 0 | Feasibility: Real-Time Mode latency, sizing, Event Hubs tier | ✅ |
-| 1 | Scaffold + the existing Epic JSON feed, improved ([details](docs/epic-json.md)) | ✅ |
-| 2 | Raw HL7 → bronze → silver + Delta streaming tables | ✅ |
-| 3 | Gold: encounters, observations, orders | ✅ |
-| 4 | Self-service subscriptions (YAML rules, RTM or micro-batch) | ✅ |
-| 5 | Live latency dashboard and demo walkthrough | 🔄 in review |
 
 Contributors and coding agents: see [AGENTS.md](AGENTS.md).

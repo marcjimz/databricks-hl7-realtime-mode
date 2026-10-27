@@ -143,3 +143,17 @@ def test_output_schema_matches_records(spark):
     schema = subscriptions.output_schema(rule)
     out = run(spark, rule, _hl7("ADT^A04", "MRN1", T0, 1), _hl7("ORU^R01", "MRN1", T0 + timedelta(minutes=1), 2, "HH"))
     assert list(out[0]) == schema.fieldNames()
+
+
+# --- upsert key ------------------------------------------------------------------------------------------------
+
+
+def test_records_carry_a_stable_id_from_raw_lineage(spark):
+    """At-least-once delivery re-sends records after a restart; record_id lets tables upsert instead of duplicate."""
+    rule = subscriptions.load(RULES / "ed_critical_lab.yml")
+    msgs = (_hl7("ADT^A04", "MRN1", T0, 1), _hl7("ORU^R01", "MRN1", T0 + timedelta(minutes=1), 2, "HH"))
+    first, again = run(spark, rule, *msgs), run(spark, rule, *msgs)
+    assert list(first[0])[0] == "record_id"
+    assert [r["record_id"] for r in first] == [r["record_id"] for r in again]
+    single = run(spark, subscriptions.load(RULES / "critical_lab.yml"), _hl7("ORU^R01", "MRN1", T0, 1, "HH"))
+    assert single[0]["record_id"] == "0-0-1"  # raw partition - raw offset - OBX set id

@@ -18,8 +18,8 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
 
 - Layers are **raw → bronze → silver → gold → self-service subscriptions**. Call the last layer
   "subscriptions", not "alerts".
-- Delivery is **phased**: one branch + one PR per phase, each verified on dev before the next.
-  Phase status lives in README.md.
+- Delivered in phases 0–5 (feasibility → scaffold → bronze/silver → gold → subscriptions → dashboard), one PR each,
+  all merged. New work: one branch + one PR per unit, verified on dev before merging.
 
 ## Non-negotiable principles
 
@@ -49,13 +49,16 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
 
 ```
 databricks.yml        variables + targets; include: resources/**
-resources/<type>/     bundle resources grouped by type: jobs/, pipelines/, schemas/, (dashboards/)
+resources/<type>/     bundle resources grouped by type: jobs/, pipelines/, schemas/, dashboards/
+resources/pipelines/_templates/   subscription pipeline templates (*.yml.tmpl, not included by the bundle)
 src/hl7rt/            shared library: pure DataFrame transforms, Event Hubs helpers, generators (unit-tested)
 src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path = src/)
+src/subscriptions/    self-service rule files, one YAML per subscription (`_template.yml` documents every field)
+src/dashboards/       the AI/BI dashboard definition (.lvdash.json)
 infra/<stack>/        Terraform, one small stack per folder (eventhubs/, later e.g. network/), each with
                       its own state + versions.tf/variables.tf/main.tf/outputs.tf. tfvars/state gitignored.
 tests/                pytest with local Spark (.venv via uv)
-docs/                 latency results + design notes
+docs/                 latency results, walkthrough, Epic JSON notes
 ```
 
 - Put logic in `src/hl7rt` as functions of DataFrames, so it's testable without a cluster. Keep
@@ -86,31 +89,39 @@ docs/                 latency results + design notes
 - **Size with headroom:** total task slots ≥ tasks across all stages (Kafka `maxPartitions` + each
   shuffle's partitions) **plus ~20% or more spare**. With exactly as many slots as tasks, the epoch
   handoff fails with `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT`, the flow crashes, and SDP restarts it.
-  That looks like a 6–10 s "latency spike". Current sizing: stateless hop = 2 workers (8 slots) for 4
-  partitions; windowed hop = 3 workers (12 slots) for 4 + 4 shuffle tasks.
+  That looks like a 6–10 s "latency spike". Current sizing: stateless hop = 2 workers (8 slots, `rtm_cluster`) for
+  4 partitions; join subscription = 4 workers (16 slots, `rtm_join_cluster`) for 2 × 4 source + 4 join tasks.
+- **Cold start is ~9 min per classic cluster; instance pools aren't used.** Pools only skip VM acquisition (internal
+  guidance: ~20 s with a preloaded runtime; cases with warm pools still took 2–5 min), pipeline docs don't cover pool
+  keys, and a continuous-pipeline-on-pool cluster failure is on record. Start the demo early instead (`make demo`).
 - **Never use bundle `mode: development`** for RTM targets: it turns `continuous` off.
 - **A first non-RTM run leaves a v1 checkpoint** → `CHECKPOINT_FORMAT_V1_NOT_SUPPORTED`. Fix with a
   full refresh.
 - **`asyncProgressTrackingEnabled` is rejected on SDP classic** (standard access mode). It isn't needed:
   async progress tracking and async state checkpointing are on by default in DBR 18.3.
 - **Supported in RTM:** stateless ops, `explode`, tumbling/sliding windows with watermark, aggregations,
-  `dropDuplicates`, `transformWithState` (row API), broadcast stream-static joins.
+  `dropDuplicates`, `transformWithState` (row API), stream-static joins, and stream-stream **inner** joins (DBR 18+,
+  join settings in the pipeline `configuration`; see Subscriptions). Output mode is update only.
   **Not supported:** Delta source/sink, `foreachBatch`, session windows, `mapPartitions`,
   `transformWithStateInPandas`.
 - **A one-off `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT` seconds after a cold start** can happen. SDP retries it
   and steady state is fine (seen once in Phase 2, then clean across every boundary). A repeat at 5-minute
   boundaries means real under-sizing.
-- **Epoch boundaries:** every `pipelines.trigger.interval`, each pipeline pauses briefly (measured
-  ~0.6–1.6 s, affecting ~0.1% of messages). p99 is unaffected, but max is. This is an open item.
+- **Epoch boundaries pause ~1–3 s, by design.** Every `pipelines.trigger.interval` (5 min) the engine commits
+  offsets, checkpoints, and plans the next epoch. That hits ~0.1% of messages: p99 is unaffected, max isn't. The internal
+  RTM runbook calls < 3 s normal and recommends 5 min (shorter costs more; longer means fewer pauses but bigger
+  replays after a failure). There is no zero-pause mode. We set `kafka.fetch.max.wait.ms=50` on RTM readers (runbook).
+  DBR 18.3 logs `Interbatch latency for batch N` in the driver log.
 - **Event Hubs Premium is required.** Standard's multi-tenant tail missed 200 ms p99 on two hops;
-  Premium gives ~31–47 ms p99 per hop. More PUs didn't fix the low-rate partition stall.
+  Premium gives ~31–47 ms p99 per hop. Capacity wasn't the issue for the partition stall (client config was).
 - **The dev workspace is AWS us-east-1 and Event Hubs is Azure eastus:** every hop crosses clouds (~8 ms produce
   round trip). For production, co-locate them (Azure Databricks in the Event Hubs region).
 
 ## Data contracts
 
 - **Silver keeps the customer's Epic silver contract**: the same 34 fields, names, order, and types, then
-  `payload`, `kafka_timestamp`, `_ingested_at`. Raw-HL7 silver (`hl7rt.hl7v2`) and the Epic JSON silver
+  `payload`, `kafka_timestamp`, `_ingested_at`, then lineage (`raw_ts`, `bronze_ts`, `raw_partition`, `raw_offset`).
+  Gold entities carry the same raw coordinates. Raw-HL7 silver (`hl7rt.hl7v2`) and the Epic JSON silver
   (`hl7rt.epic_json`) produce the same shape. Extras (`observations`, lineage, latency) come **after** the contract.
   The HL7 field → column mapping is documented at the top of `hl7rt/hl7v2.py`.
 - Build HL7 test messages by field number (`hl7rt.generators.hl7v2.segment`), never by hand-counting pipes.
@@ -149,9 +160,10 @@ docs/                 latency results + design notes
   percentiles over them; don't build one-shot probe jobs.
 - **Always check the pipeline event log for flow `WARN`/`ERROR` before reading latency.** A crash and
   restart looks exactly like a latency spike.
-- **The Kafka sink is at-least-once.** A pipeline that restarts from its checkpoint re-writes records sent since the
-  last commit (Phase 5: ~17k gold records). Downstream joins and counts see duplicates. Dedupe on `msg_control_id`
-  (+ `set_id`) where exactly-once matters, and start new subscriptions at `latest`.
+- **At-least-once, upserted.** The Kafka sink is at-least-once: a pipeline that restarts from its checkpoint
+  re-writes records sent since the last commit (Phase 5: ~17k gold records). Topics may carry repeats; Delta doesn't.
+  Every table is an AUTO CDC (SCD 1) upsert keyed by the record's raw-topic coordinates (`lakehouse.KEYS`; subscriptions
+  by `record_id`), so a repeat updates its row. Don't key on `msg_control_id`: generators and sources can reuse it.
 - **Exclude backlog replay:** after downtime, hops drain backlog at "minutes" of apparent latency.
   Filter on fresh records (`upstream_ts` within the window), or `make reset` for demos.
 - **Break a bad tail down by Event Hubs partition before blaming Spark.** The mirror tables don't keep the output
@@ -164,16 +176,16 @@ docs/                 latency results + design notes
   defaults (`metadata.max.age.ms` 300 s, `connections.max.idle.ms` 540 s, both above Azure's 240 s idle close), one
   output partition per hub stalled 0.5–1 s and pushed p99 to ~550–875 ms. With the settings, the same load gives
   35–47 ms. Our first theory (low per-partition rate) was wrong: check client config before blaming the service.
-- **Uneven keys are expected and harmless at this rate.** Records are keyed by patient MRN (500 synthetic
-  patients), so partitions differ by ~15%. A slow partition with *fewer* records isn't overloaded.
+- **Uneven keys are expected and harmless.** Records are keyed by patient MRN (generator default 50,000 patients,
+  `--patients`), so partitions differ slightly. A slow partition with *fewer* records isn't overloaded.
 - **The target bar:** every hop under 200 ms at **p99**, over a soak that spans at least 2 epoch
   boundaries. Report max separately.
 
 ## Operating the demo
 
-- `make deploy <env>` → continuous pipelines **start automatically** (`bundle run` then reports "active
-  update already exists"). `make generate <env>` / `make generate-stop <env>` control load.
-  `make stop <env>` stops compute billing.
+- `make deploy <env>` starts only **new or changed** continuous pipelines; `make start <env>` starts the rest
+  (running ones are left alone). `make generate <env>` / `make generate-stop <env>` control load (`generate-stop`
+  waits until runs end). `make stop <env>` stops compute billing. `make demo <env>` = deploy + start + generate.
 - **Don't restart RTM pipelines between tests.** Classic cold start is ~9 min. Change load, not
   pipelines.
 - Spark's Kafka source **resumes from its checkpoint, not the consumer group**. `kafka_starting_offsets`
@@ -182,8 +194,8 @@ docs/                 latency results + design notes
 - **Dashboard** (`resources/dashboards/hl7_latency.yml` → `src/dashboards/hl7_latency.lvdash.json`): queries use
   unqualified table names, and the bundle sets `dataset_catalog` / `dataset_schema`. The warehouse is a
   `lookup` by name per target. `tests/test_dashboard.py` enforces portability and that every table it reads is
-  produced. New subscriptions don't appear on it automatically; add them to the `HOPS` union.
-- `make demo <env>` = deploy + start + generate. `make start <env>` leaves running pipelines alone.
+  produced. Subscriptions appear by themselves: the mirror feeds every rule's topic into `subscription_latency`.
+- **Machines that sleep stall background soaks.** Wrap long local waits in `caffeinate -i` (macOS).
 - Several CLI profiles can match one host. Set `DATABRICKS_CONFIG_PROFILE`.
 
 ## Spark patterns and pitfalls

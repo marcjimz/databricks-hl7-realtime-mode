@@ -7,22 +7,23 @@
 
 One RTM flow writes all three topics: each silver record becomes an array of (topic, value) records that
 is exploded, and the Kafka sink routes by the `topic` column. Every entity carries raw_ts / bronze_ts /
-silver_ts (broker timestamps) so the lakehouse mirror can measure each hop.
+silver_ts (broker timestamps) so the lakehouse mirror can measure each hop, plus its raw-topic coordinates.
 """
 
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
-from pyspark.sql.types import DoubleType, IntegerType, StringType, StructField, StructType, TimestampType
+from pyspark.sql.types import DoubleType, IntegerType, LongType, StringType, StructField, StructType, TimestampType
 
 from hl7rt import hl7v2
 
 ADT_EVENTS = {"A01": "admission", "A03": "discharge", "A04": "registration", "A08": "update"}
 
-_LINEAGE = ["raw_ts", "bronze_ts", "silver_ts"]
+# Broker timestamps (latency) and the raw-topic coordinates (the upsert key for replays; see lakehouse.KEYS).
+_LINEAGE = ["raw_ts", "bronze_ts", "silver_ts", "raw_partition", "raw_offset"]
 _PATIENT = ["patient_id", "visit_id", "patient_facility"]
 _MESSAGE = ["msg_type", "msg_control_id", "msg_dt_tm", "msg_sending_facility"]
 _TIMESTAMPS = {"admit_dt_tm", "msg_dt_tm", "observation_dt_tm", *_LINEAGE}
-_TYPES = {"set_id": IntegerType(), "value_num": DoubleType()}
+_TYPES = {"set_id": IntegerType(), "value_num": DoubleType(), "raw_partition": IntegerType(), "raw_offset": LongType()}
 
 
 def _schema(names: list[str]) -> StructType:

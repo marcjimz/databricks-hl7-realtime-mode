@@ -14,6 +14,19 @@ from pyspark.sql import functions as F
 
 from hl7rt import hl7v2
 
+# Upsert keys. Spark's Kafka sink is at-least-once: after a restart a hop can re-send records. Every table is an
+# AUTO CDC (SCD type 1) target keyed by the record's raw-topic coordinates, so a replay updates its row, not adds one.
+KEYS = {
+    "raw_hl7": ["partition", "offset"],
+    "bronze_hl7": ["raw_partition", "raw_offset"],
+    "silver_hl7": ["raw_partition", "raw_offset"],
+    "quarantine_hl7": ["raw_partition", "raw_offset"],
+    "gold_encounters": ["raw_partition", "raw_offset"],
+    "gold_observations": ["raw_partition", "raw_offset", "set_id"],
+    "gold_orders": ["raw_partition", "raw_offset"],
+}
+SUBSCRIPTION_KEYS = ["record_id"]
+
 
 def _ms(later: Column, earlier: Column) -> Column:
     return (F.unix_micros(later) - F.unix_micros(earlier)) / 1000.0
@@ -61,6 +74,8 @@ def silver_rows(silver: DataFrame) -> DataFrame:
         F.col("s.observations"),
         F.col("s.raw_ts"),
         F.col("s.bronze_ts"),
+        F.col("s.raw_partition"),
+        F.col("s.raw_offset"),
         _ms(F.col("kafka_timestamp"), F.col("s.bronze_ts")).alias("hop_ms"),
         _ms(F.col("kafka_timestamp"), F.col("s.raw_ts")).alias("e2e_ms"),
     )
@@ -95,6 +110,24 @@ def subscription_rows(sub_topic: DataFrame, schema) -> DataFrame:
     return s.select(
         "key",
         "s.*",
+        "kafka_timestamp",
+        _ms(F.col("kafka_timestamp"), F.col("s.gold_ts")).alias("hop_ms"),
+        _ms(F.col("kafka_timestamp"), F.col("s.raw_ts")).alias("e2e_ms"),
+        F.current_timestamp().alias("_ingested_at"),
+    )
+
+
+_LATENCY_SCHEMA = "record_id STRING, gold_ts TIMESTAMP, raw_ts TIMESTAMP"
+
+
+def subscription_latency_rows(sub_topic: DataFrame, subscription: str, mode: str) -> DataFrame:
+    """One row per record on any subscription topic, so the dashboard picks up new subscriptions by itself."""
+    s = sub_topic.select(F.from_json(F.col("value").cast("string"), _LATENCY_SCHEMA).alias("s"),
+                         F.col("timestamp").alias("kafka_timestamp"))  # fmt: skip
+    return s.select(
+        F.lit(subscription).alias("subscription"),
+        F.lit(mode).alias("mode"),
+        "s.record_id",
         "kafka_timestamp",
         _ms(F.col("kafka_timestamp"), F.col("s.gold_ts")).alias("hop_ms"),
         _ms(F.col("kafka_timestamp"), F.col("s.raw_ts")).alias("e2e_ms"),

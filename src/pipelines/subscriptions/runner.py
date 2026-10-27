@@ -1,7 +1,7 @@
 """Generic subscription runner: one rule file (hl7.sub.rule) -> topic <catalog>.<schema>.sub_<name> (+ Delta).
 
 rtm:        Real-Time Mode flow to Event Hubs; the lakehouse mirror lands the Delta table.
-microbatch: micro-batch flows; the Delta table is written directly and/or forwarded to Event Hubs.
+microbatch: micro-batch flows; the Delta table is an upsert on record_id, and records go to Event Hubs.
 """
 
 from pyspark import pipelines as dp
@@ -38,21 +38,19 @@ if rule.mode == "rtm":
 
 else:
     if "delta" in rule.destinations:
+        # At-least-once inputs: upsert on record_id so a re-sent record updates its row.
+        feed = f"_{rule.table}_feed"
 
-        @dp.table(name=rule.table, comment=f"Subscription {rule.name} (src/subscriptions/{rule.name}.yml).")
-        def _table():
+        def _parsed():
             parsed = F.from_json("value", subscriptions.output_schema(rule)).alias("r")
             keyed = _records().select(F.col("key").cast("string").alias("key"), parsed)
             return keyed.select("key", "r.*", F.current_timestamp().alias("_ingested_at"))
 
+        dp.temporary_view(name=feed)(_parsed)
+        dp.create_streaming_table(rule.table, comment=f"Subscription {rule.name} (src/subscriptions/{rule.name}.yml).")
+        dp.create_auto_cdc_flow(target=rule.table, source=feed, keys=["record_id"], sequence_by=F.col("gold_ts"),
+                                stored_as_scd_type=1)  # fmt: skip
+
     if "eventhubs" in rule.destinations:
         dp.create_sink(f"{rule.table}_eventhubs", "kafka", rtm.sink_options(spark, topic))
-
-        def _to_kafka():
-            if "delta" not in rule.destinations:
-                return _records()
-            t = spark.readStream.table(rule.table)
-            fields = [c for c in t.columns if c not in ("key", "_ingested_at")]
-            return t.select("key", F.to_json(F.struct(*fields)).alias("value"))
-
-        dp.append_flow(name=f"{rule.table}_to_eventhubs", target=f"{rule.table}_eventhubs")(_to_kafka)
+        dp.append_flow(name=f"{rule.table}_to_eventhubs", target=f"{rule.table}_eventhubs")(_records)

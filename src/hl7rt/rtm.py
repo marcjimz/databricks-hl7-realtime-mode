@@ -20,6 +20,7 @@ def read_topic(spark: SparkSession, topic: str) -> DataFrame:
         .option("subscribe", topic)
         .option("startingOffsets", conf(spark, "kafka.starting_offsets"))
         .option("maxPartitions", conf(spark, "rtm.max_partitions"))
+        .option("kafka.fetch.max.wait.ms", "50")  # RTM runbook: don't let an empty fetch wait the default 500 ms
         .load()
     )
 
