@@ -25,3 +25,23 @@ def test_kafka_options_shape():
 def test_kafka_options_extra_overrides():
     opts = eventhubs.kafka_options("ehns-demo", "conn", {"kafka.request.timeout.ms": "1000"})
     assert opts["kafka.request.timeout.ms"] == "1000"
+
+
+# Azure closes idle connections after 240 s; clients must refresh metadata and recycle connections before that.
+# https://learn.microsoft.com/azure/event-hubs/apache-kafka-configurations
+AZURE_IDLE_MS = 240_000
+
+
+def test_java_client_follows_event_hubs_guidance():
+    opts = eventhubs.kafka_options("ehns-demo", "conn")
+    assert int(opts["kafka.metadata.max.age.ms"]) < AZURE_IDLE_MS
+    assert int(opts["kafka.connections.max.idle.ms"]) < AZURE_IDLE_MS
+    assert int(opts["kafka.request.timeout.ms"]) >= 60_000
+    assert int(opts["kafka.max.request.size"]) < 1_046_528
+
+
+def test_librdkafka_producer_follows_event_hubs_guidance():
+    cfg = eventhubs.producer_config("ehns-demo", "conn")
+    assert cfg["socket.keepalive.enable"] is True
+    assert int(cfg["metadata.max.age.ms"]) < AZURE_IDLE_MS
+    assert int(cfg["request.timeout.ms"]) >= 60_000
