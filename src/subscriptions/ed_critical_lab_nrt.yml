@@ -1,0 +1,13 @@
+# Same rule as ed_critical_lab, in micro-batch (seconds, serverless): writes Delta directly, then Event Hubs.
+name: ed_critical_lab_nrt
+mode: microbatch
+key: patient_id
+when:
+  source: gold_encounters
+  filter: "event = 'A04' AND patient_class = 'E'"
+then:
+  source: gold_observations
+  filter: "abnormal_flag IN ('HH', 'LL')"
+within: 60 minutes
+output: [patient_id, patient_facility, when.visit_id, observation_cd, observation_cd_desc, value_num, abnormal_flag]
+destinations: [eventhubs, delta]

@@ -72,7 +72,8 @@ docs/                 latency results + design notes
 - **Use the shared wiring:** every RTM hop uses `hl7rt.rtm` (`read_topic`, `sink_options`, `flow_conf`) and the
   `rtm_cluster` complex bundle variable. Don't hand-roll Kafka options or cluster specs per pipeline.
   `tests/test_rtm_resources.py` enforces continuous, RTM flag, classic, no Photon, fixed workers, on-demand,
-  slot headroom ≥ 1.2×, and no development-mode targets.
+  slot headroom ≥ 1.2×, and no development-mode targets. Event Hubs client settings follow Microsoft's guidance
+  (`eventhubs._JAVA_CLIENT` / `_LIBRDKAFKA`: metadata and idle < 240 s), enforced by `tests/test_eventhubs.py`.
 - **Route, don't fork:** a sink created without a `topic` routes each record by its `topic` column. Silver
   writes the silver and quarantine topics from **one** flow (one read, no extra slots), not two flows.
 - **Enable it in SDP:** pipeline `continuous: true` + `spark.databricks.streaming.realTimeMode.enabled: "true"`
@@ -118,6 +119,19 @@ docs/                 latency results + design notes
   `NM`), orders (ORM). One flow writes all three: build an array of `(topic, value)` per silver record and
   `explode` it. Gold JSON uses `to_json(..., {"ignoreNullFields": "false"})` so every record has the full shape
   subscribers code against. (Spark's default drops null fields.) Change a gold schema only additively.
+- **Subscriptions** (`hl7rt.subscriptions`):
+  - One rule file `src/subscriptions/<name>.yml` maps to one pipeline `resources/pipelines/sub_<name>.yml`, created
+    from `resources/pipelines/_templates/` with `make sub-new`. That's one hub `sub_<name>` (Terraform `fileset`) and
+    one table `sub_<name>`.
+  - All subscriptions share the runner `src/pipelines/subscriptions/runner.py`.
+  - Rule shapes: `when` only (stateless filter), or `when` + `then` + `within` (stream-stream inner join on `key`
+    over `msg_dt_tm`, with watermarks).
+  - RTM joins need `subscriptions.RTM_JOIN_CONF` in the **pipeline `configuration`** and the `rtm_join_cluster`
+    (2 sources × 4 + 4 shuffle = 12 tasks → 16 slots). Set as flow `spark_conf`, the join fails with
+    `STREAM_STREAM_JOIN_NOT_SUPPORTED`.
+  - RTM rules land in Delta via the mirror; micro-batch rules write Delta directly.
+  - Don't chain a second stateful operator after the join: RTM runs in update mode.
+  - `tests/test_topic_names.py` keeps the rule, resource, hub, and mode consistent.
 - Each hot-path record carries the upstream broker timestamps (`raw_ts`, `bronze_ts`, ...). The lakehouse mirror
   (`hl7rt.lakehouse`) turns them into `hop_ms` / `e2e_ms` columns.
 

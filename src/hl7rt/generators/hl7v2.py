@@ -43,9 +43,9 @@ def _flag(v: float, lo: float, hi: float) -> str:
     return "H" if v > hi else "L" if v < lo else "N"
 
 
-def build(n: int, rng: random.Random, bad_ratio: float = 0.01) -> tuple[str, str]:
+def build(n: int, rng: random.Random, bad_ratio: float = 0.01, patients: int = 50_000) -> tuple[str, str]:
     """Return (key, message) for message number n. Key = patient MRN, so a patient's messages stay ordered."""
-    mrn = f"MRN{rng.randint(1, 500):05d}"
+    mrn = f"MRN{rng.randint(1, patients):06d}"
     if rng.random() < bad_ratio:
         return mrn, rng.choice(["not an hl7 message", segment("PID", {1: "1", 3: mrn})])
     now = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
@@ -125,6 +125,7 @@ def main() -> None:
         p.add_argument(a, required=True)
     p.add_argument("--rate", type=float, default=50, help="messages per second")
     p.add_argument("--bad-ratio", type=float, default=0.01)
+    p.add_argument("--patients", type=int, default=50_000, help="size of the synthetic patient population")
     args = p.parse_args()
 
     conn = dbutils.secrets.get(args.secret_scope, args.secret_key)
@@ -132,7 +133,7 @@ def main() -> None:
     rng, n, interval = random.Random(), 0, 1.0 / args.rate
     next_at = time.monotonic()
     while True:
-        key, msg = build(n, rng, args.bad_ratio)
+        key, msg = build(n, rng, args.bad_ratio, args.patients)
         producer.produce(args.topic, key=key, value=msg, headers={"sent_ms": str(int(time.time() * 1000))})
         producer.poll(0)
         n += 1

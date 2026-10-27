@@ -13,6 +13,7 @@
 #   make deploy dev              validate + deploy (continuous pipelines start automatically)
 #   make generate dev            start the continuous synthetic feed (runs until generate-stop)
 #   make generate-stop dev       cancel the synthetic feed
+#   make sub-new NAME=x [MODE=rtm|microbatch] [JOIN=1]   new subscription from the templates
 #   make reset dev               full refresh: new checkpoints, start at the live edge (DEMO ONLY)
 #   make stop dev                stop all pipelines + generators (stops compute billing)
 #   make destroy dev             databricks bundle destroy
@@ -32,19 +33,20 @@ STACK   ?= eventhubs
 TF      := terraform -chdir=infra/$(STACK)
 TF_EH   := terraform -chdir=infra/eventhubs
 
-# Hot-path RTM pipelines first, then the near-real-time mirror and the Epic JSON feed.
-PIPELINES  := hl7_bronze hl7_silver hl7_gold lakehouse epic_json
+# Hot-path RTM pipelines first, then subscriptions (one per src/subscriptions/<name>.yml), the mirror, and Epic JSON.
+SUBSCRIPTIONS := $(patsubst src/subscriptions/%.yml,sub_%,$(wildcard src/subscriptions/[a-z]*.yml))
+PIPELINES  := hl7_bronze hl7_silver hl7_gold $(SUBSCRIPTIONS) lakehouse epic_json
 GENERATORS := hl7_generator epic_json_generator
 
 # Resolve a deployed resource id from the bundle summary: $(call resource_id,pipelines,epic_json)
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")
 bundle_var  = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['variables']['$(1)']['value'])")
 
-.PHONY: help install test lint fmt clean infra-plan infra-apply secrets validate deploy generate generate-stop \
+.PHONY: help install test lint fmt clean infra-plan infra-apply secrets validate deploy generate generate-stop sub-new \
         reset stop destroy guard-target $(ENVS)
 
 help:
-	@sed -n '3,22p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
+	@sed -n '3,23p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 	@echo "  <env> is one of: $(ENVS)"
 
 guard-target:
@@ -109,6 +111,19 @@ generate-stop: guard-target
 	@for j in $(GENERATORS); do id=$(call resource_id,jobs,$$j); $(DBX) jobs cancel-all-runs --job-id $$id >/dev/null; \
 	  while [ "$$($(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))')" != "0" ]; do sleep 5; done; \
 	  echo "stopped $$j"; done
+
+# New subscription: a rule file from src/subscriptions/_template.yml + a pipeline resource from the mode's template.
+MODE ?= rtm
+# JOIN only matters for rtm (join settings + a bigger cluster); micro-batch joins need nothing extra.
+SUB_TEMPLATE := resources/pipelines/_templates/sub_$(MODE)$(if $(and $(JOIN),$(filter rtm,$(MODE))),_join).yml.tmpl
+sub-new:
+	@test -n "$(NAME)" || { echo "usage: make sub-new NAME=<name> [MODE=rtm|microbatch] [JOIN=1]"; exit 2; }
+	@test -f $(SUB_TEMPLATE) || { echo "error: no template $(SUB_TEMPLATE)"; exit 2; }
+	@test ! -f src/subscriptions/$(NAME).yml || { echo "error: src/subscriptions/$(NAME).yml already exists"; exit 2; }
+	@sed -e 's/^name: _template/name: $(NAME)/' -e 's/^mode: rtm /mode: $(MODE) /' src/subscriptions/_template.yml > src/subscriptions/$(NAME).yml
+	@sed 's/__NAME__/$(NAME)/g' $(SUB_TEMPLATE) > resources/pipelines/sub_$(NAME).yml
+	@echo "created src/subscriptions/$(NAME).yml and resources/pipelines/sub_$(NAME).yml"
+	@echo "next: edit the rule, make infra-plan && make infra-apply (adds hub sub_$(NAME)), make deploy <env>"
 
 # Demo-only: discards checkpoints so streams start at kafka_starting_offsets (latest) instead of
 # resuming. Production should always resume from the checkpoint so no message is skipped.

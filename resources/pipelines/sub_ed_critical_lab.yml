@@ -1,0 +1,37 @@
+# Subscription ed_critical_lab (rule: src/subscriptions/ed_critical_lab.yml) — Real-Time Mode, event A then B (stream-stream join).
+resources:
+  pipelines:
+    sub_ed_critical_lab:
+      name: hl7rt-${bundle.target}-sub-ed_critical_lab
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.hl7.name}
+      serverless: false
+      photon: false
+      edition: ADVANCED
+      continuous: true
+      clusters:
+        - ${var.rtm_join_cluster}
+      root_path: ../../src
+      libraries:
+        - glob:
+            include: ../../src/pipelines/subscriptions/**
+      configuration:
+        spark.databricks.streaming.realTimeMode.enabled: "true"
+        spark.databricks.streaming.realTimeMode.streamStreamJoin.enabled: "true"
+        spark.sql.streaming.join.stateFormatVersion: "4"
+        spark.sql.streaming.join.stateFormatV4.enabled: "true"
+        spark.sql.streaming.stateStore.rocksdb.mergeOperatorVersion: "2"
+        spark.sql.streaming.realTimeMode.controlMessage.enabled: "true"
+        hl7.eh.namespace: ${var.eh_namespace}
+        hl7.eh.secret_scope: ${var.eh_secret_scope}
+        hl7.eh.secret_key: ${var.eh_secret_key}
+        hl7.kafka.starting_offsets: ${var.kafka_starting_offsets}
+        hl7.rtm.trigger_interval: ${var.rtm_trigger_interval}
+        hl7.rtm.max_partitions: ${var.rtm_max_partitions}
+        hl7.sub.rule: ${workspace.file_path}/src/subscriptions/ed_critical_lab.yml
+        hl7.topics.prefix: ${var.catalog}.${var.schema}
+        hl7.topics.gold_encounters: ${var.hl7_gold_encounters_topic}
+        hl7.topics.gold_observations: ${var.hl7_gold_observations_topic}
+        hl7.topics.gold_orders: ${var.hl7_gold_orders_topic}
+        hl7.rtm.shuffle_partitions: "4"
+        hl7.rtm.stage_tasks_multiplier: "3"

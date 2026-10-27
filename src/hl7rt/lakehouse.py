@@ -86,3 +86,17 @@ def gold_rows(gold_topic: DataFrame, schema) -> DataFrame:
         _ms(F.col("kafka_timestamp"), F.col("g.raw_ts")).alias("e2e_ms"),
         F.current_timestamp().alias("_ingested_at"),
     )
+
+
+def subscription_rows(sub_topic: DataFrame, schema) -> DataFrame:
+    """sub_*: the subscription record (subscriptions.output_schema), then gold -> sub and end-to-end latency."""
+    s = sub_topic.select(F.col("key").cast("string").alias("key"), _value(schema).alias("s"),
+                         F.col("timestamp").alias("kafka_timestamp"))  # fmt: skip
+    return s.select(
+        "key",
+        "s.*",
+        "kafka_timestamp",
+        _ms(F.col("kafka_timestamp"), F.col("s.gold_ts")).alias("hop_ms"),
+        _ms(F.col("kafka_timestamp"), F.col("s.raw_ts")).alias("e2e_ms"),
+        F.current_timestamp().alias("_ingested_at"),
+    )

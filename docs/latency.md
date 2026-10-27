@@ -303,3 +303,29 @@ Same conditions as the failing run (50 msg/s, 500 patients, 2 PU), 12 minutes, z
 So the "low-rate partition" explanation above was wrong, and the client config was the cause. The mechanism is
 inferred from the docs (a connection to one Event Hubs broker hitting the 240 s idle close before the client recycled
 it), not traced at the packet level. `tests/test_eventhubs.py` now enforces the limits.
+
+---
+
+# Phase 4 — self-service subscriptions
+
+Two RTM subscriptions from YAML rules, on top of the full hot path. 200 msg/s, 50,000 synthetic patients, 12-minute
+soak (03:36–03:48 UTC, ≥ 2 epoch boundaries per pipeline), zero flow WARN/ERROR, Microsoft client settings:
+
+| Hop | n | p50 | p99 | max |
+|---|---|---|---|---|
+| raw → bronze | 144,001 | 12 | **38** | 1,144 |
+| bronze → silver | 142,536 | 15 | **47** | 1,750 |
+| silver → gold (encounters / observations) | 61k / 204k | 15 | **32** | 968 |
+| gold → `sub_critical_lab` (one event, stateless) | 48,860 | 15 | **31** | 860 |
+| gold → `sub_ed_critical_lab` (ED registration then critical lab ≤ 60 min, stream-stream join) | 18,821 | 32 | **79** | 3,109 |
+
+**Exactness** (checked against SQL over the Delta tables):
+- `critical_lab`: 48,860 critical results in gold, 48,860 delivered, 0 with the wrong flag.
+- `ed_critical_lab` vs an SQL interval join over `gold_encounters` × `gold_observations`: 0 unexpected matches, 0
+  duplicates. For registrations that arrived after the subscription started, 0 missing.
+
+**The join needs its settings in the pipeline `configuration`.** As flow `spark_conf`, it failed with
+`STREAM_STREAM_JOIN_NOT_SUPPORTED`. As pipeline configuration (like the RTM flag), it runs.
+
+Not verified: driver logs for the subscription clusters (the clusters were gone after stop); micro-batch mode on dev
+(templates are validated and unit-tested only).

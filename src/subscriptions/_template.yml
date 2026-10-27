@@ -1,0 +1,20 @@
+# Subscription rule template. Copy with `make sub-new NAME=<name> MODE=rtm|microbatch`, edit, `make deploy <env>`.
+# Results go to topic and table <catalog>.<schema>.sub_<name>.
+
+name: _template                  # must match the file name
+mode: rtm                        # rtm: milliseconds (classic cluster) | microbatch: seconds (serverless)
+key: patient_id                  # Kafka key of the output, and the join key for `then`
+
+when:                            # event A
+  source: gold_observations      # gold_encounters | gold_observations | gold_orders
+  filter: "abnormal_flag IN ('HH', 'LL')"   # any Spark SQL condition over the source's columns
+
+# then:                          # optional: event B for the same key, within `within` after event A
+#   source: gold_observations
+#   filter: "abnormal_flag = 'HH'"
+# within: 60 minutes
+# lateness: 5 minutes            # how late an event may arrive and still match (watermark)
+
+output: [patient_id, visit_id, patient_facility, observation_cd_desc, value_num, abnormal_flag]
+                                 # with `then`, prefix `when.` / `then.` to pick a side (default: then, else when)
+destinations: [eventhubs, delta] # rtm needs eventhubs; delta lands via the lakehouse mirror
