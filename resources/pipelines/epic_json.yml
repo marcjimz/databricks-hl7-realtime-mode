@@ -1,0 +1,21 @@
+# The existing Epic JSON feed (pre-parsed by an outside system), improved: bronze + silver + quarantine.
+# Micro-batch (not Real-Time Mode); kept as the drop-in replacement for the customer's current pipeline.
+resources:
+  pipelines:
+    epic_json:
+      name: hl7rt-${bundle.target}-epic-json
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.hl7.name}
+      serverless: true
+      continuous: true
+      root_path: ../../src
+      libraries:
+        - glob:
+            include: ../../src/pipelines/epic_json/**
+      configuration:
+        hl7.eh.namespace: ${var.eh_namespace}
+        hl7.eh.secret_scope: ${var.eh_secret_scope}
+        hl7.eh.secret_key: ${var.eh_secret_key}
+        hl7.epic_json.topic: ${var.epic_json_topic}
+        hl7.kafka.starting_offsets: ${var.kafka_starting_offsets}
+        hl7.kafka.max_offsets_per_trigger: ${var.kafka_max_offsets_per_trigger}

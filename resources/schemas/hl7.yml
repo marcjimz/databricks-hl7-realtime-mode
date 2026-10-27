@@ -1,0 +1,6 @@
+resources:
+  schemas:
+    hl7:
+      catalog_name: ${var.catalog}
+      name: ${var.schema}
+      comment: HL7 on Spark Real-Time Mode — Delta mirrors of every layer topic.

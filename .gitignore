@@ -7,14 +7,15 @@ spikes/
 # Databricks
 .databricks/
 
-# Terraform
-infra/.terraform/
-infra/*.tfstate
-infra/*.tfstate.*
-infra/*.tfvars
-!infra/*.tfvars.example
-infra/*.tfplan
-infra/.terraform.lock.hcl
+# Terraform (one stack per folder: infra/<stack>/)
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/terraform.tfstate.d/
+infra/**/*.tfvars
+!infra/**/*.tfvars.example
+infra/**/tfplan
+infra/**/.terraform.lock.hcl
 
 # Python
 __pycache__/
@@ -24,6 +25,7 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 dist/
+.build/
 *.egg-info/
 
 # Tooling
