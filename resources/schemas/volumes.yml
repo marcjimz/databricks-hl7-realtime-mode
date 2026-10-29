@@ -5,3 +5,8 @@ resources:
       schema_name: ${resources.schemas.hl7.name}
       name: cluster_logs
       comment: Driver/executor logs from the RTM pipeline clusters (inter-batch latency diagnostics).
+    checkpoints:
+      catalog_name: ${var.catalog}
+      schema_name: ${resources.schemas.hl7.name}
+      name: checkpoints
+      comment: Streaming checkpoints for subscription jobs (Structured Streaming outside pipelines).

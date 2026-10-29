@@ -1,6 +1,7 @@
 """Generic subscription runner: one rule file (hl7.sub.rule) -> topic <catalog>.<schema>.sub_<name> (+ Delta).
 
-rtm:        Real-Time Mode flow to Event Hubs; the lakehouse mirror lands the Delta table.
+rtm:        Real-Time Mode flow to Event Hubs; the lakehouse mirror lands the Delta table. (RTM joins aren't
+            supported in pipelines; they run as a Structured Streaming job, hl7rt.subscription_job.)
 microbatch: micro-batch flows; the Delta table is an upsert on record_id, and records go to Event Hubs.
 """
 
@@ -32,9 +33,10 @@ def _records():
 
 
 if rule.mode == "rtm":
-    extra = {"spark.sql.shuffle.partitions": conf(spark, "rtm.shuffle_partitions")} if rule.is_join else None
+    if rule.is_join:
+        raise ValueError(f"{rule.name}: RTM joins run as a Structured Streaming job (hl7rt.subscription_job), not here")
     dp.create_sink(rule.table, "kafka", rtm.sink_options(spark, topic))
-    dp.update_flow(name=rule.table, target=rule.table, spark_conf=rtm.flow_conf(spark, extra))(_records)
+    dp.update_flow(name=rule.table, target=rule.table, spark_conf=rtm.flow_conf(spark))(_records)
 
 else:
     if "delta" in rule.destinations:

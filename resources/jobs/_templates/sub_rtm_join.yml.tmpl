@@ -1,0 +1,34 @@
+# Subscription __NAME__ (rule: src/subscriptions/__NAME__.yml): Real-Time Mode join as a Structured Streaming job,
+# because Lakeflow pipelines don't support stream-stream joins in RTM. make start / make stop run and cancel it.
+resources:
+  jobs:
+    sub___NAME__:
+      name: hl7rt-${bundle.target}-sub-__NAME__
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: subscription
+          job_cluster_key: rtm
+          max_retries: -1
+          min_retry_interval_millis: 15000
+          python_wheel_task:
+            package_name: hl7rt
+            entry_point: hl7-subscription
+            parameters:
+              - --rule=${workspace.file_path}/src/subscriptions/__NAME__.yml
+              - --checkpoint=/Volumes/${var.catalog}/${var.schema}/checkpoints/sub___NAME__
+              - --conf=eh.namespace=${var.eh_namespace}
+              - --conf=eh.secret_scope=${var.eh_secret_scope}
+              - --conf=eh.secret_key=${var.eh_secret_key}
+              - --conf=kafka.starting_offsets=${var.kafka_starting_offsets}
+              - --conf=rtm.trigger_interval=${var.rtm_trigger_interval}
+              - --conf=rtm.max_partitions=${var.rtm_max_partitions}
+              - --conf=rtm.shuffle_partitions=4
+              - --conf=topics.prefix=${var.catalog}.${var.schema}
+              - --conf=topics.gold_encounters=${var.hl7_gold_encounters_topic}
+              - --conf=topics.gold_observations=${var.hl7_gold_observations_topic}
+              - --conf=topics.gold_orders=${var.hl7_gold_orders_topic}
+          libraries:
+            - whl: ../../.build/*.whl
+      job_clusters:
+        - job_cluster_key: rtm
+          new_cluster: ${var.rtm_job_cluster}

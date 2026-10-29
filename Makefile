@@ -14,7 +14,7 @@
 #   make start dev               start every pipeline (resumes checkpoints; already-running ones are left alone)
 #   make demo dev                deploy + start + generate, then print the dashboard URL
 #   make generate dev            start the continuous synthetic feed (runs until generate-stop)
-#   make generate-stop dev       cancel the synthetic feed
+#   make generate-stop dev       cancel the synthetic feed (and subscription jobs)
 #   make sub-new NAME=x [MODE=rtm|microbatch] [JOIN=1]   new subscription from the templates
 #   make reset dev               full refresh: new checkpoints, start at the live edge (DEMO ONLY)
 #   make stop dev                stop all pipelines + generators (stops compute billing)
@@ -36,9 +36,11 @@ STACK   ?= eventhubs
 TF      := terraform -chdir=infra/$(STACK)
 TF_EH   := terraform -chdir=infra/eventhubs
 
-# Hot-path RTM pipelines first, then subscriptions (one per src/subscriptions/<name>.yml), the mirror, and Epic JSON.
-SUBSCRIPTIONS := $(patsubst src/subscriptions/%.yml,sub_%,$(wildcard src/subscriptions/[a-z]*.yml))
-PIPELINES  := hl7_bronze hl7_silver hl7_gold $(SUBSCRIPTIONS) lakehouse epic_json
+# Hot-path RTM pipelines first, then subscription pipelines, the mirror, and Epic JSON. RTM join subscriptions are
+# Structured Streaming jobs (resources/jobs/sub_*.yml) because pipelines don't support stream-stream joins in RTM.
+SUB_PIPELINES := $(patsubst resources/pipelines/%.yml,%,$(wildcard resources/pipelines/sub_*.yml))
+SUB_JOBS      := $(patsubst resources/jobs/%.yml,%,$(wildcard resources/jobs/sub_*.yml))
+PIPELINES  := hl7_bronze hl7_silver hl7_gold $(SUB_PIPELINES) lakehouse epic_json
 GENERATORS := hl7_generator epic_json_generator
 
 # Resolve a deployed resource id from the bundle summary: $(call resource_id,pipelines,epic_json)
@@ -108,6 +110,9 @@ deploy: guard-target
 
 start: guard-target
 	@for p in $(PIPELINES); do $(BUNDLE) run -t $(TARGET) --no-wait $$p >/dev/null 2>&1 && echo "started $$p" || echo "running $$p"; done
+	@for j in $(SUB_JOBS); do id=$(call resource_id,jobs,$$j); \
+	  if [ "$$($(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))')" = "0" ]; \
+	  then $(BUNDLE) run -t $(TARGET) --no-wait $$j >/dev/null && echo "started $$j"; else echo "running $$j"; fi; done
 
 demo: deploy start generate
 	@echo "dashboard: $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['dashboards']['hl7_latency']['url'])")"
@@ -118,21 +123,26 @@ generate: guard-target
 
 # Waits until the runs have actually stopped, so a following `make generate` doesn't queue behind them.
 generate-stop: guard-target
-	@for j in $(GENERATORS); do id=$(call resource_id,jobs,$$j); $(DBX) jobs cancel-all-runs --job-id $$id >/dev/null; \
+	@for j in $(GENERATORS) $(SUB_JOBS); do id=$(call resource_id,jobs,$$j); $(DBX) jobs cancel-all-runs --job-id $$id >/dev/null; \
 	  while [ "$$($(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))')" != "0" ]; do sleep 5; done; \
 	  echo "stopped $$j"; done
 
 # New subscription: a rule file from src/subscriptions/_template.yml + a pipeline resource from the mode's template.
 MODE ?= rtm
-# JOIN only matters for rtm (join settings + a bigger cluster); micro-batch joins need nothing extra.
-SUB_TEMPLATE := resources/pipelines/_templates/sub_$(MODE)$(if $(and $(JOIN),$(filter rtm,$(MODE))),_join).yml.tmpl
+# An rtm JOIN rule runs as a Structured Streaming job (pipelines don't support RTM stream-stream joins); everything
+# else is a pipeline. Micro-batch joins need nothing extra.
+RTM_JOIN := $(and $(JOIN),$(filter rtm,$(MODE)))
+SUB_KIND := $(if $(RTM_JOIN),jobs,pipelines)
+SUB_TEMPLATE := resources/$(SUB_KIND)/_templates/sub_$(MODE)$(if $(RTM_JOIN),_join).yml.tmpl
 sub-new:
 	@test -n "$(NAME)" || { echo "usage: make sub-new NAME=<name> [MODE=rtm|microbatch] [JOIN=1]"; exit 2; }
 	@test -f $(SUB_TEMPLATE) || { echo "error: no template $(SUB_TEMPLATE)"; exit 2; }
 	@test ! -f src/subscriptions/$(NAME).yml || { echo "error: src/subscriptions/$(NAME).yml already exists"; exit 2; }
-	@sed -e 's/^name: _template/name: $(NAME)/' -e 's/^mode: rtm /mode: $(MODE) /' src/subscriptions/_template.yml > src/subscriptions/$(NAME).yml
-	@sed 's/__NAME__/$(NAME)/g' $(SUB_TEMPLATE) > resources/pipelines/sub_$(NAME).yml
-	@echo "created src/subscriptions/$(NAME).yml and resources/pipelines/sub_$(NAME).yml"
+	@sed -e 's/^name: _template/name: $(NAME)/' -e 's/^mode: rtm /mode: $(MODE) /' \
+	  $(if $(JOIN),-e 's/^# then: /then: /' -e 's/^#   source:/  source:/' -e 's/^#   filter:/  filter:/' -e 's/^# within:/within:/') \
+	  src/subscriptions/_template.yml > src/subscriptions/$(NAME).yml
+	@sed 's/__NAME__/$(NAME)/g' $(SUB_TEMPLATE) > resources/$(SUB_KIND)/sub_$(NAME).yml
+	@echo "created src/subscriptions/$(NAME).yml and resources/$(SUB_KIND)/sub_$(NAME).yml"
 	@echo "next: edit the rule, make infra-plan && make infra-apply (adds hub sub_$(NAME)), make deploy <env>"
 
 # Demo-only: discards checkpoints so streams start at kafka_starting_offsets (latest) instead of

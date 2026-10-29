@@ -74,8 +74,25 @@ def _rules():
     return [subscriptions.load(p) for p in sorted((ROOT / "src/subscriptions").glob("[a-z]*.yml"))]
 
 
-def test_each_subscription_rule_has_a_matching_pipeline():
+def test_each_subscription_rule_has_a_matching_resource():
+    """rtm + `then` (a stream-stream join) runs as a Structured Streaming job, since Lakeflow pipelines don't support
+    RTM stream-stream joins; every other rule is a pipeline."""
     for rule in _rules():
+        if rule.mode == "rtm" and rule.is_join:
+            f = ROOT / "resources/jobs" / f"{rule.table}.yml"
+            assert f.exists(), f"{rule.name}: missing {f.relative_to(ROOT)} (make sub-new NAME={rule.name} JOIN=1)"
+            assert not (ROOT / "resources/pipelines" / f"{rule.table}.yml").exists(), (
+                f"{rule.name}: RTM join can't be a pipeline"
+            )
+            job = yaml.safe_load(f.read_text())["resources"]["jobs"][rule.table]
+            (task,) = job["tasks"]
+            params = task["python_wheel_task"]["parameters"]
+            assert task["python_wheel_task"]["entry_point"] == "hl7-subscription"
+            assert f"--rule=${{workspace.file_path}}/src/subscriptions/{rule.name}.yml" in params
+            assert any(p.startswith("--checkpoint=") and p.endswith(f"/{rule.table}") for p in params)
+            assert "--conf=topics.prefix=${var.catalog}.${var.schema}" in params
+            assert job["job_clusters"][0]["new_cluster"] == "${var.rtm_job_cluster}"
+            continue
         f = ROOT / "resources/pipelines" / f"{rule.table}.yml"
         assert f.exists(), f"{rule.name}: missing {f.relative_to(ROOT)} (make sub-new NAME={rule.name})"
         spec = yaml.safe_load(f.read_text())["resources"]["pipelines"][rule.table]
@@ -85,13 +102,34 @@ def test_each_subscription_rule_has_a_matching_pipeline():
         rtm = str(conf.get("spark.databricks.streaming.realTimeMode.enabled")).lower() == "true"
         assert rtm == (rule.mode == "rtm"), f"{rule.name}: mode {rule.mode} but the pipeline RTM flag is {rtm}"
         assert spec.get("serverless") is (rule.mode == "microbatch")
-        if rule.is_join and rtm:
-            assert int(conf.get("hl7.rtm.stage_tasks_multiplier", 1)) >= 3, f"{rule.name}: size for the join"
-            missing = {k: v for k, v in subscriptions.RTM_JOIN_CONF.items() if conf.get(k) != v}
-            assert not missing, f"{rule.name}: RTM joins need pipeline configuration {missing}"
 
 
-def test_every_subscription_pipeline_has_a_rule():
+def test_rtm_job_cluster_follows_rtm_rules_with_headroom():
+    variables = yaml.safe_load((ROOT / "databricks.yml").read_text())["variables"]
+    c = variables["rtm_job_cluster"]["default"]
+    assert c["spark_conf"]["spark.databricks.streaming.realTimeMode.enabled"] == "true"
+    assert c["runtime_engine"] == "STANDARD" and "autoscale" not in c and isinstance(c["num_workers"], int)
+    assert c["aws_attributes"]["availability"] == "ON_DEMAND"
+    assert c["spark_version"].startswith(("18.", "19.")), "RTM stream-stream joins with other streams need DBR 18 LTS+"
+    partitions = int(variables["rtm_max_partitions"]["default"])
+    tasks = 2 * partitions + 4  # two Kafka sources + 4 join (shuffle) tasks
+    from test_rtm_resources import CORES, HEADROOM
+
+    assert c["num_workers"] * CORES[c["node_type_id"]] >= HEADROOM * tasks
+
+
+def test_subscription_job_parameters_supply_every_config_key():
+    from test_config_wiring import _keys_for
+
+    needed = _keys_for([ROOT / "src/hl7rt/subscription_job.py"])
+    for f in (ROOT / "resources/jobs").glob("sub_*.yml"):
+        (job,) = yaml.safe_load(f.read_text())["resources"]["jobs"].values()
+        params = job["tasks"][0]["python_wheel_task"]["parameters"]
+        given = {p.removeprefix("--conf=").split("=", 1)[0] for p in params if p.startswith("--conf=")}
+        assert needed <= given, f"{f.name} is missing --conf for {sorted(needed - given)}"
+
+
+def test_every_subscription_resource_has_a_rule():
     names = {r.table for r in _rules()}
-    for f in (ROOT / "resources/pipelines").glob("sub_*.yml"):
+    for f in [*(ROOT / "resources/pipelines").glob("sub_*.yml"), *(ROOT / "resources/jobs").glob("sub_*.yml")]:
         assert f.stem in names, f"{f.name} has no src/subscriptions/{f.stem.removeprefix('sub_')}.yml"

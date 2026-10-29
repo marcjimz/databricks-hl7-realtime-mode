@@ -84,16 +84,20 @@ variables:
         volumes:
           destination: /Volumes/${var.catalog}/${var.schema}/cluster_logs
 
-  rtm_join_cluster:
-    description: Fixed classic cluster for a join subscription (4 x 4 cores = 16 slots for 12 tasks).
+  rtm_job_cluster:
+    description: Classic job cluster for an RTM join subscription (Structured Streaming job; 4 x 4 cores = 16 slots for 12 tasks).
     type: complex
     default:
-      label: default
+      spark_version: 18.x-scala2.13
       num_workers: 4
       node_type_id: m6id.xlarge
+      runtime_engine: STANDARD
+      data_security_mode: SINGLE_USER
       aws_attributes:
         availability: ON_DEMAND
         first_on_demand: 5
+      spark_conf:
+        spark.databricks.streaming.realTimeMode.enabled: "true"
       cluster_log_conf:
         volumes:
           destination: /Volumes/${var.catalog}/${var.schema}/cluster_logs
