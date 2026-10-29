@@ -34,3 +34,6 @@ dist/
 .idea/
 .vscode/
 .DS_Store
+
+# Local Makefile settings (CLI profile)
+local.mk

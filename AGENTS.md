@@ -196,7 +196,7 @@ docs/                 latency results, walkthrough, Epic JSON notes
   `lookup` by name per target. `tests/test_dashboard.py` enforces portability and that every table it reads is
   produced. Subscriptions appear by themselves: the mirror feeds every rule's topic into `subscription_latency`.
 - **Machines that sleep stall background soaks.** Wrap long local waits in `caffeinate -i` (macOS).
-- Several CLI profiles can match one host. Set `DATABRICKS_CONFIG_PROFILE`.
+- Several CLI profiles can match one host. Put `PROFILE=<profile>` in `local.mk` (gitignored; `local.mk.example`).
 
 ## Spark patterns and pitfalls
 

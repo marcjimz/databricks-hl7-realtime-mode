@@ -1,0 +1,2 @@
+# Copy to local.mk (gitignored). Your Databricks CLI profile for the target workspace.
+PROFILE = fevm-real-time-mode-demo
