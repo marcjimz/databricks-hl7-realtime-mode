@@ -63,6 +63,7 @@ make stop dev            # stop all pipelines and the feed (stops Databricks bil
 
 make start dev           # start pipelines only
 make generate dev        # start the HL7 feed       |  make generate-stop dev
+make clear-data dev      # empty the Delta tables / dashboard and refill from live data (~2 min)
 make reset dev           # restart from the live edge with fresh checkpoints (demo only)
 make help                # everything else
 ```
