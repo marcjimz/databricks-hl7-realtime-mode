@@ -80,6 +80,35 @@ Classic Real-Time Mode clusters take ~9 minutes to start. Event Hubs keeps billi
 
 To add an environment, copy the `dev` target in `databricks.yml` and add its name to `ENVS` in the `Makefile`.
 
+## Demo: show a new subscription live
+
+1. **10 minutes before:** `make demo dev`, then open the dashboard URL it prints. Wait until every hop shows data.
+2. **Show what's running:** the p99 per hop (all under 200 ms), the two RTM examples (`critical_lab`,
+   `ed_critical_lab`), and the same ED rule in micro-batch (`ed_critical_lab_nrt`).
+3. **Create a subscription:**
+   ```bash
+   make sub-new NAME=hyperkalemia MODE=microbatch
+   ```
+   Replace the `when:` and `output:` lines in `src/subscriptions/hyperkalemia.yml` with:
+   ```yaml
+   when:
+     source: gold_observations
+     filter: "observation_cd = '2823-3' AND value_num > 6.0"
+   output: [patient_id, visit_id, patient_facility, value_num, abnormal_flag]
+   ```
+4. **Run it:**
+   ```bash
+   make infra-plan && make infra-apply   # creates topic sub_hyperkalemia (needs `az login`)
+   make deploy dev                       # starts it on serverless (~1 minute)
+   ```
+5. **Show the result:** table `sub_hyperkalemia` fills, and a `gold → hyperkalemia (micro-batch)` bar appears on the
+   dashboard with no dashboard edits.
+6. **Clean up:** `make stop dev`. To remove the example, delete `src/subscriptions/hyperkalemia.yml` and
+   `resources/pipelines/sub_hyperkalemia.yml`, then `make infra-plan && make infra-apply` and `make deploy dev`.
+
+Use `MODE=rtm` for millisecond delivery. Its classic cluster takes ~9 minutes to start, so in a live demo show the
+pre-built RTM examples and create the new one in micro-batch.
+
 ## Subscribe (self-service)
 
 ```bash
