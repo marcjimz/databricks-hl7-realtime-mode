@@ -11,8 +11,8 @@
         "FROM (SELECT '1 raw → bronze' AS hop, kafka_timestamp AS ts, hop_ms, e2e_ms FROM bronze_hl7\n",
         "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_hl7\n",
         "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations\n",
-        "UNION ALL SELECT concat('4 gold → ', subscription, CASE WHEN mode = 'microbatch' THEN ' (micro-batch)' ELSE '' END),\n",
-        "  kafka_timestamp, hop_ms, e2e_ms FROM subscription_latency) WHERE ts >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000 GROUP BY hop ORDER BY hop\n"
+        "UNION ALL SELECT concat('4 gold → ', subscription),\n",
+        "  kafka_timestamp, hop_ms, e2e_ms FROM subscription_latency WHERE mode = 'rtm') WHERE ts >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000 GROUP BY hop ORDER BY hop\n"
       ]
     },
     {
@@ -24,8 +24,8 @@
         "FROM (SELECT '1 raw → bronze' AS hop, kafka_timestamp AS ts, hop_ms, e2e_ms FROM bronze_hl7\n",
         "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_hl7\n",
         "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations\n",
-        "UNION ALL SELECT concat('4 gold → ', subscription, CASE WHEN mode = 'microbatch' THEN ' (micro-batch)' ELSE '' END),\n",
-        "  kafka_timestamp, hop_ms, e2e_ms FROM subscription_latency) WHERE ts >= timestampadd(MINUTE, -60, current_timestamp()) AND hop_ms < 600000 GROUP BY hop, date_trunc('MINUTE', ts)\n"
+        "UNION ALL SELECT concat('4 gold → ', subscription),\n",
+        "  kafka_timestamp, hop_ms, e2e_ms FROM subscription_latency WHERE mode = 'rtm') WHERE ts >= timestampadd(MINUTE, -60, current_timestamp()) AND hop_ms < 600000 GROUP BY hop, date_trunc('MINUTE', ts)\n"
       ]
     },
     {
@@ -56,6 +56,17 @@
         "SELECT reason, count(*) AS messages FROM quarantine_hl7\n",
         "WHERE kafka_timestamp >= timestampadd(MINUTE, -60, current_timestamp()) GROUP BY reason\n"
       ]
+    },
+    {
+      "name": "microbatch_subs",
+      "displayName": "Micro-batch subscriptions, last 15 minutes",
+      "queryLines": [
+        "SELECT subscription, count(*) AS records,\n",
+        "  round(percentile_approx(hop_ms, 0.5) / 1000, 1) AS p50_s, round(percentile_approx(hop_ms, 0.99) / 1000, 1) AS p99_s\n",
+        "FROM subscription_latency\n",
+        "WHERE mode = 'microbatch' AND kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000\n",
+        "GROUP BY subscription ORDER BY subscription\n"
+      ]
     }
   ],
   "pages": [
@@ -69,7 +80,7 @@
             "name": "title",
             "multilineTextboxSpec": {
               "lines": [
-                "## HL7 v2 on Real-Time Mode: live latency  ·  p99 target < 200 ms per hop  ·  backlog replay (> 10 min) excluded"
+                "## HL7 v2 on Real-Time Mode: live latency  ·  RTM hops, p99 target < 200 ms  ·  backlog replay (> 10 min) excluded"
               ]
             }
           },
@@ -579,7 +590,73 @@
           "position": {
             "x": 0,
             "y": 14,
-            "width": 6,
+            "width": 4,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "microbatch-subs",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "microbatch_subs",
+                  "fields": [
+                    {
+                      "name": "subscription",
+                      "expression": "`subscription`"
+                    },
+                    {
+                      "name": "records",
+                      "expression": "`records`"
+                    },
+                    {
+                      "name": "p50_s",
+                      "expression": "`p50_s`"
+                    },
+                    {
+                      "name": "p99_s",
+                      "expression": "`p99_s`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "subscription",
+                    "displayName": "Subscription"
+                  },
+                  {
+                    "fieldName": "records",
+                    "displayName": "Records"
+                  },
+                  {
+                    "fieldName": "p50_s",
+                    "displayName": "p50 (s)"
+                  },
+                  {
+                    "fieldName": "p99_s",
+                    "displayName": "p99 (s)"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Micro-batch subscriptions (seconds tier)"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 14,
+            "width": 2,
             "height": 5
           }
         }
