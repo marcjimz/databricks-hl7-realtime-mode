@@ -186,6 +186,8 @@ docs/                 latency results, walkthrough, Epic JSON notes
 - `make deploy <env>` starts only **new or changed** continuous pipelines; `make start <env>` starts the rest
   (running ones are left alone). `make generate <env>` / `make generate-stop <env>` control load (`generate-stop`
   waits until runs end). `make stop <env>` stops compute billing. `make demo <env>` = deploy + start + generate.
+- **`make clear-data <env>`** empties the Delta tables (full refresh of the lakehouse + micro-batch subscriptions) without
+  touching RTM pipelines. Use it after downtime so backlog catch-up doesn't skew the dashboard.
 - **Don't restart RTM pipelines between tests.** Classic cold start is ~9 min. Change load, not
   pipelines.
 - Spark's Kafka source **resumes from its checkpoint, not the consumer group**. `kafka_starting_offsets`

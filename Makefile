@@ -16,6 +16,7 @@
 #   make generate dev            start the continuous synthetic feed (runs until generate-stop)
 #   make generate-stop dev       cancel the synthetic feed
 #   make sub-new NAME=x [MODE=rtm|microbatch] [JOIN=1]   new subscription from the templates
+#   make clear-data dev          empty the Delta tables and refill from live data (~2 min; hot path keeps running)
 #   make reset dev               full refresh: new checkpoints, start at the live edge (DEMO ONLY)
 #   make stop dev                stop all pipelines + generators (stops compute billing)
 #   make destroy dev             databricks bundle destroy
@@ -46,10 +47,11 @@ resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys
 bundle_var  = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['variables']['$(1)']['value'])")
 
 .PHONY: help install test lint fmt clean infra-plan infra-apply secrets validate deploy start demo generate generate-stop sub-new \
+        clear-data \
         reset stop destroy guard-target $(ENVS)
 
 help:
-	@sed -n '3,25p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
+	@sed -n '3,26p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 	@echo "  <env> is one of: $(ENVS)"
 
 guard-target:
@@ -134,6 +136,14 @@ sub-new:
 	@sed 's/__NAME__/$(NAME)/g' $(SUB_TEMPLATE) > resources/pipelines/sub_$(NAME).yml
 	@echo "created src/subscriptions/$(NAME).yml and resources/pipelines/sub_$(NAME).yml"
 	@echo "next: edit the rule, make infra-plan && make infra-apply (adds hub sub_$(NAME)), make deploy <env>"
+
+# Pipelines that write Delta tables: the lakehouse mirror and micro-batch (serverless) subscriptions. Full-refreshing
+# them empties their tables and restarts them at the live edge in ~2 minutes; RTM pipelines keep running.
+DELTA_PIPELINES := lakehouse $(patsubst resources/pipelines/%.yml,%,$(shell grep -l "serverless: true" resources/pipelines/sub_*.yml 2>/dev/null))
+clear-data: guard-target
+	@for p in $(DELTA_PIPELINES); do $(DBX) pipelines stop $(call resource_id,pipelines,$$p) >/dev/null; \
+	  $(BUNDLE) run -t $(TARGET) --no-wait --full-refresh-all $$p >/dev/null && echo "cleared $$p"; done
+	@echo "tables refill from live data within ~2 minutes; refresh the dashboard (its own refresh button)"
 
 # Demo-only: discards checkpoints so streams start at kafka_starting_offsets (latest) instead of
 # resuming. Production should always resume from the checkpoint so no message is skipped.
