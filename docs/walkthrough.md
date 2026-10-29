@@ -41,7 +41,8 @@ output: [patient_id, visit_id, patient_facility, value_num, abnormal_flag]
 ```
 ```bash
 make infra-plan && make infra-apply     # topic sub_hyperkalemia
-make deploy dev                          # table + topic sub_hyperkalemia fill within seconds
+make deploy dev                          # table + topic sub_hyperkalemia fill within ~2 minutes
+make mirror-restart dev                  # the dashboard picks it up
 ```
 Use `MODE=rtm` for millisecond delivery (classic cluster), or `MODE=microbatch` for seconds on serverless.
 
