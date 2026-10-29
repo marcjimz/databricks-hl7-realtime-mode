@@ -24,7 +24,8 @@ NEAR-REAL-TIME PATH (seconds)
 
 - **Silver** parses HL7 with plain Spark into the existing 34-column Epic silver contract. Bad messages go to quarantine.
 - **Gold** splits each message into encounters, observations (one per lab result), and orders.
-- **Subscriptions** are YAML rules teams write themselves, in milliseconds (RTM) or seconds (micro-batch).
+- **Subscriptions** are YAML rules teams write themselves, in milliseconds (RTM) or seconds (micro-batch). RTM
+  "event A then event B" rules run as a Structured Streaming job; everything else runs as a pipeline.
 - Each topic is named after the table it lands in: `<catalog>.<schema>.<table>`.
 
 ## Results
@@ -37,7 +38,7 @@ Measured on dev at 200 msg/s over 12 minutes (~144k messages per hop):
 | bronze → silver (full HL7 parse) | 15 ms | **32 ms** |
 | silver → gold | 15 ms | **32 ms** |
 | gold → subscription: critical lab | 15 ms | **31 ms** |
-| gold → subscription: ED registration, then a critical lab within 60 min | 32 ms | **79 ms** |
+| gold → subscription: ED registration, then a critical lab within 60 min (measured as a pipeline; now a job, re-measure pending) | 32 ms | **79 ms** |
 | same subscription in micro-batch | 2.1 s | 5.4 s |
 
 Every Real-Time Mode hop is under 200 ms at p99. Each pipeline pauses ~1–3 s every 5 minutes to checkpoint, which

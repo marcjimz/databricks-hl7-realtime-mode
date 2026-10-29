@@ -363,3 +363,13 @@ In steady state there were 0 duplicates. Consumers that need exactly-once should
 **Join fan-out follows the data.** The synthetic feed gives each patient ~3 ED registrations an hour at 200 msg/s,
 so each critical lab matches several registrations (~160 matches/s in steady state). That's correct for the rule as
 written; real ED traffic is far sparser.
+
+---
+
+# Correction: RTM stream-stream joins belong in a Structured Streaming job
+
+The Lakeflow pipelines RTM page lists stream-stream joins as **not supported**. Our RTM `ed_critical_lab` join ran in
+a pipeline only through the Structured Streaming join settings applied as pipeline configuration: undocumented for
+pipelines, even though its results were exact. It now runs as a Structured Streaming job (`hl7rt.subscription_job`,
+DBR 18 LTS, `rtm_job_cluster`), where RTM inner joins are documented. Its earlier latency (p99 79–109 ms) was
+measured as a pipeline. Re-measure it as a job before quoting it.

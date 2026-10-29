@@ -90,7 +90,7 @@ docs/                 latency results, walkthrough, Epic JSON notes
   shuffle's partitions) **plus ~20% or more spare**. With exactly as many slots as tasks, the epoch
   handoff fails with `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT`, the flow crashes, and SDP restarts it.
   That looks like a 6–10 s "latency spike". Current sizing: stateless hop = 2 workers (8 slots, `rtm_cluster`) for
-  4 partitions; join subscription = 4 workers (16 slots, `rtm_join_cluster`) for 2 × 4 source + 4 join tasks.
+  4 partitions; RTM join subscription job = 4 workers (16 slots, `rtm_job_cluster`) for 2 × 4 source + 4 join tasks.
 - **Cold start is ~9 min per classic cluster; instance pools aren't used.** Pools only skip VM acquisition (internal
   guidance: ~20 s with a preloaded runtime; cases with warm pools still took 2–5 min), pipeline docs don't cover pool
   keys, and a continuous-pipeline-on-pool cluster failure is on record. Start the demo early instead (`make demo`).
@@ -99,11 +99,14 @@ docs/                 latency results, walkthrough, Epic JSON notes
   full refresh.
 - **`asyncProgressTrackingEnabled` is rejected on SDP classic** (standard access mode). It isn't needed:
   async progress tracking and async state checkpointing are on by default in DBR 18.3.
-- **Supported in RTM:** stateless ops, `explode`, tumbling/sliding windows with watermark, aggregations,
-  `dropDuplicates`, `transformWithState` (row API), stream-static joins, and stream-stream **inner** joins (DBR 18+,
-  join settings in the pipeline `configuration`; see Subscriptions). Output mode is update only.
-  **Not supported:** Delta source/sink, `foreachBatch`, session windows, `mapPartitions`,
-  `transformWithStateInPandas`.
+- **Supported in RTM pipelines:** stateless ops, `explode`, tumbling/sliding windows with watermark, aggregations,
+  `dropDuplicates`, `transformWithState` (row API, no event-time timers), broadcast stream-static joins. Update mode only.
+  **Not supported in pipelines:** stream-stream joins, `dropDuplicatesWithinWatermark`, Delta source/sink,
+  `foreachBatch`, session windows, `mapPartitions`, `transformWithStateInPandas` (docs: "Use real-time mode in
+  Lakeflow pipelines"). **Stream-stream inner joins are supported in Structured Streaming** (DBR 18 LTS+ with
+  `subscriptions.RTM_JOIN_CONF`), so RTM join subscriptions run as a job (see Subscriptions).
+- **Stay on documented, supported features.** Don't ship something because it happens to run: an RTM join once ran
+  in a pipeline via undocumented settings and gave exact results, but pipelines don't support it, so it moved to a job.
 - **A one-off `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT` seconds after a cold start** can happen. SDP retries it
   and steady state is fine (seen once in Phase 2, then clean across every boundary). A repeat at 5-minute
   boundaries means real under-sizing.
@@ -131,15 +134,17 @@ docs/                 latency results, walkthrough, Epic JSON notes
   `explode` it. Gold JSON uses `to_json(..., {"ignoreNullFields": "false"})` so every record has the full shape
   subscribers code against. (Spark's default drops null fields.) Change a gold schema only additively.
 - **Subscriptions** (`hl7rt.subscriptions`):
-  - One rule file `src/subscriptions/<name>.yml` maps to one pipeline `resources/pipelines/sub_<name>.yml`, created
-    from `resources/pipelines/_templates/` with `make sub-new`. That's one hub `sub_<name>` (Terraform `fileset`) and
-    one table `sub_<name>`.
-  - All subscriptions share the runner `src/pipelines/subscriptions/runner.py`.
+  - One rule file `src/subscriptions/<name>.yml` maps to one resource, created from a template with `make sub-new`:
+    a pipeline `resources/pipelines/sub_<name>.yml` (single-event RTM, or micro-batch), or, for an **RTM join**, a
+    Structured Streaming job `resources/jobs/sub_<name>.yml` (`hl7-subscription` entry point,
+    `hl7rt.subscription_job`). Either way: one hub `sub_<name>` (Terraform `fileset`) and one table `sub_<name>`.
+  - Pipelines share the runner `src/pipelines/subscriptions/runner.py`; jobs pass config as `--conf key=value`
+    (set as `hl7.<key>`), so both use the same `subscriptions.build()` and `hl7rt.rtm` wiring.
   - Rule shapes: `when` only (stateless filter), or `when` + `then` + `within` (stream-stream inner join on `key`
     over `msg_dt_tm`, with watermarks).
-  - RTM joins need `subscriptions.RTM_JOIN_CONF` in the **pipeline `configuration`** and the `rtm_join_cluster`
-    (2 sources × 4 + 4 shuffle = 12 tasks → 16 slots). Set as flow `spark_conf`, the join fails with
-    `STREAM_STREAM_JOIN_NOT_SUPPORTED`.
+  - RTM join jobs: `rtm_job_cluster` (DBR 18 LTS, dedicated access, RTM flag on the cluster, no Photon, fixed
+    size), `RTM_JOIN_CONF` set by the job, `.trigger(realTime=...)` in update mode, checkpoint in the `checkpoints`
+    volume. Start/stop with `make start` / `make stop`.
   - RTM rules land in Delta via the mirror; micro-batch rules write Delta directly.
   - Don't chain a second stateful operator after the join: RTM runs in update mode.
   - `tests/test_topic_names.py` keeps the rule, resource, hub, and mode consistent.
