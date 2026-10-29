@@ -69,29 +69,13 @@
             "name": "title",
             "multilineTextboxSpec": {
               "lines": [
-                "## HL7 v2 on Spark Real-Time Mode: live latency"
+                "## HL7 v2 on Real-Time Mode: live latency  ·  p99 target < 200 ms per hop  ·  backlog replay (> 10 min) excluded"
               ]
             }
           },
           "position": {
             "x": 0,
             "y": 0,
-            "width": 6,
-            "height": 1
-          }
-        },
-        {
-          "widget": {
-            "name": "subtitle",
-            "multilineTextboxSpec": {
-              "lines": [
-                "Every hop is one Event Hubs topic to the next, measured from Event Hubs timestamps. Target: p99 < 200 ms. Backlog replay (> 10 min) is excluded."
-              ]
-            }
-          },
-          "position": {
-            "x": 0,
-            "y": 1,
             "width": 6,
             "height": 1
           }
@@ -120,18 +104,18 @@
               "encodings": {
                 "value": {
                   "fieldName": "msgs_per_sec",
-                  "displayName": "Raw HL7 messages / second (15 min)"
+                  "displayName": "Messages / s"
                 }
               },
               "frame": {
                 "showTitle": true,
-                "title": "Raw HL7 messages / second (15 min)"
+                "title": "Messages / s"
               }
             }
           },
           "position": {
             "x": 0,
-            "y": 2,
+            "y": 1,
             "width": 2,
             "height": 3
           }
@@ -160,18 +144,18 @@
               "encodings": {
                 "value": {
                   "fieldName": "raw_to_gold_p99_ms",
-                  "displayName": "Raw → gold end-to-end p99 (ms)"
+                  "displayName": "Raw → gold p99 (ms)"
                 }
               },
               "frame": {
                 "showTitle": true,
-                "title": "Raw → gold end-to-end p99 (ms)"
+                "title": "Raw → gold p99 (ms)"
               }
             }
           },
           "position": {
             "x": 2,
-            "y": 2,
+            "y": 1,
             "width": 2,
             "height": 3
           }
@@ -200,36 +184,20 @@
               "encodings": {
                 "value": {
                   "fieldName": "subscription_records",
-                  "displayName": "Subscription records delivered (15 min)"
+                  "displayName": "Subscription records (15 min)"
                 }
               },
               "frame": {
                 "showTitle": true,
-                "title": "Subscription records delivered (15 min)"
+                "title": "Subscription records (15 min)"
               }
             }
           },
           "position": {
             "x": 4,
-            "y": 2,
+            "y": 1,
             "width": 2,
             "height": 3
-          }
-        },
-        {
-          "widget": {
-            "name": "hdr-hops",
-            "multilineTextboxSpec": {
-              "lines": [
-                "### Per-hop latency, last 15 minutes"
-              ]
-            }
-          },
-          "position": {
-            "x": 0,
-            "y": 5,
-            "width": 6,
-            "height": 1
           }
         },
         {
@@ -292,9 +260,9 @@
           },
           "position": {
             "x": 0,
-            "y": 6,
+            "y": 4,
             "width": 3,
-            "height": 6
+            "height": 5
           }
         },
         {
@@ -376,31 +344,15 @@
               },
               "frame": {
                 "showTitle": true,
-                "title": "Percentiles per hop"
+                "title": "Per hop, last 15 min"
               }
             }
           },
           "position": {
             "x": 3,
-            "y": 6,
+            "y": 4,
             "width": 3,
-            "height": 6
-          }
-        },
-        {
-          "widget": {
-            "name": "hdr-trend",
-            "multilineTextboxSpec": {
-              "lines": [
-                "### p99 by minute, last hour"
-              ]
-            }
-          },
-          "position": {
-            "x": 0,
-            "y": 12,
-            "width": 6,
-            "height": 1
+            "height": 5
           }
         },
         {
@@ -463,25 +415,74 @@
           },
           "position": {
             "x": 0,
-            "y": 13,
-            "width": 6,
-            "height": 6
+            "y": 9,
+            "width": 4,
+            "height": 5
           }
         },
         {
           "widget": {
-            "name": "hdr-subs",
-            "multilineTextboxSpec": {
-              "lines": [
-                "### Subscriptions"
-              ]
+            "name": "quarantine",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "quarantine",
+                  "fields": [
+                    {
+                      "name": "reason",
+                      "expression": "`reason`"
+                    },
+                    {
+                      "name": "messages",
+                      "expression": "`messages`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "reason",
+                  "scale": {
+                    "type": "categorical",
+                    "sort": {
+                      "by": "y-reversed"
+                    }
+                  },
+                  "displayName": "Reason"
+                },
+                "y": {
+                  "fieldName": "messages",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Messages"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Quarantined (1 h)"
+              },
+              "mark": {
+                "colors": [
+                  "#FF3621"
+                ]
+              }
             }
           },
           "position": {
-            "x": 0,
-            "y": 19,
-            "width": 6,
-            "height": 1
+            "x": 4,
+            "y": 9,
+            "width": 2,
+            "height": 5
           }
         },
         {
@@ -577,74 +578,9 @@
           },
           "position": {
             "x": 0,
-            "y": 20,
-            "width": 4,
-            "height": 7
-          }
-        },
-        {
-          "widget": {
-            "name": "quarantine",
-            "queries": [
-              {
-                "name": "main_query",
-                "query": {
-                  "datasetName": "quarantine",
-                  "fields": [
-                    {
-                      "name": "reason",
-                      "expression": "`reason`"
-                    },
-                    {
-                      "name": "messages",
-                      "expression": "`messages`"
-                    }
-                  ],
-                  "disaggregated": true
-                }
-              }
-            ],
-            "spec": {
-              "version": 3,
-              "widgetType": "bar",
-              "encodings": {
-                "x": {
-                  "fieldName": "reason",
-                  "scale": {
-                    "type": "categorical",
-                    "sort": {
-                      "by": "y-reversed"
-                    }
-                  },
-                  "displayName": "Reason"
-                },
-                "y": {
-                  "fieldName": "messages",
-                  "scale": {
-                    "type": "quantitative"
-                  },
-                  "displayName": "Messages"
-                },
-                "label": {
-                  "show": true
-                }
-              },
-              "frame": {
-                "showTitle": true,
-                "title": "Quarantined messages, last hour"
-              },
-              "mark": {
-                "colors": [
-                  "#FF3621"
-                ]
-              }
-            }
-          },
-          "position": {
-            "x": 4,
-            "y": 20,
-            "width": 2,
-            "height": 7
+            "y": 14,
+            "width": 6,
+            "height": 5
           }
         }
       ]
