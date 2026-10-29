@@ -104,7 +104,8 @@ To add an environment, copy the `dev` target in `databricks.yml` and add its nam
 5. **Show the result:** table `sub_hyperkalemia` fills, and a `gold → hyperkalemia (micro-batch)` bar appears on the
    dashboard with no dashboard edits.
 6. **Clean up:** `make stop dev`. To remove the example, delete `src/subscriptions/hyperkalemia.yml` and
-   `resources/pipelines/sub_hyperkalemia.yml`, then `make infra-plan && make infra-apply` and `make deploy dev`.
+   `resources/pipelines/sub_hyperkalemia.yml`, then `make deploy dev` (confirm the pipeline removal) and
+   `make infra-plan && make infra-apply` (removes the topic).
 
 Use `MODE=rtm` for millisecond delivery. Its classic cluster takes ~9 minutes to start, so in a live demo show the
 pre-built RTM examples and create the new one in micro-batch.
