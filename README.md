@@ -83,30 +83,37 @@ To add an environment, copy the `dev` target in `databricks.yml` and add its nam
 
 ## Demo: show a new subscription live
 
-1. **10 minutes before:** `make demo dev`, then open the dashboard URL it prints. Wait until every hop shows data.
-2. **Show what's running:** the p99 per hop (all under 200 ms), the two RTM examples (`critical_lab`,
+1. **10 minutes before:** `make demo dev`, then open the dashboard URL it prints. Check every pipeline shows Running
+   (Pipelines UI). Once all hops show data, run `make clear-data dev` so start-up catch-up doesn't skew the numbers,
+   and use the dashboard's own refresh button (top right), not the browser's.
+2. **Show what's running:** p99 per hop (all under 200 ms), the two RTM examples (`critical_lab`,
    `ed_critical_lab`), and the same ED rule in micro-batch (`ed_critical_lab_nrt`).
-3. **Create a subscription:**
+3. **Add a subscription** (~5 minutes end to end):
    ```bash
    make sub-new NAME=hyperkalemia MODE=microbatch
    ```
-   Replace the `when:` and `output:` lines in `src/subscriptions/hyperkalemia.yml` with:
+   In `src/subscriptions/hyperkalemia.yml`, replace the `when:` and `output:` lines with:
    ```yaml
    when:
      source: gold_observations
      filter: "observation_cd = '2823-3' AND value_num > 6.0"
    output: [patient_id, visit_id, patient_facility, value_num, abnormal_flag]
    ```
-4. **Run it:**
    ```bash
-   make infra-plan && make infra-apply   # creates topic sub_hyperkalemia (needs `az login`)
-   make deploy dev                       # starts it on serverless (~1 minute)
+   make infra-plan && make infra-apply   # adds topic sub_hyperkalemia (needs `az login`; plan shows 1 to add)
+   make deploy dev                       # creates and starts the subscription pipeline (serverless)
+   make mirror-restart dev               # the mirror picks up the new rule (keeps data)
    ```
-5. **Show the result:** table `sub_hyperkalemia` fills, and a `gold → hyperkalemia (micro-batch)` bar appears on the
-   dashboard with no dashboard edits.
-6. **Clean up:** `make stop dev`. To remove the example, delete `src/subscriptions/hyperkalemia.yml` and
-   `resources/pipelines/sub_hyperkalemia.yml`, then `make deploy dev` (confirm the pipeline removal) and
-   `make infra-plan && make infra-apply` (removes the topic).
+4. **Show the result** (~2 minutes later): table `sub_hyperkalemia` fills, and a `gold → hyperkalemia (micro-batch)`
+   bar appears on the dashboard after a refresh, with no dashboard edits.
+5. **Remove it** (~3 minutes):
+   ```bash
+   rm src/subscriptions/hyperkalemia.yml resources/pipelines/sub_hyperkalemia.yml
+   make deploy dev                       # confirm the pipeline removal when asked
+   make mirror-restart dev               # the mirror stops reading the topic
+   make infra-plan && make infra-apply   # removes the topic (plan shows 1 to destroy)
+   ```
+6. **Stop:** `make stop dev`.
 
 Use `MODE=rtm` for millisecond delivery. Its classic cluster takes ~9 minutes to start, so in a live demo show the
 pre-built RTM examples and create the new one in micro-batch.
@@ -117,7 +124,8 @@ pre-built RTM examples and create the new one in micro-batch.
 make sub-new NAME=my_alert MODE=rtm      # or MODE=microbatch; JOIN=1 for "event A then event B"
 # edit src/subscriptions/my_alert.yml: source, filter, optional window, output columns
 make infra-plan && make infra-apply      # creates topic sub_my_alert
-make deploy dev                          # runs it: topic + table <catalog>.<schema>.sub_my_alert, on the dashboard
+make deploy dev                          # runs it: topic + table <catalog>.<schema>.sub_my_alert
+make mirror-restart dev                  # adds it to the dashboard
 ```
 
 Every field is explained in [`src/subscriptions/_template.yml`](src/subscriptions/_template.yml). The
