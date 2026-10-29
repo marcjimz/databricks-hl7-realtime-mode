@@ -1,8 +1,11 @@
-"""Self-service subscriptions: a YAML rule over gold topics -> records for <catalog>.<schema>.sub_<name>.
+"""Self-service subscriptions: a rule over gold topics -> records for <catalog>.<schema>.sub_<name>.
 
-A rule is either one event (`when`: stateless filter) or a sequence (`when` then `then` for the same `key` within
-`within`: a stream-stream inner join with watermarks). The same query runs in Real-Time Mode or micro-batch.
-Rules live in src/subscriptions/<name>.yml; `_template.yml` documents every field.
+Two ways to write a rule, both in src/subscriptions/:
+- <name>.sql: plain SQL over gold_encounters / gold_observations / gold_orders, settings in a `-- key: value`
+  header. Each gold view carries `_meta` (record id + broker timestamps); the query selects it (for a join, each
+  side's, as `_meta_<side>`), and the platform turns it into record_id / gold_ts / raw_ts. `_template.sql`.
+- <name>.yml: `when` (stateless filter), optionally `then` + `within` (a time-bounded join). `_template.yml`.
+The same query runs in Real-Time Mode or micro-batch.
 """
 
 import re
@@ -25,6 +28,9 @@ MODES = ("rtm", "microbatch")
 DESTINATIONS = ("eventhubs", "delta")
 TIME = "msg_dt_tm"  # event time used for `within` and watermarks
 _INTERVAL = re.compile(r"\d+ (second|minute|hour)s?")
+_JOIN = re.compile(r"\bJOIN\b", re.IGNORECASE)
+_SQL_HEADER = re.compile(r"^--\s*(name|mode|key|destinations|lateness)\s*:\s*(.+?)\s*$")
+META = "_meta"  # lineage struct on every gold view: record_id, gold_ts, raw_ts
 
 # Spark settings Real-Time Mode requires for stream-stream joins (docs: structured-streaming/real-time/setup).
 # They must be pipeline configuration (read at startup), not flow spark_conf; tests/test_topic_names.py checks it.
@@ -54,6 +60,7 @@ class Rule:
     within: str | None = None
     lateness: str = "5 minutes"
     destinations: tuple[str, ...] = DESTINATIONS
+    sql: str | None = None
 
     @property
     def table(self) -> str:
@@ -61,7 +68,14 @@ class Rule:
 
     @property
     def is_join(self) -> bool:
-        return self.then is not None
+        return self.then is not None or bool(self.sql and _JOIN.search(self.sql))
+
+    @property
+    def sources(self) -> tuple[str, ...]:
+        """Gold tables the rule reads (a SQL rule only reads the ones it names)."""
+        if self.sql:
+            return tuple(s for s in SOURCES if re.search(rf"\b{s}\b", self.sql))
+        return (self.when.source,) + ((self.then.source,) if self.then else ())
 
 
 def _event(spec: dict, where: str) -> Event:
@@ -93,8 +107,42 @@ def parse(spec: dict) -> Rule:
     return rule
 
 
+def parse_sql(text: str) -> Rule:
+    """Validate a SQL rule: `-- key: value` header lines (name, mode, key, destinations, lateness) + one query."""
+    spec, body = {}, []
+    for line in text.splitlines():
+        m = _SQL_HEADER.match(line.strip())
+        if m:
+            spec[m.group(1)] = m.group(2)
+        elif not line.strip().startswith("--"):
+            body.append(line)
+    sql = "\n".join(body).strip().rstrip(";")
+    if spec.get("mode") not in MODES:
+        raise ValueError(f"-- mode: must be one of {MODES}")
+    if not spec.get("key"):
+        raise ValueError("-- key: is required (the column records are keyed by, e.g. patient_id)")
+    destinations = tuple(d.strip() for d in spec.get("destinations", ",".join(DESTINATIONS)).split(","))
+    if not set(destinations) <= set(DESTINATIONS):
+        raise ValueError(f"-- destinations: must be within {DESTINATIONS}")
+    rule = Rule(name=spec.get("name", ""), mode=spec["mode"], key=spec["key"], when=Event(next(iter(SOURCES))),
+                output=(), lateness=spec.get("lateness", "5 minutes"), destinations=destinations, sql=sql)  # fmt: skip
+    if not rule.sources:
+        raise ValueError(f"the query must read at least one of {sorted(SOURCES)} (gold_ tables)")
+    if not re.search(rf"\b{META}\w*\b", sql):
+        raise ValueError(f"the query must SELECT {META} (for a join, each side's, e.g. e.{META} AS {META}_e)")
+    return rule
+
+
 def load(path: str | Path) -> Rule:
     path = Path(path)
+    if path.suffix == ".sql":
+        try:
+            rule = parse_sql(path.read_text())
+        except ValueError as e:
+            raise ValueError(f"{path}: {e}") from e
+        if rule.name != path.stem:
+            raise ValueError(f"{path}: -- name: {rule.name!r} must match the file name {path.stem!r}")
+        return rule
     spec = yaml.safe_load(path.read_text())
     if spec.get("name") != path.stem:
         raise ValueError(f"{path}: name {spec.get('name')!r} must match the file name {path.stem!r}")
@@ -124,8 +172,13 @@ _JOIN_FIELDS = [("when_msg_control_id", None), ("then_msg_control_id", None), ("
 _LINEAGE = [("gold_ts", TimestampType()), ("raw_ts", TimestampType())]
 
 
-def output_schema(rule: Rule) -> StructType:
-    """Schema of a subscription record (for the lakehouse mirror)."""
+def output_schema(rule: Rule, spark=None) -> StructType:
+    """Schema of a subscription record (for the lakehouse mirror). A SQL rule needs `spark` to analyze its query."""
+    if rule.sql:
+        empty = {s: spark.createDataFrame([], _view_schema(s)) for s in rule.sources}
+        cols = _sql(rule, empty).schema
+        values = [f for f in cols if not f.name.startswith(META)]
+        return StructType([StructField("record_id", StringType()), *values, *[StructField(n, t) for n, t in _LINEAGE]])
     fields = [StructField("record_id", StringType())]
     fields += [StructField(_alias(c), _field(rule, c)[1].dataType) for c in rule.output]
     extra = (_JOIN_FIELDS if rule.is_join else []) + _LINEAGE
@@ -150,8 +203,57 @@ def _record_id(event: Event, side: str | None = None) -> Column:
     return F.concat_ws("-", *parts)
 
 
+def _view_schema(source: str) -> StructType:
+    meta = StructType([StructField("record_id", StringType()), *[StructField(n, t) for n, t in _LINEAGE]])
+    return StructType([*SOURCES[source], StructField("gold_ts", TimestampType()), StructField(META, meta)])
+
+
+def _with_meta(events: DataFrame, source: str) -> DataFrame:
+    meta = F.struct(_record_id(Event(source)).alias("record_id"), F.col("gold_ts"), F.col("raw_ts"))
+    return events.withColumn(META, meta)
+
+
+def _sql(rule: Rule, views: dict[str, DataFrame]) -> DataFrame:
+    """Run the rule's SQL with each gold table bound to its view. Each view is registered as a temp view under a
+    rule-specific name and the query is rewritten to it. (Lakeflow pipelines patch spark.sql, which rejects the
+    DataFrame-parameter form spark.sql(query, gold_observations=df).)"""
+    names = {}
+    for source, df in views.items():
+        names[source] = f"__sub_{rule.name}_{source}"
+        df.createOrReplaceTempView(names[source])
+    query = re.sub(rf"\b({'|'.join(views)})\b", lambda m: names[m.group(1)], rule.sql)
+    return next(iter(views.values())).sparkSession.sql(query)
+
+
+def _build_sql(rule: Rule, read) -> DataFrame:
+    views = {}
+    for source in rule.sources:
+        v = _with_meta(_events(read(source), source), source)
+        views[source] = v.withWatermark(TIME, rule.lateness) if rule.is_join else v
+    out = _sql(rule, views)
+    metas = [c for c in out.columns if c.startswith(META)]
+    if not metas:
+        raise ValueError(f"{rule.name}: the query must SELECT {META}")
+    if rule.key not in out.columns:
+        raise ValueError(f"{rule.name}: key column {rule.key!r} must be in the SELECT")
+    latest = (
+        (lambda f: F.greatest(*[F.col(f"{m}.{f}") for m in metas]))
+        if len(metas) > 1
+        else (lambda f: F.col(f"{metas[0]}.{f}"))
+    )
+    value = F.struct(
+        F.concat_ws("|", *[F.col(f"{m}.record_id") for m in metas]).alias("record_id"),
+        *[F.col(c) for c in out.columns if not c.startswith(META)],
+        latest("gold_ts").alias("gold_ts"),
+        latest("raw_ts").alias("raw_ts"),
+    )
+    return out.select(F.col(rule.key).alias("key"), F.to_json(value).alias("value"))
+
+
 def build(rule: Rule, read) -> DataFrame:
     """(key, value) records for the subscription topic. `read(table)` returns that gold topic's Kafka stream."""
+    if rule.sql:
+        return _build_sql(rule, read)
     when = _events(read(rule.when.source), rule.when.source).where(F.expr(rule.when.filter))
     if not rule.is_join:
         out = when.select(_record_id(rule.when).alias("record_id"), *[F.col(c).alias(_alias(c)) for c in rule.output],

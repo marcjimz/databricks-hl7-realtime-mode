@@ -7,8 +7,8 @@
 
 locals {
   tags = merge(var.tags, { owner = var.owner })
-  # One hub per subscription rule file (src/subscriptions/<name>.yml -> sub_<name>); `_template.yml` is skipped.
-  subscriptions = [for f in fileset("${path.module}/../../src/subscriptions", "[a-z]*.yml") : "sub_${trimsuffix(f, ".yml")}"]
+  # One hub per subscription rule file (src/subscriptions/<name>.sql | .yml -> sub_<name>); `_template*` is skipped.
+  subscriptions = [for f in fileset("${path.module}/../../src/subscriptions", "[a-z]*.{sql,yml}") : "sub_${replace(f, "/\\.(sql|yml)$/", "")}"]
 }
 
 resource "azurerm_resource_group" "this" {

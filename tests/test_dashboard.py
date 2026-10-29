@@ -21,7 +21,7 @@ def _produced_tables() -> set[str]:
     names = {n.args[0].value for n in ast.walk(tree) if isinstance(n, ast.Call) and n.args
              and getattr(n.func, "id", getattr(n.func, "attr", "")) in ("_layer", "create_streaming_table")
              and isinstance(n.args[0], ast.Constant)}  # fmt: skip
-    rules = {f"sub_{p.stem}" for p in (ROOT / "src/subscriptions").glob("[a-z]*.yml")}
+    rules = {f"sub_{p.stem}" for p in (ROOT / "src/subscriptions").glob("[a-z]*.*") if p.suffix in (".yml", ".sql")}
     return names | rules
 
 

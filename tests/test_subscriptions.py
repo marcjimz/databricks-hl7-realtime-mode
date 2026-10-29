@@ -59,9 +59,9 @@ def run(spark, rule, *messages):
 
 
 def test_shipped_rules_and_template_load():
-    names = {p.stem for p in RULES.glob("*.yml")}
-    assert {"_template", "critical_lab", "ed_critical_lab"} <= names
-    for p in RULES.glob("*.yml"):
+    files = [p for p in RULES.iterdir() if p.suffix in (".yml", ".sql")]
+    assert {"_template.yml", "_template.sql", "_template_join.sql", "critical_lab.yml"} <= {p.name for p in files}
+    for p in files:
         subscriptions.load(p)
 
 
@@ -157,3 +157,96 @@ def test_records_carry_a_stable_id_from_raw_lineage(spark):
     assert [r["record_id"] for r in first] == [r["record_id"] for r in again]
     single = run(spark, subscriptions.load(RULES / "critical_lab.yml"), _hl7("ORU^R01", "MRN1", T0, 1, "HH"))
     assert single[0]["record_id"] == "0-0-1"  # raw partition - raw offset - OBX set id
+
+
+# --- SQL rules ---------------------------------------------------------------------------------------------------
+
+SQL_CRITICAL = """-- name: {name}
+-- mode: rtm
+-- key: patient_id
+SELECT _meta, patient_id, visit_id, patient_facility, msg_control_id, observation_cd, observation_cd_desc,
+       value_num, units, abnormal_flag, observation_dt_tm
+FROM gold_observations
+WHERE abnormal_flag IN ('HH', 'LL')
+"""
+SQL_ED_LAB = """-- name: {name}
+-- mode: microbatch
+-- key: patient_id
+SELECT e._meta AS _meta_registration, o._meta AS _meta_lab,
+       o.patient_id, o.patient_facility, e.visit_id AS when_visit_id, o.observation_cd, o.observation_cd_desc,
+       o.value_num, o.abnormal_flag
+FROM gold_encounters e
+JOIN gold_observations o
+  ON e.patient_id = o.patient_id
+ AND o.msg_dt_tm BETWEEN e.msg_dt_tm AND e.msg_dt_tm + INTERVAL 60 MINUTES
+WHERE e.event = 'A04' AND e.patient_class = 'E' AND o.abnormal_flag IN ('HH', 'LL')
+"""
+
+
+def _sql_rule(tmp_path, body, name="sql_rule"):
+    p = tmp_path / f"{name}.sql"
+    p.write_text(body.replace("{name}", name))
+    return subscriptions.load(p)
+
+
+def test_sql_rule_loads_with_header_settings(tmp_path):
+    rule = _sql_rule(tmp_path, SQL_CRITICAL)
+    assert (rule.name, rule.mode, rule.key, rule.table) == ("sql_rule", "rtm", "patient_id", "sub_sql_rule")
+    assert rule.sources == ("gold_observations",) and not rule.is_join
+    join = _sql_rule(tmp_path, SQL_ED_LAB, "sql_join")
+    assert join.is_join and set(join.sources) == {"gold_encounters", "gold_observations"}
+
+
+def test_sql_single_event_matches_the_yaml_rule(spark, tmp_path):
+    msgs = (
+        _hl7("ORU^R01", "MRN1", T0, 1, flag="HH"),
+        _hl7("ORU^R01", "MRN2", T0, 2, flag="N"),
+        _hl7("ADT^A04", "MRN3", T0, 3),
+    )
+    yaml_out = run(spark, subscriptions.load(RULES / "critical_lab.yml"), *msgs)
+    sql_out = run(spark, _sql_rule(tmp_path, SQL_CRITICAL), *msgs)
+    assert sql_out == yaml_out
+
+
+def test_sql_join_matches_the_yaml_rule(spark, tmp_path):
+    msgs = (
+        _hl7("ADT^A04", "MRN1", T0, 1),
+        _hl7("ORU^R01", "MRN1", T0 + timedelta(minutes=20), 2, flag="HH"),  # match
+        _hl7("ORU^R01", "MRN1", T0 + timedelta(minutes=90), 3, flag="LL"),  # outside the window
+        _hl7("ORU^R01", "MRN1", T0 - timedelta(minutes=5), 4, flag="HH"),  # before the registration
+        _hl7("ORU^R01", "MRN2", T0 + timedelta(minutes=10), 6, flag="HH"),  # other patient
+    )
+    sql_out = run(spark, _sql_rule(tmp_path, SQL_ED_LAB, "sql_join"), *msgs)
+    yaml_out = run(spark, subscriptions.load(RULES / "ed_critical_lab.yml"), *msgs)
+    assert [o["record_id"] for o in sql_out] == [o["record_id"] for o in yaml_out]
+    assert sql_out[0]["observation_cd"] == "2823-3" and sql_out[0]["when_visit_id"] == "V1"
+
+
+def test_sql_output_schema_matches_records(spark, tmp_path):
+    rule = _sql_rule(tmp_path, SQL_ED_LAB, "sql_join")
+    out = run(spark, rule, _hl7("ADT^A04", "MRN1", T0, 1), _hl7("ORU^R01", "MRN1", T0 + timedelta(minutes=1), 2, "HH"))
+    assert list(out[0]) == subscriptions.output_schema(rule, spark).fieldNames()
+    assert list(out[0])[0] == "record_id" and "_meta_lab" not in out[0]
+
+
+@pytest.mark.parametrize(
+    "body, error",
+    [
+        ("-- name: x\n-- mode: rtm\n-- key: patient_id\nSELECT patient_id FROM gold_observations", "_meta"),
+        ("-- name: x\n-- mode: rtm\n-- key: patient_id\nSELECT _meta, patient_id FROM silver_hl7", "gold_"),
+        ("-- name: x\n-- mode: batch\n-- key: patient_id\nSELECT _meta, patient_id FROM gold_orders", "mode"),
+        ("-- name: x\n-- mode: rtm\nSELECT _meta, patient_id FROM gold_orders", "key"),
+    ],
+)
+def test_invalid_sql_rules_fail_clearly(tmp_path, body, error):
+    p = tmp_path / "x.sql"
+    p.write_text(body)
+    with pytest.raises(ValueError, match=error):
+        subscriptions.load(p)
+
+
+def test_sql_literals_with_braces_are_left_alone(spark, tmp_path):
+    body = SQL_CRITICAL.replace(
+        "WHERE abnormal_flag IN ('HH', 'LL')", "WHERE abnormal_flag IN ('HH', 'LL') AND '{x}' = '{x}'"
+    )
+    assert len(run(spark, _sql_rule(tmp_path, body), _hl7("ORU^R01", "MRN1", T0, 1, flag="HH"))) == 1

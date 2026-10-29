@@ -53,7 +53,7 @@ resources/<type>/     bundle resources grouped by type: jobs/, pipelines/, schem
 resources/pipelines/_templates/   subscription pipeline templates (*.yml.tmpl, not included by the bundle)
 src/hl7rt/            shared library: pure DataFrame transforms, Event Hubs helpers, generators (unit-tested)
 src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path = src/)
-src/subscriptions/    self-service rule files, one YAML per subscription (`_template.yml` documents every field)
+src/subscriptions/    self-service rules, one SQL (or YAML) file per subscription (`_template*.sql` / `_template.yml`)
 src/dashboards/       the AI/BI dashboard definition (.lvdash.json)
 infra/<stack>/        Terraform, one small stack per folder (eventhubs/, later e.g. network/), each with
                       its own state + versions.tf/variables.tf/main.tf/outputs.tf. tfvars/state gitignored.
@@ -135,8 +135,18 @@ docs/                 latency results, walkthrough, Epic JSON notes
     from `resources/pipelines/_templates/` with `make sub-new`. That's one hub `sub_<name>` (Terraform `fileset`) and
     one table `sub_<name>`.
   - All subscriptions share the runner `src/pipelines/subscriptions/runner.py`.
-  - Rule shapes: `when` only (stateless filter), or `when` + `then` + `within` (stream-stream inner join on `key`
-    over `msg_dt_tm`, with watermarks).
+  - **SQL rules** (`<name>.sql`, the default for `make sub-new`): a `-- name/mode/key[/destinations/lateness]:` header
+    plus one query over the gold views. Each view has `_meta` (record_id, gold_ts, raw_ts); the query must select it
+    (joins: each side's, `_meta_<side>`). The runner binds `gold_*` names to per-rule temp views,
+    reads only the gold topics the query names, adds watermarks for joins, and derives the output schema by analyzing
+    the query against empty views (`output_schema(rule, spark)`). Pure SQL pipelines can't do this: sinks and RTM are
+    Python-only.
+  - **Lakeflow patches `spark.sql`** and rejects the DataFrame-parameter form `spark.sql(q, name=df)` (TypeError
+    `_dlt_sql_fn() got an unexpected keyword argument`). Bind views with `createOrReplaceTempView` + name rewrite
+    instead. Local Spark accepts both, so only a dev deploy catches this.
+  - The gold Delta tables carry the same `_meta` struct (`lakehouse.gold_rows`), so rule SQL runs in a SQL editor.
+  - **YAML rules** (`<name>.yml`): `when` only (stateless filter), or `when` + `then` + `within` (stream-stream inner
+    join on `key` over `msg_dt_tm`, with watermarks). Same output contract as SQL (tests compare them).
   - RTM joins need `subscriptions.RTM_JOIN_CONF` in the **pipeline `configuration`** and the `rtm_join_cluster`
     (2 sources × 4 + 4 shuffle = 12 tasks → 16 slots). Set as flow `spark_conf`, the join fails with
     `STREAM_STREAM_JOIN_NOT_SUPPORTED`.

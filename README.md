@@ -88,17 +88,18 @@ To add an environment, copy the `dev` target in `databricks.yml` and add its nam
    and use the dashboard's own refresh button (top right), not the browser's.
 2. **Show what's running:** p99 per hop (all under 200 ms), the two RTM examples (`critical_lab`,
    `ed_critical_lab`), and the same ED rule in micro-batch (`ed_critical_lab_nrt`).
-3. **Add a subscription** (~5 minutes end to end):
-   ```bash
-   make sub-new NAME=hyperkalemia MODE=microbatch
+3. **Add a subscription** (~5 minutes end to end). Each subscription is one SQL file. Show
+   `src/subscriptions/hyperkalemia.sql`:
+   ```sql
+   -- name: hyperkalemia
+   -- mode: microbatch
+   -- key: patient_id
+   SELECT _meta, patient_id, visit_id, patient_facility, value_num, abnormal_flag
+   FROM gold_observations
+   WHERE observation_cd = '2823-3'   -- potassium (LOINC)
+     AND value_num > 6.0
    ```
-   In `src/subscriptions/hyperkalemia.yml`, replace the `when:` and `output:` lines with:
-   ```yaml
-   when:
-     source: gold_observations
-     filter: "observation_cd = '2823-3' AND value_num > 6.0"
-   output: [patient_id, visit_id, patient_facility, value_num, abnormal_flag]
-   ```
+   (To write one from scratch: `make sub-new NAME=hyperkalemia MODE=microbatch`, then edit the query.)
    ```bash
    make infra-plan && make infra-apply   # adds topic sub_hyperkalemia (needs `az login`; plan shows 1 to add)
    make deploy dev                       # creates and starts the subscription pipeline (serverless)
@@ -109,7 +110,7 @@ To add an environment, copy the `dev` target in `databricks.yml` and add its nam
    appears as a bar in the RTM hop chart instead.)
 5. **Remove it** (~3 minutes):
    ```bash
-   rm src/subscriptions/hyperkalemia.yml resources/pipelines/sub_hyperkalemia.yml
+   rm src/subscriptions/hyperkalemia.sql resources/pipelines/sub_hyperkalemia.yml
    make deploy dev                       # confirm the pipeline removal when asked
    make mirror-restart dev               # the mirror stops reading the topic
    make infra-plan && make infra-apply   # removes the topic (plan shows 1 to destroy)
@@ -121,16 +122,22 @@ pre-built RTM examples and create the new one in micro-batch.
 
 ## Subscribe (self-service)
 
+A subscription is one SQL file in `src/subscriptions/`: a short header (`-- name:`, `-- mode: rtm|microbatch`,
+`-- key:`) and a query over `gold_encounters`, `gold_observations`, or `gold_orders`. Always `SELECT _meta`; for a
+join, select each side's as `_meta_<side>` (see `_template_join.sql`). The gold Delta tables carry the same `_meta`
+column, so you can try a query in a SQL editor first, then save it as a subscription unchanged. The platform applies
+watermarks, upserts, and latency tracking.
+
 ```bash
 make sub-new NAME=my_alert MODE=rtm      # or MODE=microbatch; JOIN=1 for "event A then event B"
-# edit src/subscriptions/my_alert.yml: source, filter, optional window, output columns
+# edit src/subscriptions/my_alert.sql
 make infra-plan && make infra-apply      # creates topic sub_my_alert
 make deploy dev                          # runs it: topic + table <catalog>.<schema>.sub_my_alert
 make mirror-restart dev                  # adds it to the dashboard
 ```
 
-Every field is explained in [`src/subscriptions/_template.yml`](src/subscriptions/_template.yml). The
-[walkthrough](docs/walkthrough.md) is a 20-minute demo script.
+YAML rules (`FORMAT=yml`, see `_template.yml`) still work; the shipped `critical_lab` / `ed_critical_lab` examples use
+them. The [walkthrough](docs/walkthrough.md) is a 20-minute demo script.
 
 ## Repo
 
