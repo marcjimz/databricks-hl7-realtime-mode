@@ -51,6 +51,7 @@ Prereqs: Databricks CLI ≥ 0.285, Terraform ≥ 1.5, Azure CLI (logged in), [uv
 make install                                             # local Python env
 cp infra/eventhubs/terraform.tfvars.example infra/eventhubs/terraform.tfvars   # then edit it
 make infra-plan && make infra-apply                      # Event Hubs namespace + topics
+cp local.mk.example local.mk                             # your Databricks CLI profile (if several match)
 make secrets dev                                         # connection string -> Databricks secret scope
 ```
 

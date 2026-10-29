@@ -20,14 +20,15 @@
 #   make stop dev                stop all pipelines + generators (stops compute billing)
 #   make destroy dev             databricks bundle destroy
 #
-# Auth: the Databricks CLI picks a profile by host; if several match, set
-# DATABRICKS_CONFIG_PROFILE=<profile> (or pass PROFILE=<profile>).
+# Auth: the Databricks CLI picks a profile by host; if several match, put PROFILE=<profile> in local.mk
+# (cp local.mk.example local.mk), or pass PROFILE=<profile>, or set DATABRICKS_CONFIG_PROFILE.
 
 # Bundle targets treated as an env word. Kept in sync with databricks.yml `targets:`, so a
 # typo like `make deploy devv` fails loudly instead of silently doing nothing.
 ENVS := dev
 
 TARGET  := $(filter $(ENVS),$(MAKECMDGOALS))
+-include local.mk   # optional, gitignored: your PROFILE=<databricks cli profile> (see local.mk.example)
 PROFILE ?= $(DATABRICKS_CONFIG_PROFILE)
 DBX     := databricks $(if $(PROFILE),-p $(PROFILE))
 BUNDLE  := $(DBX) bundle
