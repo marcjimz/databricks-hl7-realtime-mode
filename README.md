@@ -104,8 +104,9 @@ To add an environment, copy the `dev` target in `databricks.yml` and add its nam
    make deploy dev                       # creates and starts the subscription pipeline (serverless)
    make mirror-restart dev               # the mirror picks up the new rule (keeps data)
    ```
-4. **Show the result** (~2 minutes later): table `sub_hyperkalemia` fills, and a `gold → hyperkalemia (micro-batch)`
-   bar appears on the dashboard after a refresh, with no dashboard edits.
+4. **Show the result** (~2 minutes later): table `sub_hyperkalemia` fills, and `hyperkalemia` appears in the
+   dashboard's "Micro-batch subscriptions" panel after a refresh, with no dashboard edits. (An `rtm` subscription
+   appears as a bar in the RTM hop chart instead.)
 5. **Remove it** (~3 minutes):
    ```bash
    rm src/subscriptions/hyperkalemia.yml resources/pipelines/sub_hyperkalemia.yml
