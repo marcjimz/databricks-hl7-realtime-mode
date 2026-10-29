@@ -65,7 +65,7 @@ _layer("gold_orders", "topics.gold_orders", lambda df: lakehouse.gold_rows(df, g
        "Gold orders: one row per ORM order, with latency.")  # fmt: skip
 
 
-# Subscriptions (src/subscriptions/*.yml). RTM rules land in their own table here (micro-batch rules write theirs).
+# Subscriptions (src/subscriptions/*.sql, *.yml). RTM rules land in their own table here; micro-batch ones write theirs.
 # Every rule's topic also feeds subscription_latency, so the dashboard shows new subscriptions without edits.
 dp.create_streaming_table(
     "subscription_latency",
@@ -77,7 +77,7 @@ dp.create_streaming_table(
 def _subscription(rule):
     topic = f"{conf(spark, 'topics.prefix')}.{rule.table}"
     if rule.mode == "rtm" and "delta" in rule.destinations:
-        schema = subscriptions.output_schema(rule)
+        schema = subscriptions.output_schema(rule, spark)
         _upsert(rule.table, topic, lambda df: lakehouse.subscription_rows(df, schema), lakehouse.SUBSCRIPTION_KEYS,
                 f"Subscription {rule.name} (src/subscriptions/{rule.name}.yml), with latency.")  # fmt: skip
     if "eventhubs" in rule.destinations:
@@ -86,5 +86,6 @@ def _subscription(rule):
         )
 
 
-for _path in sorted(Path(conf(spark, "subscriptions.dir")).glob("[a-z]*.yml")):
+_rules_dir = Path(conf(spark, "subscriptions.dir"))
+for _path in sorted(p for p in _rules_dir.glob("[a-z]*.*") if p.suffix in (".yml", ".sql")):
     _subscription(subscriptions.load(_path))

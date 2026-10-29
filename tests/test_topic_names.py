@@ -67,11 +67,15 @@ def test_terraform_creates_one_hub_per_table_with_the_same_pattern():
     assert set(_topic_tables().values()) <= hubs, f"missing hubs: {set(_topic_tables().values()) - hubs}"
     main = (ROOT / "infra/eventhubs/main.tf").read_text()
     assert '"${var.catalog}.${var.schema}.${each.value}"' in main
-    assert 'fileset("${path.module}/../../src/subscriptions", "[a-z]*.yml")' in main
+    assert 'fileset("${path.module}/../../src/subscriptions", "[a-z]*.{sql,yml}")' in main
 
 
 def _rules():
-    return [subscriptions.load(p) for p in sorted((ROOT / "src/subscriptions").glob("[a-z]*.yml"))]
+    return [
+        subscriptions.load(p)
+        for p in sorted((ROOT / "src/subscriptions").glob("[a-z]*.*"))
+        if p.suffix in (".yml", ".sql")
+    ]
 
 
 def test_each_subscription_rule_has_a_matching_pipeline():
@@ -80,7 +84,8 @@ def test_each_subscription_rule_has_a_matching_pipeline():
         assert f.exists(), f"{rule.name}: missing {f.relative_to(ROOT)} (make sub-new NAME={rule.name})"
         spec = yaml.safe_load(f.read_text())["resources"]["pipelines"][rule.table]
         conf = spec["configuration"]
-        assert conf["hl7.sub.rule"].endswith(f"/src/subscriptions/{rule.name}.yml")
+        assert conf["hl7.sub.rule"].rsplit("/", 1)[1] in (f"{rule.name}.yml", f"{rule.name}.sql")
+        assert (ROOT / "src/subscriptions" / conf["hl7.sub.rule"].rsplit("/", 1)[1]).exists()
         assert conf["hl7.topics.prefix"] == "${var.catalog}.${var.schema}"
         rtm = str(conf.get("spark.databricks.streaming.realTimeMode.enabled")).lower() == "true"
         assert rtm == (rule.mode == "rtm"), f"{rule.name}: mode {rule.mode} but the pipeline RTM flag is {rtm}"

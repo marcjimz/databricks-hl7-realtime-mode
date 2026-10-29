@@ -15,7 +15,7 @@
 #   make demo dev                deploy + start + generate, then print the dashboard URL
 #   make generate dev            start the continuous synthetic feed (runs until generate-stop)
 #   make generate-stop dev       cancel the synthetic feed
-#   make sub-new NAME=x [MODE=rtm|microbatch] [JOIN=1]   new subscription from the templates
+#   make sub-new NAME=x [MODE=rtm|microbatch] [JOIN=1] [FORMAT=sql|yml]   new subscription from the templates
 #   make clear-data dev          empty the Delta tables and refill from live data (~2 min; hot path keeps running)
 #   make mirror-restart dev      restart the lakehouse mirror, keeping data (after adding/removing a subscription)
 #   make reset dev               full refresh: new checkpoints, start at the live edge (DEMO ONLY)
@@ -125,17 +125,23 @@ generate-stop: guard-target
 	  while [ "$$($(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))')" != "0" ]; do sleep 5; done; \
 	  echo "stopped $$j"; done
 
-# New subscription: a rule file from src/subscriptions/_template.yml + a pipeline resource from the mode's template.
+# New subscription: a SQL rule from src/subscriptions/_template[_join].sql (FORMAT=yml for the YAML form) plus a
+# pipeline resource from the mode's template.
 MODE ?= rtm
+FORMAT ?= sql
 # JOIN only matters for rtm (join settings + a bigger cluster); micro-batch joins need nothing extra.
 SUB_TEMPLATE := resources/pipelines/_templates/sub_$(MODE)$(if $(and $(JOIN),$(filter rtm,$(MODE))),_join).yml.tmpl
+RULE_TEMPLATE := src/subscriptions/_template$(if $(and $(JOIN),$(filter sql,$(FORMAT))),_join).$(FORMAT)
 sub-new:
-	@test -n "$(NAME)" || { echo "usage: make sub-new NAME=<name> [MODE=rtm|microbatch] [JOIN=1]"; exit 2; }
+	@test -n "$(NAME)" || { echo "usage: make sub-new NAME=<name> [MODE=rtm|microbatch] [JOIN=1] [FORMAT=sql|yml]"; exit 2; }
 	@test -f $(SUB_TEMPLATE) || { echo "error: no template $(SUB_TEMPLATE)"; exit 2; }
-	@test ! -f src/subscriptions/$(NAME).yml || { echo "error: src/subscriptions/$(NAME).yml already exists"; exit 2; }
-	@sed -e 's/^name: _template/name: $(NAME)/' -e 's/^mode: rtm /mode: $(MODE) /' src/subscriptions/_template.yml > src/subscriptions/$(NAME).yml
-	@sed 's/__NAME__/$(NAME)/g' $(SUB_TEMPLATE) > resources/pipelines/sub_$(NAME).yml
-	@echo "created src/subscriptions/$(NAME).yml and resources/pipelines/sub_$(NAME).yml"
+	@test ! -f src/subscriptions/$(NAME).sql -a ! -f src/subscriptions/$(NAME).yml || { echo "error: subscription $(NAME) already exists"; exit 2; }
+	@sed -e 's/^-- name: _template\(_join\)*$$/-- name: $(NAME)/' -e 's/^-- mode: rtm$$/-- mode: $(MODE)/' \
+	  -e 's/^name: _template/name: $(NAME)/' -e 's/^mode: rtm /mode: $(MODE) /' \
+	  $(if $(and $(JOIN),$(filter yml,$(FORMAT))),-e 's/^# then: /then: /' -e 's/^#   source:/  source:/' -e 's/^#   filter:/  filter:/' -e 's/^# within:/within:/') \
+	  $(RULE_TEMPLATE) > src/subscriptions/$(NAME).$(FORMAT)
+	@sed 's/__NAME__/$(NAME)/g' $(SUB_TEMPLATE) | sed 's#src/subscriptions/$(NAME).yml#src/subscriptions/$(NAME).$(FORMAT)#' > resources/pipelines/sub_$(NAME).yml
+	@echo "created src/subscriptions/$(NAME).$(FORMAT) and resources/pipelines/sub_$(NAME).yml"
 	@echo "next: edit the rule, make infra-plan && make infra-apply (adds hub sub_$(NAME)), make deploy <env>, make mirror-restart <env>"
 
 # Pipelines that write Delta tables: the lakehouse mirror and micro-batch (serverless) subscriptions. Full-refreshing

@@ -42,7 +42,7 @@ else:
         feed = f"_{rule.table}_feed"
 
         def _parsed():
-            parsed = F.from_json("value", subscriptions.output_schema(rule)).alias("r")
+            parsed = F.from_json("value", subscriptions.output_schema(rule, spark)).alias("r")
             keyed = _records().select(F.col("key").cast("string").alias("key"), parsed)
             return keyed.select("key", "r.*", F.current_timestamp().alias("_ingested_at"))
 

@@ -29,15 +29,14 @@ Classic Real-Time Mode clusters take ~9 minutes to start. The dashboard fills in
 - **Quarantine:** malformed messages are kept with a reason, not dropped.
 
 ## 4. Self-service: add a subscription live
-```bash
-make sub-new NAME=hyperkalemia MODE=microbatch
-```
-Edit `src/subscriptions/hyperkalemia.yml`:
-```yaml
-when:
-  source: gold_observations
-  filter: "observation_cd = '2823-3' AND value_num > 6.0"
-output: [patient_id, visit_id, patient_facility, value_num, abnormal_flag]
+`src/subscriptions/hyperkalemia.sql` (or `make sub-new NAME=hyperkalemia MODE=microbatch` and edit the query):
+```sql
+-- name: hyperkalemia
+-- mode: microbatch
+-- key: patient_id
+SELECT _meta, patient_id, visit_id, patient_facility, value_num, abnormal_flag
+FROM gold_observations
+WHERE observation_cd = '2823-3' AND value_num > 6.0
 ```
 ```bash
 make infra-plan && make infra-apply     # topic sub_hyperkalemia
