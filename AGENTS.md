@@ -137,10 +137,14 @@ docs/                 latency results, walkthrough, Epic JSON notes
   - All subscriptions share the runner `src/pipelines/subscriptions/runner.py`.
   - **SQL rules** (`<name>.sql`, the default for `make sub-new`): a `-- name/mode/key[/destinations/lateness]:` header
     plus one query over the gold views. Each view has `_meta` (record_id, gold_ts, raw_ts); the query must select it
-    (joins: each side's, `_meta_<side>`). The runner binds `gold_*` names to views with `spark.sql(query, **views)`,
+    (joins: each side's, `_meta_<side>`). The runner binds `gold_*` names to per-rule temp views,
     reads only the gold topics the query names, adds watermarks for joins, and derives the output schema by analyzing
     the query against empty views (`output_schema(rule, spark)`). Pure SQL pipelines can't do this: sinks and RTM are
     Python-only.
+  - **Lakeflow patches `spark.sql`** and rejects the DataFrame-parameter form `spark.sql(q, name=df)` (TypeError
+    `_dlt_sql_fn() got an unexpected keyword argument`). Bind views with `createOrReplaceTempView` + name rewrite
+    instead. Local Spark accepts both, so only a dev deploy catches this.
+  - The gold Delta tables carry the same `_meta` struct (`lakehouse.gold_rows`), so rule SQL runs in a SQL editor.
   - **YAML rules** (`<name>.yml`): `when` only (stateless filter), or `when` + `then` + `within` (stream-stream inner
     join on `key` over `msg_dt_tm`, with watermarks). Same output contract as SQL (tests compare them).
   - RTM joins need `subscriptions.RTM_JOIN_CONF` in the **pipeline `configuration`** and the `rtm_join_cluster`

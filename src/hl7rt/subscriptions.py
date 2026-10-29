@@ -214,11 +214,15 @@ def _with_meta(events: DataFrame, source: str) -> DataFrame:
 
 
 def _sql(rule: Rule, views: dict[str, DataFrame]) -> DataFrame:
-    """Run the rule's SQL with each gold table bound to its view (spark.sql DataFrame parameters)."""
-    escaped = rule.sql.replace("{", "{{").replace("}", "}}")
-    query = re.sub(rf"\b({'|'.join(views)})\b", r"{\1}", escaped)
-    spark = next(iter(views.values())).sparkSession
-    return spark.sql(query, **views)
+    """Run the rule's SQL with each gold table bound to its view. Each view is registered as a temp view under a
+    rule-specific name and the query is rewritten to it. (Lakeflow pipelines patch spark.sql, which rejects the
+    DataFrame-parameter form spark.sql(query, gold_observations=df).)"""
+    names = {}
+    for source, df in views.items():
+        names[source] = f"__sub_{rule.name}_{source}"
+        df.createOrReplaceTempView(names[source])
+    query = re.sub(rf"\b({'|'.join(views)})\b", lambda m: names[m.group(1)], rule.sql)
+    return next(iter(views.values())).sparkSession.sql(query)
 
 
 def _build_sql(rule: Rule, read) -> DataFrame:

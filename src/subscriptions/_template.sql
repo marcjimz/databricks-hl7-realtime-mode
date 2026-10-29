@@ -6,7 +6,8 @@
 -- key: patient_id
 --
 -- Query gold_encounters (one row per ADT event), gold_observations (one per lab result), or gold_orders.
--- Always SELECT _meta: it carries the record id and timestamps used for upserts and latency.
+-- Always SELECT _meta: it carries the record id and timestamps used for upserts and latency. The gold Delta
+-- tables have the same column, so you can run this query in a SQL editor first.
 SELECT _meta, patient_id, visit_id, patient_facility, observation_cd_desc, value_num, abnormal_flag
 FROM gold_observations
 WHERE abnormal_flag IN ('HH', 'LL')

@@ -124,8 +124,9 @@ pre-built RTM examples and create the new one in micro-batch.
 
 A subscription is one SQL file in `src/subscriptions/`: a short header (`-- name:`, `-- mode: rtm|microbatch`,
 `-- key:`) and a query over `gold_encounters`, `gold_observations`, or `gold_orders`. Always `SELECT _meta`; for a
-join, select each side's as `_meta_<side>` (see `_template_join.sql`). The platform applies watermarks, upserts, and
-latency tracking.
+join, select each side's as `_meta_<side>` (see `_template_join.sql`). The gold Delta tables carry the same `_meta`
+column, so you can try a query in a SQL editor first, then save it as a subscription unchanged. The platform applies
+watermarks, upserts, and latency tracking.
 
 ```bash
 make sub-new NAME=my_alert MODE=rtm      # or MODE=microbatch; JOIN=1 for "event A then event B"

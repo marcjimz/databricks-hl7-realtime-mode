@@ -92,14 +92,24 @@ def quarantine_rows(quarantine: DataFrame) -> DataFrame:
 
 
 def gold_rows(gold_topic: DataFrame, schema) -> DataFrame:
-    """gold_* topics: the entity's fields (gold.*_SCHEMA order), then hop (silver -> gold) and end-to-end latency."""
+    """gold_* topics: the entity's fields (gold.*_SCHEMA order), then hop (silver -> gold) and end-to-end latency,
+    and `_meta` (record id + timestamps): the struct subscription SQL selects, so a rule's query also runs in a SQL
+    editor against these tables."""
     g = gold_topic.select(_value(schema).alias("g"), F.col("timestamp").alias("kafka_timestamp"))
+    ids = [F.col("g.raw_partition"), F.col("g.raw_offset")]
+    ids += [F.col("g.set_id")] if "set_id" in schema.fieldNames() else []
+    meta = F.struct(
+        F.concat_ws("-", *ids).alias("record_id"),
+        F.col("kafka_timestamp").alias("gold_ts"),
+        F.col("g.raw_ts").alias("raw_ts"),
+    )
     return g.select(
         "g.*",
         "kafka_timestamp",
         _ms(F.col("kafka_timestamp"), F.col("g.silver_ts")).alias("hop_ms"),
         _ms(F.col("kafka_timestamp"), F.col("g.raw_ts")).alias("e2e_ms"),
         F.current_timestamp().alias("_ingested_at"),
+        meta.alias("_meta"),
     )
 
 
