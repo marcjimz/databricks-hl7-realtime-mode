@@ -6,12 +6,10 @@ telemetry (hop_ms / e2e_ms per record, from broker timestamps). Delivery is at-l
 AUTO CDC upsert on lakehouse.KEYS: a re-sent record updates its row instead of adding a duplicate.
 """
 
-from pathlib import Path
-
 from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
-from hl7rt import eventhubs, gold, lakehouse, subscriptions
+from hl7rt import eventhubs, gold, lakehouse
 from hl7rt.config import conf
 
 
@@ -63,29 +61,3 @@ _layer("gold_observations", "topics.gold_observations", lambda df: lakehouse.gol
        "Gold observations: one row per OBX result, with latency.")  # fmt: skip
 _layer("gold_orders", "topics.gold_orders", lambda df: lakehouse.gold_rows(df, gold.ORDER_SCHEMA),
        "Gold orders: one row per ORM order, with latency.")  # fmt: skip
-
-
-# Subscriptions (src/subscriptions/*.sql, *.yml). RTM rules land in their own table here; micro-batch ones write theirs.
-# Every rule's topic also feeds subscription_latency, so the dashboard shows new subscriptions without edits.
-dp.create_streaming_table(
-    "subscription_latency",
-    cluster_by=["kafka_timestamp"],
-    comment="One row per subscription record: gold -> subscription and end-to-end latency.",
-)
-
-
-def _subscription(rule):
-    topic = f"{conf(spark, 'topics.prefix')}.{rule.table}"
-    if rule.mode == "rtm" and "delta" in rule.destinations:
-        schema = subscriptions.output_schema(rule, spark)
-        _upsert(rule.table, topic, lambda df: lakehouse.subscription_rows(df, schema), lakehouse.SUBSCRIPTION_KEYS,
-                f"Subscription {rule.name} (src/subscriptions/{rule.name}.yml), with latency.")  # fmt: skip
-    if "eventhubs" in rule.destinations:
-        dp.append_flow(name=f"{rule.table}_latency", target="subscription_latency")(
-            lambda: lakehouse.subscription_latency_rows(_subscribe(topic), rule.name, rule.mode)
-        )
-
-
-_rules_dir = Path(conf(spark, "subscriptions.dir"))
-for _path in sorted(p for p in _rules_dir.glob("[a-z]*.*") if p.suffix in (".yml", ".sql")):
-    _subscription(subscriptions.load(_path))

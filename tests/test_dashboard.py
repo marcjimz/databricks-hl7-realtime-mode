@@ -16,18 +16,17 @@ def _datasets():
 
 
 def _produced_tables() -> set[str]:
-    """Tables written by the lakehouse mirror (constant @dp.table names) and by subscription rules."""
+    """Tables written by the lakehouse mirror (constant table names)."""
     tree = ast.parse((ROOT / "src/pipelines/lakehouse/mirror.py").read_text())
     names = {n.args[0].value for n in ast.walk(tree) if isinstance(n, ast.Call) and n.args
              and getattr(n.func, "id", getattr(n.func, "attr", "")) in ("_layer", "create_streaming_table")
              and isinstance(n.args[0], ast.Constant)}  # fmt: skip
-    rules = {f"sub_{p.stem}" for p in (ROOT / "src/subscriptions").glob("[a-z]*.*") if p.suffix in (".yml", ".sql")}
-    return names | rules
+    return names
 
 
 def test_dashboard_uses_unqualified_tables_and_bundle_sets_catalog_schema():
     for name, sql in _datasets().items():
-        assert "real_time_mode_demo_catalog" not in sql and "hl7_realtime." not in sql, f"{name}: hardcoded catalog"
+        assert "hl7_rtm_demo" not in sql and "hl7_realtime." not in sql, f"{name}: hardcoded catalog"
     spec = yaml.safe_load((ROOT / "resources/dashboards/hl7_latency.yml").read_text())["resources"]["dashboards"]
     d = spec["hl7_latency"]
     assert d["dataset_catalog"] == "${var.catalog}" and d["warehouse_id"] == "${var.warehouse_id}"

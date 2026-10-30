@@ -1,2 +1,3 @@
-# Copy to local.mk (gitignored). Your Databricks CLI profile for the target workspace.
-PROFILE = fevm-real-time-mode-demo
+# Optional: copy to local.mk (gitignored). By default the Makefile signs in with the Azure CLI to the workspace in
+# infra/azure's Terraform outputs; set PROFILE only to use a Databricks CLI profile instead.
+# PROFILE = my-azure-workspace

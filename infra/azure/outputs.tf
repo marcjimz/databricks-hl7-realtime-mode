@@ -1,0 +1,30 @@
+# Read by `make uc` and the bundle target (none are secrets).
+output "workspace_url" {
+  description = "Databricks workspace URL (bundle target host)."
+  value       = "https://${azurerm_databricks_workspace.this.workspace_url}"
+}
+
+output "workspace_id" {
+  description = "Databricks workspace ID (recorded on the catalog; a new ID means the environment was rebuilt)."
+  value       = azurerm_databricks_workspace.this.workspace_id
+}
+
+output "access_connector_id" {
+  description = "Access connector behind the UC storage and service credentials."
+  value       = azurerm_databricks_access_connector.this.id
+}
+
+output "storage_url" {
+  description = "ADLS Gen2 URL for the UC external location."
+  value       = "abfss://${azurerm_storage_container.uc.name}@${azurerm_storage_account.uc.name}.dfs.core.windows.net/"
+}
+
+output "eh_namespace" {
+  description = "Event Hubs namespace name (bundle variable eh_namespace)."
+  value       = azurerm_eventhub_namespace.this.name
+}
+
+output "catalog" {
+  description = "Unity Catalog catalog (bundle variable catalog)."
+  value       = var.catalog
+}

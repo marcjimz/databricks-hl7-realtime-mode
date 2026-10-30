@@ -6,16 +6,17 @@
 
 # HL7 v2 on Spark Real-Time Mode
 
-Millisecond HL7 processing on Databricks: raw HL7 v2 in, parsed and broken into clinical entities in tens of
+Millisecond HL7 processing on Azure Databricks: raw HL7 v2 in, parsed and broken into clinical entities in tens of
 milliseconds per layer, with every layer also landed in Delta. Built on
 [Real-Time Mode](https://www.databricks.com/blog/introducing-real-time-mode-apache-sparktm-structured-streaming),
-Lakeflow Spark Declarative Pipelines, and Azure Event Hubs.
+Lakeflow Spark Declarative Pipelines, and Azure Event Hubs, connected through a Unity Catalog service credential:
+no connection strings, no keys.
 
 ## What it does
 
 ```
 HOT PATH (Real-Time Mode, ms)
-  HL7 ─► raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_hl7 ─► gold ─► gold_* ─► subscriptions ─► sub_*
+  HL7 ─► raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_hl7 ─► gold ─► gold_encounters / gold_observations / gold_orders
                                                └─► quarantine_hl7
 
 NEAR-REAL-TIME PATH (seconds)
@@ -24,36 +25,45 @@ NEAR-REAL-TIME PATH (seconds)
 
 - **Silver** parses HL7 with plain Spark into the existing 34-column Epic silver contract. Bad messages go to quarantine.
 - **Gold** splits each message into encounters, observations (one per lab result), and orders.
-- **Subscriptions** are YAML rules teams write themselves, in milliseconds (RTM) or seconds (micro-batch).
+- **Epic JSON:** the customer's existing pre-parsed feed, as a drop-in bronze/silver/quarantine pipeline.
 - Each topic is named after the table it lands in: `<catalog>.<schema>.<table>`.
+- **One Azure region** (workspace, Event Hubs Premium, ADLS). Pipelines and generators authenticate to Event Hubs as the
+  workspace's access connector (managed identity) through the Unity Catalog service credential `<catalog>_eventhubs`.
+- Self-service subscriptions over gold are a later phase, parked in [examples/subscriptions](examples/subscriptions).
 
 ## Results
 
-Measured on dev at 200 msg/s over 12 minutes (~144k messages per hop):
+Measured at 200 msg/s over 12 minutes (~144k messages per hop), on the earlier AWS workspace with Event Hubs in
+Azure (every hop crossing clouds); Azure same-region numbers: [docs/latency.md](docs/latency.md).
 
 | Hop | p50 | p99 |
 |---|---|---|
 | raw → bronze | 12 ms | **33 ms** |
 | bronze → silver (full HL7 parse) | 15 ms | **32 ms** |
 | silver → gold | 15 ms | **32 ms** |
-| gold → subscription: critical lab | 15 ms | **31 ms** |
-| gold → subscription: ED registration, then a critical lab within 60 min | 32 ms | **79 ms** |
-| same subscription in micro-batch | 2.1 s | 5.4 s |
 
-Every Real-Time Mode hop is under 200 ms at p99. Each pipeline pauses ~1–3 s every 5 minutes to checkpoint, which
-sets the max. Details: [docs/latency.md](docs/latency.md).
+On AWS every Real-Time Mode hop was under 200 ms at p99. Each pipeline pauses ~1–3 s every 5 minutes to checkpoint,
+which sets the max. **On Azure (this target) the bar isn't met yet:** at 2 PU, p99 is raw → bronze 237 ms,
+bronze → silver 312 ms, and silver → gold 94 ms. Minutes without a checkpoint run ~94 ms p99; the investigation is in
+[docs/latency.md](docs/latency.md).
 
-## Setup (once)
+## Set up (and after every Sunday sandbox wipe)
 
-Prereqs: Databricks CLI ≥ 0.285, Terraform ≥ 1.5, Azure CLI (logged in), [uv](https://docs.astral.sh/uv/).
+Prereqs: Databricks CLI ≥ 0.285, Terraform ≥ 1.5, Azure CLI (`az login` to the sandbox tenant),
+[uv](https://docs.astral.sh/uv/).
 
 ```bash
-make install                                             # local Python env
-cp infra/eventhubs/terraform.tfvars.example infra/eventhubs/terraform.tfvars   # then edit it
-make infra-plan && make infra-apply                      # Event Hubs namespace + topics
-cp local.mk.example local.mk                             # your Databricks CLI profile (if several match)
-make secrets dev                                         # connection string -> Databricks secret scope
+make install                                                       # local Python env
+cp infra/azure/terraform.tfvars.example infra/azure/terraform.tfvars   # once: subscription, tenant, metastore, prefix
+make up                                                            # Terraform plan -> you confirm -> apply, then make uc
 ```
+
+`make up` builds the workspace (assigned to the region's Unity Catalog metastore), ADLS, the access connector, and
+Event Hubs Premium with one hub per table. Then `make uc` creates the catalog, the storage credential, and the Event
+Hubs service credential. Unity Catalog lives in the shared metastore and survives the wipe; `make uc` repoints it at
+the rebuilt resources and recreates the catalog when the workspace is new. Both are safe to rerun. The Makefile reads
+the workspace URL and names from Terraform outputs and signs in with the Azure CLI, so there is nothing else to
+configure.
 
 ## Operate (from your machine)
 
@@ -68,87 +78,44 @@ make reset dev           # restart from the live edge with fresh checkpoints (de
 make help                # everything else
 ```
 
-Classic Real-Time Mode clusters take ~9 minutes to start. Event Hubs keeps billing until you `terraform destroy`.
+Classic Real-Time Mode clusters take ~9 minutes to start. Event Hubs Premium bills until the sandbox is wiped or you
+`terraform -chdir=infra/azure destroy`.
 
 ## Configure
 
 | What | Where |
 |---|---|
-| Azure: subscription, region, namespace, tier, capacity, catalog | `infra/eventhubs/terraform.tfvars` |
-| Databricks: workspace, catalog, schema, Event Hubs namespace, warehouse | `databricks.yml` → `targets.dev.variables` |
-| Topic names, cluster sizes, feed rate, checkpoint interval | `databricks.yml` → `variables` (defaults) |
-| Subscriptions | `src/subscriptions/<name>.yml` |
+| Azure: subscription, tenant, region, metastore, name prefix, catalog, Event Hubs capacity | `infra/azure/terraform.tfvars` |
+| Topic names, cluster sizes, feed rate, checkpoint interval, warehouse | `databricks.yml` → `variables` / `targets.dev` |
 
 To add an environment, copy the `dev` target in `databricks.yml` and add its name to `ENVS` in the `Makefile`.
 
-## Demo: show a new subscription live
+## Demo
 
 1. **10 minutes before:** `make demo dev`, then open the dashboard URL it prints. Check every pipeline shows Running
    (Pipelines UI). Once all hops show data, run `make clear-data dev` so start-up catch-up doesn't skew the numbers,
    and use the dashboard's own refresh button (top right), not the browser's.
-2. **Show what's running:** p99 per hop (all under 200 ms), the two RTM examples (`critical_lab`,
-   `ed_critical_lab`), and the same ED rule in micro-batch (`ed_critical_lab_nrt`).
-3. **Add a subscription** (~5 minutes end to end). Each subscription is one SQL file. Show
-   `src/subscriptions/hyperkalemia.sql`:
-   ```sql
-   -- name: hyperkalemia
-   -- mode: microbatch
-   -- key: patient_id
-   SELECT _meta, patient_id, visit_id, patient_facility, value_num, abnormal_flag
-   FROM gold_observations
-   WHERE observation_cd = '2823-3'   -- potassium (LOINC)
-     AND value_num > 6.0
-   ```
-   (To write one from scratch: `make sub-new NAME=hyperkalemia MODE=microbatch`, then edit the query.)
-   ```bash
-   make infra-plan && make infra-apply   # adds topic sub_hyperkalemia (needs `az login`; plan shows 1 to add)
-   make deploy dev                       # creates and starts the subscription pipeline (serverless)
-   make mirror-restart dev               # the mirror picks up the new rule (keeps data)
-   ```
-4. **Show the result** (~2 minutes later): table `sub_hyperkalemia` fills, and `hyperkalemia` appears in the
-   dashboard's "Micro-batch subscriptions" panel after a refresh, with no dashboard edits. (An `rtm` subscription
-   appears as a bar in the RTM hop chart instead.)
-5. **Remove it** (~3 minutes):
-   ```bash
-   rm src/subscriptions/hyperkalemia.sql resources/pipelines/sub_hyperkalemia.yml
-   make deploy dev                       # confirm the pipeline removal when asked
-   make mirror-restart dev               # the mirror stops reading the topic
-   make infra-plan && make infra-apply   # removes the topic (plan shows 1 to destroy)
-   ```
-6. **Stop:** `make stop dev`.
+2. **Show the flow:** raw HL7 v2 at 200 msg/s → bronze → silver (the Epic silver contract) → gold, an Event Hubs topic
+   between every layer and the same layers as streaming tables in Catalog Explorer.
+3. **Show the numbers:** p99 per hop (all under 200 ms), p99 by minute, latest critical labs reaching gold, quarantine.
+4. **Show the security story:** Catalog Explorer → External data → Credentials → `<catalog>_eventhubs`. The pipelines
+   have no secrets; the Event Hubs namespace has SAS keys disabled.
+5. **Stop:** `make stop dev`.
 
-Use `MODE=rtm` for millisecond delivery. Its classic cluster takes ~9 minutes to start, so in a live demo show the
-pre-built RTM examples and create the new one in micro-batch.
-
-## Subscribe (self-service)
-
-A subscription is one SQL file in `src/subscriptions/`: a short header (`-- name:`, `-- mode: rtm|microbatch`,
-`-- key:`) and a query over `gold_encounters`, `gold_observations`, or `gold_orders`. Always `SELECT _meta`; for a
-join, select each side's as `_meta_<side>` (see `_template_join.sql`). The gold Delta tables carry the same `_meta`
-column, so you can try a query in a SQL editor first, then save it as a subscription unchanged. The platform applies
-watermarks, upserts, and latency tracking.
-
-```bash
-make sub-new NAME=my_alert MODE=rtm      # or MODE=microbatch; JOIN=1 for "event A then event B"
-# edit src/subscriptions/my_alert.sql
-make infra-plan && make infra-apply      # creates topic sub_my_alert
-make deploy dev                          # runs it: topic + table <catalog>.<schema>.sub_my_alert
-make mirror-restart dev                  # adds it to the dashboard
-```
-
-YAML rules (`FORMAT=yml`, see `_template.yml`) still work; the shipped `critical_lab` / `ed_critical_lab` examples use
-them. The [walkthrough](docs/walkthrough.md) is a 20-minute demo script.
+The [walkthrough](docs/walkthrough.md) is a 20-minute demo script.
 
 ## Repo
 
 ```
 databricks.yml     variables and targets
 resources/         pipelines, jobs, schemas, dashboards (by type)
-src/hl7rt/         the logic: HL7 parsing, gold, subscriptions, Event Hubs helpers, generators
+src/hl7rt/         the logic: HL7 parsing, gold, Event Hubs helpers, generators
 src/pipelines/     thin pipeline definitions
-src/subscriptions/ self-service rule files
 src/dashboards/    live latency dashboard
-infra/eventhubs/   Terraform for Event Hubs
+infra/azure/       Terraform: workspace, ADLS, access connector, Event Hubs (one region)
+scripts/uc.sh      Unity Catalog bootstrap (make uc)
+examples/          parked: self-service subscriptions
+infra/eventhubs/   legacy eastus Event Hubs used by the earlier AWS workspace
 tests/             unit tests (local Spark)
 docs/              latency results, walkthrough, Epic JSON notes
 ```

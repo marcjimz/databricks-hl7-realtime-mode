@@ -26,3 +26,13 @@ def test_no_connection_strings_in_repo():
             continue
         hits += [f"{f.relative_to(ROOT)}" for rx in FORBIDDEN if rx.search(text)]
     assert not hits, f"secret-looking values found in: {sorted(set(hits))}"
+
+
+# Event Hubs auth is a Unity Catalog service credential (Entra ID); the namespace has SAS keys disabled.
+KEY_AUTH = re.compile(r"sasl\.jaas\.config|\$ConnectionString|secret_scope|secrets\.get\(|SharedAccessKey")
+
+
+def test_no_key_based_event_hubs_auth_in_code_or_resources():
+    files = [f for f in _tracked_files() if f.relative_to(ROOT).parts[0] in ("src", "resources", "databricks.yml")]
+    hits = [str(f.relative_to(ROOT)) for f in files if f.suffix in (".py", ".yml") and KEY_AUTH.search(f.read_text())]
+    assert not hits, f"key-based Event Hubs auth found in: {hits}"

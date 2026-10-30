@@ -363,3 +363,45 @@ In steady state there were 0 duplicates. Consumers that need exactly-once should
 **Join fan-out follows the data.** The synthetic feed gives each patient ~3 ED registrations an hour at 200 msg/s,
 so each critical lab matches several registrations (~160 matches/s in steady state). That's correct for the rule as
 written; real ED traffic is far sparser.
+
+# Azure, one region (workspace, Event Hubs, storage in westus2), UC service credential auth
+
+The repo moved from the AWS workspace (cross-cloud to Event Hubs in eastus, SAS connection string) to an Azure
+Databricks workspace in the same region as Event Hubs Premium, authenticated with a Unity Catalog service credential
+(Entra ID, SAS keys disabled). Same code, same 200 msg/s HL7 feed plus the 200 msg/s Epic JSON feed, same RTM sizing
+(2 × Standard_D4ds_v5 = 8 slots per hop for 4 partitions).
+
+## Auth works everywhere
+- Classic RTM pipelines (bronze, silver, gold) read and write through `dp.create_sink` Kafka sinks with only
+  `databricks.serviceCredential`: no flow errors.
+- The serverless mirror and Epic JSON pipelines read the same way.
+- The serverless confluent-kafka generators produce with OAUTHBEARER tokens from
+  `dbutils.credentials.getServiceCredentialsProvider`.
+- 0 duplicate keys in every table after ~15 hours of continuous running (11.5M raw messages).
+
+## 12-minute soaks (≈140k msgs/hop, 2 epoch boundaries per pipeline, zero flow errors)
+
+| Hop (p99 ms) | 1 PU | 2 PU | AWS cross-cloud, 2 PU (Phase 5) |
+|---|---|---|---|
+| producer → raw | 143 | 87 | n/a |
+| raw → bronze | 278 | **237** | 47 |
+| bronze → silver | 985 | **312** | 94 |
+| silver → gold | 251 | **94** | 47 |
+| raw → gold end to end | 1656 | 1094 | 625 (KPI) |
+| Event Hubs namespace CPU (max) | 82–83% | 23–43% | n/a |
+
+- **1 PU is not enough** for this load: 8 hubs at ~200 msg/s each, each read by RTM and the mirror. CPU sat at ~83% and
+  every hop's tail grew. `processing_units` now defaults to 2.
+- **At 2 PU, the remaining p99 misses are the epoch boundaries.** Minutes without a boundary run ~94 ms p99. Minutes
+  with one run 1.0–3.3 s p99 (driver log: `Interbatch latency` 0.4–2.1 s), at bronze :19/:24 and silver :16/:21/:26.
+  Epoch pauses are the same order as on AWS. What differs is the baseline the catch-up drains into.
+- **The baseline is ~3× AWS's** (bronze p95 62 vs 19 ms), evenly across all 4 output partitions (p99 126–188 ms each),
+  so it's not a single stalled partition (Phase 3's signature).
+
+## Still open (not yet explained)
+- Why the steady-state tail is higher on Azure. Candidates, none tested yet:
+  - Entra token handling on the Kafka connection, versus SAS.
+  - Node type: D4ds_v5 versus m6id.xlarge.
+  - The Epic JSON feed now sharing the namespace at full rate.
+  - Event Hubs regional behaviour in westus2.
+- Under-200 ms at p99 per hop is **not** met on Azure yet for raw → bronze and bronze → silver. silver → gold meets it.

@@ -5,36 +5,39 @@ decision, pattern, or hard-won lesson changes, update it in the same PR.
 
 ## What this repo is
 
-A customer-facing reference for **millisecond HL7 v2 processing** on Databricks with Spark
-**Real-Time Mode (RTM)**, Lakeflow Spark Declarative Pipelines (SDP), and Azure Event Hubs. It has to
-**prove** low latency with measurements, so latency claims require data (see "Measuring latency").
+A customer-facing reference for **millisecond HL7 v2 processing** on Azure Databricks with Spark
+**Real-Time Mode (RTM)**, Lakeflow Spark Declarative Pipelines (SDP), and Azure Event Hubs, reached through a
+Unity Catalog service credential. It has to **prove** low latency with measurements, so latency claims require data
+(see "Measuring latency").
 
 ```
 HOT PATH (RTM, Event Hubs topics between every layer)
-  raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_hl7 ─► gold ─► gold_* ─► subscriptions ─► sub_*
+  raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_hl7 ─► gold ─► gold_*
 LAKEHOUSE PATH (SDP micro-batch, off the hot path)
   every topic ─► the Delta streaming table of the same name (audit, replay, BI) + per-record latency telemetry
 ```
 
-- Layers are **raw → bronze → silver → gold → self-service subscriptions**. Call the last layer
-  "subscriptions", not "alerts".
-- Delivered in phases 0–5 (feasibility → scaffold → bronze/silver → gold → subscriptions → dashboard), one PR each,
-  all merged. New work: one branch + one PR per unit, verified on dev before merging.
+- Layers are **raw → bronze → silver → gold**, each both an RTM Kafka topic and an SDP streaming table. Self-service
+  subscriptions over gold are parked in `examples/subscriptions/` (not deployed, linted, or tested) for a later phase.
+- Phases 0–5 were built on an AWS workspace (cross-cloud to Event Hubs); the repo now targets one Azure region end
+  to end. New work: one branch + one PR per unit, verified on dev before merging.
 
 ## Non-negotiable principles
 
-1. **Everything environment-specific is configurable.** That covers namespace, topic names, secret
-   scope/key, catalog/schema, offsets, rates, and sizing. Bundle variables (`databricks.yml`) flow into
+1. **Everything environment-specific is configurable.** That covers namespace, topic names, service
+   credential, catalog/schema, offsets, rates, and sizing. Bundle variables (`databricks.yml`) flow into
    pipeline `configuration:` as `hl7.<key>` and are read with `hl7rt.config.conf(spark, "<key>")`.
    `tests/test_config_wiring.py` enforces this. Never hardcode names in `src/`.
 2. **A topic is named after the Delta table it lands in: `<catalog>.<schema>.<table>`.** Bundle topic variables
-   default to `${var.catalog}.${var.schema}.<table>`, Terraform names hubs from `catalog`/`schema`/`tables`, and the
-   mirror lands each topic in the table of that name. New layers and subscriptions follow the same rule.
+   default to `${var.catalog}.${var.schema}.<table>`, Terraform (`infra/azure`) names hubs from `catalog`/`schema`/`tables`,
+   and the mirror lands each topic in the table of that name. New layers follow the same rule.
    `tests/test_topic_names.py` enforces it. Renaming a hub recreates it (data is dropped), so pipelines then need
    `make reset` (new checkpoints).
-3. **No secrets anywhere in the repo.** The Event Hubs connection string lives only in a Databricks
-   secret scope (`make secrets <env>` pipes it from Terraform output). `tests/test_no_secrets.py` enforces
-   this. Don't print secrets in logs or command output.
+3. **No keys or connection strings, anywhere.** Event Hubs auth is Entra ID through the Unity Catalog service credential
+   `<catalog>_eventhubs` (the access connector's managed identity, with Event Hubs Data Sender + Receiver). The namespace has SAS
+   keys disabled (`local_authentication_enabled = false`). Spark uses the Kafka option `databricks.serviceCredential` and must set
+   no `kafka.sasl.*` / `kafka.security.*` options (they replace it). confluent-kafka generators use OAUTHBEARER with tokens from
+   `dbutils.credentials.getServiceCredentialsProvider`. `tests/test_no_secrets.py` enforces it.
 4. **Native Spark for parsing; no JARs or UDFs on the hot path.** HL7 v2 is delimited text, so use
    `split` / `try_element_at` / `try_to_timestamp`. A full parse costs less than the 16 ms measurement
    resolution.
@@ -50,13 +53,14 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
 ```
 databricks.yml        variables + targets; include: resources/**
 resources/<type>/     bundle resources grouped by type: jobs/, pipelines/, schemas/, dashboards/
-resources/pipelines/_templates/   subscription pipeline templates (*.yml.tmpl, not included by the bundle)
 src/hl7rt/            shared library: pure DataFrame transforms, Event Hubs helpers, generators (unit-tested)
 src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path = src/)
-src/subscriptions/    self-service rules, one SQL (or YAML) file per subscription (`_template*.sql` / `_template.yml`)
 src/dashboards/       the AI/BI dashboard definition (.lvdash.json)
-infra/<stack>/        Terraform, one small stack per folder (eventhubs/, later e.g. network/), each with
-                      its own state + versions.tf/variables.tf/main.tf/outputs.tf. tfvars/state gitignored.
+infra/azure/          Terraform for everything Azure: workspace (+ metastore assignment), ADLS, access connector,
+                      Event Hubs + hubs, RBAC. tfvars/state gitignored (local state).
+infra/eventhubs/      legacy: the eastus namespace the old AWS workspace reads. Not used by this target.
+scripts/uc.sh         idempotent Unity Catalog bootstrap (`make uc`): credentials, external location, catalog
+examples/subscriptions/   parked subscription phase (see its README)
 tests/                pytest with local Spark (.venv via uv)
 docs/                 latency results, walkthrough, Epic JSON notes
 ```
@@ -67,8 +71,10 @@ docs/                 latency results, walkthrough, Epic JSON notes
 - Generators are console scripts in the `hl7rt` wheel. The bundle `artifacts:` block builds it into
   `.build/` (gitignored; `make clean` removes it), and it runs as serverless `python_wheel_task` jobs with
   `environment_version: "3"` (Python 3.12).
-- Don't grow a single Terraform folder. Add a new stack under `infra/<stack>/` and target it with
-  `make infra-plan STACK=<stack>`.
+- **Terraform owns Azure; the Databricks CLI owns Unity Catalog.** UC objects live in the shared regional metastore and
+  outlive the weekly sandbox wipe, so Terraform state for them would go stale. `scripts/uc.sh` creates or repoints them
+  and recreates a catalog built for an earlier workspace (catalog property `hl7.workspace_id`). It refuses to touch a catalog
+  it didn't create. Azure names are deterministic (prefix-based) so a rebuild reuses the same storage URL.
 
 ## Real-Time Mode rules (learned in Phase 0, see docs/latency.md)
 
@@ -84,13 +90,13 @@ docs/                 latency results, walkthrough, Epic JSON notes
   "pipelines.trigger.interval": "5 minutes"})`. Sinks are `dp.create_sink(name, "kafka", {..., "topic": ...})`.
   The topic is static, so use one sink per output topic.
 - **One RTM flow per pipeline, one pipeline per cluster.** Flows that share slots contend.
-- **Compute:** classic, fixed `num_workers` (no autoscale), `photon: false`, `availability: ON_DEMAND`.
+- **Compute:** classic, fixed `num_workers` (no autoscale), `photon: false`, `azure_attributes.availability: ON_DEMAND_AZURE`.
   DBR 18.3+ (SDP `CURRENT` channel).
 - **Size with headroom:** total task slots ≥ tasks across all stages (Kafka `maxPartitions` + each
   shuffle's partitions) **plus ~20% or more spare**. With exactly as many slots as tasks, the epoch
   handoff fails with `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT`, the flow crashes, and SDP restarts it.
-  That looks like a 6–10 s "latency spike". Current sizing: stateless hop = 2 workers (8 slots, `rtm_cluster`) for
-  4 partitions; join subscription = 4 workers (16 slots, `rtm_join_cluster`) for 2 × 4 source + 4 join tasks.
+  That looks like a 6–10 s "latency spike". Current sizing: stateless hop = 2 × `Standard_D4ds_v5` (8 slots,
+  `rtm_cluster`) for 4 partitions.
 - **Cold start is ~9 min per classic cluster; instance pools aren't used.** Pools only skip VM acquisition (internal
   guidance: ~20 s with a preloaded runtime; cases with warm pools still took 2–5 min), pipeline docs don't cover pool
   keys, and a continuous-pipeline-on-pool cluster failure is on record. Start the demo early instead (`make demo`).
@@ -101,7 +107,7 @@ docs/                 latency results, walkthrough, Epic JSON notes
   async progress tracking and async state checkpointing are on by default in DBR 18.3.
 - **Supported in RTM:** stateless ops, `explode`, tumbling/sliding windows with watermark, aggregations,
   `dropDuplicates`, `transformWithState` (row API), stream-static joins, and stream-stream **inner** joins (DBR 18+,
-  join settings in the pipeline `configuration`; see Subscriptions). Output mode is update only.
+  join settings in the pipeline `configuration`; see `examples/subscriptions`). Output mode is update only.
   **Not supported:** Delta source/sink, `foreachBatch`, session windows, `mapPartitions`,
   `transformWithStateInPandas`.
 - **A one-off `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT` seconds after a cold start** can happen. SDP retries it
@@ -114,8 +120,8 @@ docs/                 latency results, walkthrough, Epic JSON notes
   DBR 18.3 logs `Interbatch latency for batch N` in the driver log.
 - **Event Hubs Premium is required.** Standard's multi-tenant tail missed 200 ms p99 on two hops;
   Premium gives ~31–47 ms p99 per hop. Capacity wasn't the issue for the partition stall (client config was).
-- **The dev workspace is AWS us-east-1 and Event Hubs is Azure eastus:** every hop crosses clouds (~8 ms produce
-  round trip). For production, co-locate them (Azure Databricks in the Event Hubs region).
+- **Workspace, Event Hubs, and storage share one Azure region** (`location`, default westus2, which has the shared sandbox
+  metastore). Phases 0–5 ran AWS us-east-1 → Azure eastus, crossing clouds on every hop (~8 ms produce round trip).
 
 ## Data contracts
 
@@ -130,29 +136,8 @@ docs/                 latency results, walkthrough, Epic JSON notes
   `NM`), orders (ORM). One flow writes all three: build an array of `(topic, value)` per silver record and
   `explode` it. Gold JSON uses `to_json(..., {"ignoreNullFields": "false"})` so every record has the full shape
   subscribers code against. (Spark's default drops null fields.) Change a gold schema only additively.
-- **Subscriptions** (`hl7rt.subscriptions`):
-  - One rule file `src/subscriptions/<name>.yml` maps to one pipeline `resources/pipelines/sub_<name>.yml`, created
-    from `resources/pipelines/_templates/` with `make sub-new`. That's one hub `sub_<name>` (Terraform `fileset`) and
-    one table `sub_<name>`.
-  - All subscriptions share the runner `src/pipelines/subscriptions/runner.py`.
-  - **SQL rules** (`<name>.sql`, the default for `make sub-new`): a `-- name/mode/key[/destinations/lateness]:` header
-    plus one query over the gold views. Each view has `_meta` (record_id, gold_ts, raw_ts); the query must select it
-    (joins: each side's, `_meta_<side>`). The runner binds `gold_*` names to per-rule temp views,
-    reads only the gold topics the query names, adds watermarks for joins, and derives the output schema by analyzing
-    the query against empty views (`output_schema(rule, spark)`). Pure SQL pipelines can't do this: sinks and RTM are
-    Python-only.
-  - **Lakeflow patches `spark.sql`** and rejects the DataFrame-parameter form `spark.sql(q, name=df)` (TypeError
-    `_dlt_sql_fn() got an unexpected keyword argument`). Bind views with `createOrReplaceTempView` + name rewrite
-    instead. Local Spark accepts both, so only a dev deploy catches this.
-  - The gold Delta tables carry the same `_meta` struct (`lakehouse.gold_rows`), so rule SQL runs in a SQL editor.
-  - **YAML rules** (`<name>.yml`): `when` only (stateless filter), or `when` + `then` + `within` (stream-stream inner
-    join on `key` over `msg_dt_tm`, with watermarks). Same output contract as SQL (tests compare them).
-  - RTM joins need `subscriptions.RTM_JOIN_CONF` in the **pipeline `configuration`** and the `rtm_join_cluster`
-    (2 sources × 4 + 4 shuffle = 12 tasks → 16 slots). Set as flow `spark_conf`, the join fails with
-    `STREAM_STREAM_JOIN_NOT_SUPPORTED`.
-  - RTM rules land in Delta via the mirror; micro-batch rules write Delta directly.
-  - Don't chain a second stateful operator after the join: RTM runs in update mode.
-  - `tests/test_topic_names.py` keeps the rule, resource, hub, and mode consistent.
+- **Gold tables carry `_meta`** (record_id, gold_ts, raw_ts), a stable record identity for downstream consumers (the
+  parked subscriptions select it).
 - Each hot-path record carries the upstream broker timestamps (`raw_ts`, `bronze_ts`, ...). The lakehouse mirror
   (`hl7rt.lakehouse`) turns them into `hop_ms` / `e2e_ms` columns.
 
@@ -172,12 +157,12 @@ docs/                 latency results, walkthrough, Epic JSON notes
   restart looks exactly like a latency spike.
 - **At-least-once, upserted.** The Kafka sink is at-least-once: a pipeline that restarts from its checkpoint
   re-writes records sent since the last commit (Phase 5: ~17k gold records). Topics may carry repeats; Delta doesn't.
-  Every table is an AUTO CDC (SCD 1) upsert keyed by the record's raw-topic coordinates (`lakehouse.KEYS`; subscriptions
-  by `record_id`), so a repeat updates its row. Don't key on `msg_control_id`: generators and sources can reuse it.
+  Every table is an AUTO CDC (SCD 1) upsert keyed by the record's raw-topic coordinates (`lakehouse.KEYS`), so a repeat
+  updates its row. Don't key on `msg_control_id`: generators and sources can reuse it.
 - **Exclude backlog replay:** after downtime, hops drain backlog at "minutes" of apparent latency.
   Filter on fresh records (`upstream_ts` within the window), or `make reset` for demos.
 - **Break a bad tail down by Event Hubs partition before blaming Spark.** The mirror tables don't keep the output
-  partition, so read the topic directly from SQL with `read_kafka(...)` (SASL via `secret('hl7-rtm', ...)`) and
+  partition, so read the topic directly from SQL with `read_kafka(..., serviceCredential => '<catalog>_eventhubs')` and
   group `timestamp - upstream_ts` by `partition`. In Phase 3 one partition of two freshly recreated hubs had p99
   ~800 ms while the other partitions sat at ~45 ms, with no Azure throttling or errors (`az monitor metrics`:
   ThrottledRequests / ServerErrors). Signature: a slow record is followed, from the *same input partition*, by
@@ -196,10 +181,12 @@ docs/                 latency results, walkthrough, Epic JSON notes
 - `make deploy <env>` starts only **new or changed** continuous pipelines; `make start <env>` starts the rest
   (running ones are left alone). `make generate <env>` / `make generate-stop <env>` control load (`generate-stop`
   waits until runs end). `make stop <env>` stops compute billing. `make demo <env>` = deploy + start + generate.
-- **The mirror reads `src/subscriptions/` at start-up.** `make deploy` doesn't restart it (its resource is unchanged), so
-  run `make mirror-restart <env>` after adding a rule, and after removing one *before* destroying its topic.
-- **`make clear-data <env>`** empties the Delta tables (full refresh of the lakehouse + micro-batch subscriptions) without
-  touching RTM pipelines. Use it after downtime so backlog catch-up doesn't skew the dashboard.
+- **`make up`** builds or rebuilds Azure (Terraform plan → you confirm → apply) and then runs `make uc`. The FE sandbox is
+  wiped every Sunday: rerun `make up`, then `make demo dev`. The Makefile reads the workspace URL, `catalog`, and
+  `eh_namespace` from Terraform outputs (`DATABRICKS_HOST`, `BUNDLE_VAR_*`) and authenticates with the Azure CLI, so a new
+  workspace needs no login or config edits. `uc.sh` clears the local bundle cache when it recreates the catalog.
+- **`make clear-data <env>`** empties the Delta tables (full refresh of the lakehouse mirror) without touching RTM
+  pipelines. Use it after downtime so backlog catch-up doesn't skew the dashboard.
 - **Don't restart RTM pipelines between tests.** Classic cold start is ~9 min. Change load, not
   pipelines.
 - Spark's Kafka source **resumes from its checkpoint, not the consumer group**. `kafka_starting_offsets`
@@ -208,9 +195,9 @@ docs/                 latency results, walkthrough, Epic JSON notes
 - **Dashboard** (`resources/dashboards/hl7_latency.yml` → `src/dashboards/hl7_latency.lvdash.json`): queries use
   unqualified table names, and the bundle sets `dataset_catalog` / `dataset_schema`. The warehouse is a
   `lookup` by name per target. `tests/test_dashboard.py` enforces portability and that every table it reads is
-  produced. Subscriptions appear by themselves: the mirror feeds every rule's topic into `subscription_latency`.
+  produced.
 - **Machines that sleep stall background soaks.** Wrap long local waits in `caffeinate -i` (macOS).
-- Several CLI profiles can match one host. Put `PROFILE=<profile>` in `local.mk` (gitignored; `local.mk.example`).
+- `PROFILE=<profile>` in `local.mk` (gitignored) overrides the Azure CLI auth. Leave it unset for the Terraform workspace.
 
 ## Spark patterns and pitfalls
 
@@ -244,11 +231,11 @@ docs/                 latency results, walkthrough, Epic JSON notes
 
 - **Branches:** one per phase/unit of work, PR'd with summary / rationale / testing / "not verified".
   Stack PRs when the base isn't merged yet. Never commit to `main` directly.
-- **TDD for library code and the subscription runner:** write specs first (RED), then implement (GREEN).
+- **TDD for library code:** write specs first (RED), then implement (GREEN).
 - **Before pushing:** `make test`, `make lint`, `databricks bundle validate -t dev`. For pipeline changes,
   deploy to dev and verify against live data (row counts, quarantine reasons, event-log errors, latency),
   then `make stop dev`.
-- **Infra:** always `make infra-plan [STACK=…]` → review → `make infra-apply [STACK=…]` (applies only the saved plan).
+- **Infra:** always `make infra-plan` → review → `make infra-apply` (applies only the saved plan; `make up` asks first).
   Never auto-approve. Azure sandbox policy requires an `owner` tag (`var.owner`).
 - **Confirm before** creating paid or outward-facing resources (namespaces, tiers, new clusters), destroying
   anything, or forcing destructive bundle deploys (e.g. schema recreation). Don't bypass those prompts.

@@ -12,8 +12,7 @@ resources:
             entry_point: hl7-generator
             parameters:
               - --namespace=${var.eh_namespace}
-              - --secret-scope=${var.eh_secret_scope}
-              - --secret-key=${var.eh_secret_key}
+              - --service-credential=${var.eh_service_credential}
               - --topic=${var.hl7_raw_topic}
               - --rate=${var.generator_rate}
       environments:

@@ -121,15 +121,15 @@ def main() -> None:
     from databricks.sdk.runtime import dbutils
 
     p = argparse.ArgumentParser(description=__doc__)
-    for a in ["--namespace", "--secret-scope", "--secret-key", "--topic"]:
+    for a in ["--namespace", "--service-credential", "--topic"]:
         p.add_argument(a, required=True)
     p.add_argument("--rate", type=float, default=50, help="messages per second")
     p.add_argument("--bad-ratio", type=float, default=0.01)
     p.add_argument("--patients", type=int, default=50_000, help="size of the synthetic patient population")
     args = p.parse_args()
 
-    conn = dbutils.secrets.get(args.secret_scope, args.secret_key)
-    producer = Producer(eventhubs.producer_config(args.namespace, conn))
+    credential = dbutils.credentials.getServiceCredentialsProvider(args.service_credential)
+    producer = Producer(eventhubs.producer_config(args.namespace, credential))
     rng, n, interval = random.Random(), 0, 1.0 / args.rate
     next_at = time.monotonic()
     while True:

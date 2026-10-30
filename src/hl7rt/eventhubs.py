@@ -1,10 +1,12 @@
-"""Azure Event Hubs over its Kafka endpoint. The connection string only ever comes from a secret scope."""
+"""Azure Event Hubs over its Kafka endpoint, authenticated with Entra ID through a Unity Catalog service credential.
+
+The service credential wraps the access connector's managed identity (Azure Event Hubs Data Sender / Receiver on the
+namespace). There are no connection strings: the namespace has SAS keys disabled.
+"""
 
 from pyspark.sql import SparkSession
 
 from hl7rt.config import conf
-
-_LOGIN = "kafkashaded.org.apache.kafka.common.security.plain.PlainLoginModule"
 
 # Microsoft's Event Hubs client guidance (learn.microsoft.com/azure/event-hubs/apache-kafka-configurations):
 # Azure closes idle connections after 240 s, so refresh metadata and recycle connections before that.
@@ -21,30 +23,36 @@ def bootstrap_servers(namespace: str) -> str:
     return f"{namespace}.servicebus.windows.net:9093"
 
 
-def jaas_config(connection_string: str) -> str:
-    return f'{_LOGIN} required username="$ConnectionString" password="{connection_string}";'
+def token_scope(namespace: str) -> str:
+    return f"https://{namespace}.servicebus.windows.net/.default"
 
 
-def kafka_options(namespace: str, connection_string: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+def kafka_options(namespace: str, service_credential: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Spark Kafka source/sink options. Databricks configures SASL/OAUTHBEARER from the service credential, so no
+    kafka.sasl.* / kafka.security.* options may be set (they would replace it)."""
     return {
         "kafka.bootstrap.servers": bootstrap_servers(namespace),
-        "kafka.security.protocol": "SASL_SSL",
-        "kafka.sasl.mechanism": "PLAIN",
-        "kafka.sasl.jaas.config": jaas_config(connection_string),
+        "databricks.serviceCredential": service_credential,
         "kafka.session.timeout.ms": "30000",
         **_JAVA_CLIENT,
         **(extra or {}),
     }
 
 
-def producer_config(namespace: str, connection_string: str) -> dict[str, str | int]:
-    """confluent-kafka producer settings for Event Hubs, tuned for latency over batching."""
+def producer_config(namespace: str, credential) -> dict:
+    """confluent-kafka producer settings, tuned for latency over batching. `credential` is an azure-identity
+    TokenCredential: dbutils.credentials.getServiceCredentialsProvider(<service credential>)."""
+    scope = token_scope(namespace)
+
+    def oauth_cb(_config):
+        token = credential.get_token(scope)
+        return token.token, float(token.expires_on)
+
     return {
         "bootstrap.servers": bootstrap_servers(namespace),
         "security.protocol": "SASL_SSL",
-        "sasl.mechanism": "PLAIN",
-        "sasl.username": "$ConnectionString",
-        "sasl.password": connection_string,
+        "sasl.mechanism": "OAUTHBEARER",
+        "oauth_cb": oauth_cb,
         "linger.ms": 0,
         "acks": 1,
         **_LIBRDKAFKA,
@@ -52,8 +60,5 @@ def producer_config(namespace: str, connection_string: str) -> dict[str, str | i
 
 
 def kafka_options_from_conf(spark: SparkSession) -> dict[str, str]:
-    """Options for the namespace + secret named in pipeline config (hl7.eh.*)."""
-    from pyspark.dbutils import DBUtils
-
-    secret = DBUtils(spark).secrets.get(conf(spark, "eh.secret_scope"), conf(spark, "eh.secret_key"))
-    return kafka_options(conf(spark, "eh.namespace"), secret)
+    """Options for the namespace + service credential named in pipeline config (hl7.eh.*)."""
+    return kafka_options(conf(spark, "eh.namespace"), conf(spark, "eh.service_credential"))

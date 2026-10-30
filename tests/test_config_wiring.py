@@ -63,7 +63,7 @@ def _pipeline_resources():
 
 
 def _source_dir(spec) -> str:
-    """The src/pipelines/<dir> a resource runs (from its libraries glob). Subscriptions share one runner."""
+    """The src/pipelines/<dir> a resource runs (from its libraries glob)."""
     (lib,) = spec["libraries"]
     return lib["glob"]["include"].split("/pipelines/")[1].split("/")[0]
 
