@@ -398,6 +398,38 @@ Databricks workspace in the same region as Event Hubs Premium, authenticated wit
 - **The baseline is ~3× AWS's** (bronze p95 62 vs 19 ms), evenly across all 4 output partitions (p99 126–188 ms each),
   so it's not a single stalled partition (Phase 3's signature).
 
+## Investigation (2026-10-30): what's different on Azure
+
+**Test A (hot path only, mirror and Epic JSON off):** p99 got *worse* (raw → bronze 2 s, max 60 s). So the serverless
+consumers' bursty fetches are not the cause.
+
+**Event Hubs namespace config is the same as eastus:** Premium, 2 PU, zone-redundant, Kafka, 4 partitions, 24 h retention.
+Only the region and `disableLocalAuth` differ.
+
+**Auth is not the cause.** At every epoch boundary each executor reconnects and runs the service-credential OAUTHBEARER
+login. The token comes from cache in the same second. The logged `UnsupportedCallbackException` from
+`retrieveCustomExtensions` is the Kafka client probing for optional SASL extensions; it's harmless (INFO).
+
+**Two Azure-only behaviours, both outside Spark:**
+1. **Producer connections hang, then drop.** These are bronze executor logs (`Cancelled in-flight PRODUCE request ... due
+   to node N being disconnected`):
+
+   | Time | Connection | Hung for |
+   |---|---|---|
+   | 19:34:56 | bronze producer → node 1 | 18.9 s |
+   | 19:49:52 | bronze producer → node 0 | **60.0 s** (= `request.timeout.ms`) |
+
+   RTM can't progress while its sink waits, so the hop shows the full hang. Over 16 h, bronze's hourly max hit 13 s,
+   28 s, and 64 s. Consumer disconnects in the same window cost 5–21 ms.
+2. **Namespace-wide ~300 ms stalls.** In the same second, independent clients writing different hubs (the serverless
+   generator → raw, and three classic clusters → bronze, silver, gold) all show the same ~300–500 ms max. That happens
+   ~6 seconds per 12 min at 2 PU, and more at 1 PU. A shared stall across separate clients points at the namespace or the
+   network path, not at the clients.
+
+**Network path:** classic clusters reach the public Event Hubs endpoint through the workspace's managed NAT gateway
+(1 public IP, idle timeout 20 min). The serverless generator uses Databricks serverless egress. On AWS both went through
+AWS NAT over the internet.
+
 ## Still open (not yet explained)
 - Why the steady-state tail is higher on Azure. Candidates, none tested yet:
   - Entra token handling on the Kafka connection, versus SAS.
