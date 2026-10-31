@@ -50,9 +50,9 @@ variable "tags" {
 
 # Event Hubs
 variable "processing_units" {
-  description = "Event Hubs Premium processing units. 1 PU ran at ~83% CPU under the demo load (raw + 7 hot-path topics, each read by RTM and the mirror); see docs/latency.md."
+  description = "Event Hubs Premium processing units. 1 PU ran at ~83% CPU under the demo load; 4 PU halves the namespace-wide stalls seen at 2 PU. See docs/latency.md."
   type        = number
-  default     = 2
+  default     = 4
 }
 
 variable "partition_count" {

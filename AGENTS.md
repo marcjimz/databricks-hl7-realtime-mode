@@ -113,13 +113,24 @@ docs/                 latency results, walkthrough, Epic JSON notes
 - **A one-off `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT` seconds after a cold start** can happen. SDP retries it
   and steady state is fine (seen once in Phase 2, then clean across every boundary). A repeat at 5-minute
   boundaries means real under-sizing.
-- **Epoch boundaries pause ~1–3 s, by design.** Every `pipelines.trigger.interval` (5 min) the engine commits
-  offsets, checkpoints, and plans the next epoch. That hits ~0.1% of messages: p99 is unaffected, max isn't. The internal
-  RTM runbook calls < 3 s normal and recommends 5 min (shorter costs more; longer means fewer pauses but bigger
-  replays after a failure). There is no zero-pause mode. We set `kafka.fetch.max.wait.ms=50` on RTM readers (runbook).
-  DBR 18.3 logs `Interbatch latency for batch N` in the driver log.
-- **Event Hubs Premium is required.** Standard's multi-tenant tail missed 200 ms p99 on two hops;
-  Premium gives ~31–47 ms p99 per hop. Capacity wasn't the issue for the partition stall (client config was).
+- **Epoch boundaries pause by design.** Every `pipelines.trigger.interval` the engine commits offsets, checkpoints, and
+  plans the next epoch (driver: `Interbatch latency for batch N`, ~1–1.7 s). The next epoch then opens new Kafka
+  consumers. There is no zero-pause mode.
+  - On AWS a boundary hit ~0.1% of messages at 5 min.
+  - On Azure it delays ~2 s of traffic (~0.7% per 5-minute epoch), enough to push a 12-minute p99 over 200 ms. So the
+    interval is **15 minutes** (`rtm_trigger_interval`). Longer means fewer pauses but bigger replays after a failure.
+  - We set `kafka.fetch.max.wait.ms=50` on RTM readers (runbook).
+- **Hung Event Hubs connections (Azure).** A connection occasionally stops answering until `request.timeout.ms`
+  expires; that took 18–77 s with Microsoft's 60 s setting. The RTM hop stalls for the whole time, and executor logs
+  show `Cancelled in-flight PRODUCE request ... due to node N being disconnected`. `rtm.HUNG_REQUEST_GUARD` (5 s, RTM
+  readers and sinks only) caps it at ~5 s. Micro-batch pipelines keep 60 s.
+- **Entra auth isn't the latency cost.** An A/B on the same path measured new-connection setup with the service
+  credential versus SAS: write 285 vs 291 ms, read 1315 vs 1211 ms. The token comes from cache. The logged
+  `UnsupportedCallbackException` (`retrieveCustomExtensions`) is harmless.
+- **Event Hubs Premium is required.** Standard's multi-tenant tail missed 200 ms p99 on two hops.
+  - Size it by namespace CPU (`az monitor metrics` NamespaceCpuUsage). In westus2, 1 PU ran at ~83% and every hop's
+    tail grew. 4 PU (the default) also halves the namespace-wide ~300 ms stalls seen at 2 PU.
+  - Capacity wasn't the issue for Phase 3's partition stall (client config was), and it doesn't fix hung connections.
 - **Workspace, Event Hubs, and storage share one Azure region** (`location`, default westus2, which has the shared sandbox
   metastore). Phases 0–5 ran AWS us-east-1 → Azure eastus, crossing clouds on every hop (~8 ms produce round trip).
 

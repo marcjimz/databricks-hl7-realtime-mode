@@ -42,10 +42,10 @@ Azure (every hop crossing clouds); Azure same-region numbers: [docs/latency.md](
 | bronze → silver (full HL7 parse) | 15 ms | **32 ms** |
 | silver → gold | 15 ms | **32 ms** |
 
-On AWS every Real-Time Mode hop was under 200 ms at p99. Each pipeline pauses ~1–3 s every 5 minutes to checkpoint,
-which sets the max. **On Azure (this target) the bar isn't met yet:** at 2 PU, p99 is raw → bronze 237 ms,
-bronze → silver 312 ms, and silver → gold 94 ms. Minutes without a checkpoint run ~94 ms p99; the investigation is in
-[docs/latency.md](docs/latency.md).
+On AWS every Real-Time Mode hop was under 200 ms at p99. **On Azure (this target), every hop is under 200 ms at p99
+too**: raw → bronze 93 ms, bronze → silver 94 ms, and silver → gold 156 ms (30-minute soak, 4 PU, 15-minute
+checkpoints, 5 s hung-request guard). The tail past p99 is still seconds: checkpoint pauses, and Event Hubs
+connections that occasionally hang. Details: [docs/latency.md](docs/latency.md).
 
 ## Set up (and after every Sunday sandbox wipe)
 

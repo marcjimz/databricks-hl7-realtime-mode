@@ -68,8 +68,8 @@ variables:
 
   # Real-Time Mode (hot path)
   rtm_trigger_interval:
-    description: RTM checkpoint interval (pipelines.trigger.interval).
-    default: 5 minutes
+    description: RTM checkpoint interval (pipelines.trigger.interval). Each boundary pauses a hop ~2 s on Azure; see docs/latency.md.
+    default: 15 minutes
   rtm_max_partitions:
     description: Kafka reader tasks per RTM flow (maxPartitions); match the hub partition count.
     default: "4"
