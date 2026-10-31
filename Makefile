@@ -5,9 +5,10 @@
 #   make test | lint | fmt       local checks (pytest with local Spark, ruff, terraform fmt)
 #   make clean                   remove local build/test artifacts (.build/, caches)
 #
-#   make infra-plan [STACK=]     terraform plan for infra/<STACK>/ (default: eventhubs) -> tfplan
+#   make up                      build or rebuild Azure (plan, confirm, apply) + Unity Catalog. Rerun after the weekly wipe
+#   make infra-plan [STACK=]     terraform plan for infra/<STACK>/ (default: azure) -> tfplan
 #   make infra-apply [STACK=]    terraform apply that saved plan (only the reviewed plan)
-#   make secrets dev             write the Event Hubs connection string into the bundle's secret scope
+#   make uc                      create or repair the catalog, storage + Event Hubs service credentials (idempotent)
 #
 #   make validate dev            databricks bundle validate
 #   make deploy dev              validate + deploy (continuous pipelines start automatically)
@@ -15,15 +16,13 @@
 #   make demo dev                deploy + start + generate, then print the dashboard URL
 #   make generate dev            start the continuous synthetic feed (runs until generate-stop)
 #   make generate-stop dev       cancel the synthetic feed
-#   make sub-new NAME=x [MODE=rtm|microbatch] [JOIN=1] [FORMAT=sql|yml]   new subscription from the templates
 #   make clear-data dev          empty the Delta tables and refill from live data (~2 min; hot path keeps running)
-#   make mirror-restart dev      restart the lakehouse mirror, keeping data (after adding/removing a subscription)
 #   make reset dev               full refresh: new checkpoints, start at the live edge (DEMO ONLY)
 #   make stop dev                stop all pipelines + generators (stops compute billing)
 #   make destroy dev             databricks bundle destroy
 #
-# Auth: the Databricks CLI picks a profile by host; if several match, put PROFILE=<profile> in local.mk
-# (cp local.mk.example local.mk), or pass PROFILE=<profile>, or set DATABRICKS_CONFIG_PROFILE.
+# Auth: Azure CLI (`az login`) against the workspace in infra/azure's Terraform outputs, so a rebuilt workspace needs
+# no login or config. To use a Databricks CLI profile instead, put PROFILE=<profile> in local.mk (see local.mk.example).
 
 # Bundle targets treated as an env word. Kept in sync with databricks.yml `targets:`, so a
 # typo like `make deploy devv` fails loudly instead of silently doing nothing.
@@ -34,25 +33,32 @@ TARGET  := $(filter $(ENVS),$(MAKECMDGOALS))
 PROFILE ?= $(DATABRICKS_CONFIG_PROFILE)
 DBX     := databricks $(if $(PROFILE),-p $(PROFILE))
 BUNDLE  := $(DBX) bundle
-STACK   ?= eventhubs
+STACK   ?= azure
 TF      := terraform -chdir=infra/$(STACK)
-TF_EH   := terraform -chdir=infra/eventhubs
 
-# Hot-path RTM pipelines first, then subscriptions (one per src/subscriptions/<name>.yml), the mirror, and Epic JSON.
-SUBSCRIPTIONS := $(patsubst src/subscriptions/%.yml,sub_%,$(wildcard src/subscriptions/[a-z]*.yml))
-PIPELINES  := hl7_bronze hl7_silver hl7_gold $(SUBSCRIPTIONS) lakehouse epic_json
+# Workspace, catalog, and namespace come from Terraform outputs (they change when the sandbox is rebuilt).
+tf_out = $(shell terraform -chdir=infra/azure output -raw $(1) 2>/dev/null)
+ifeq ($(PROFILE),)
+  export DATABRICKS_HOST      ?= $(call tf_out,workspace_url)
+  export DATABRICKS_AUTH_TYPE ?= azure-cli
+endif
+export BUNDLE_VAR_catalog      ?= $(call tf_out,catalog)
+export BUNDLE_VAR_eh_namespace ?= $(call tf_out,eh_namespace)
+
+# Hot-path RTM pipelines first, then the mirror and Epic JSON.
+PIPELINES  := hl7_bronze hl7_silver hl7_gold lakehouse epic_json
 GENERATORS := hl7_generator epic_json_generator
 
 # Resolve a deployed resource id from the bundle summary: $(call resource_id,pipelines,epic_json)
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")
 bundle_var  = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['variables']['$(1)']['value'])")
 
-.PHONY: help install test lint fmt clean infra-plan infra-apply secrets validate deploy start demo generate generate-stop sub-new \
-        clear-data mirror-restart \
+.PHONY: help install test lint fmt clean up infra-plan infra-apply uc validate deploy start demo generate generate-stop \
+        clear-data \
         reset stop destroy guard-target $(ENVS)
 
 help:
-	@sed -n '3,27p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
+	@sed -n '3,25p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 	@echo "  <env> is one of: $(ENVS)"
 
 guard-target:
@@ -92,14 +98,15 @@ infra-apply:
 	$(TF) apply -input=false tfplan
 	@rm -f infra/$(STACK)/tfplan
 
-# Pipes the sensitive terraform output straight into the secret scope; never printed.
-secrets: guard-target
-	@set -e; SCOPE=$(call bundle_var,eh_secret_scope); KEY=$(call bundle_var,eh_secret_key); \
-	echo "secret scope=$$SCOPE key=$$KEY"; \
-	$(DBX) secrets list-scopes -o json | python3 -c "import sys,json;sys.exit(0 if any(s['name']=='$$SCOPE' for s in json.load(sys.stdin)) else 1)" \
-	  || $(DBX) secrets create-scope $$SCOPE; \
-	$(TF_EH) output -raw connection_string | $(DBX) secrets put-secret $$SCOPE $$KEY; \
-	echo "  stored"
+# Build or rebuild everything outside the bundle. The plan is shown and applied only after you confirm it.
+up:
+	@$(MAKE) --no-print-directory infra-plan STACK=azure
+	@read -p "Apply this plan? [y/N] " ok && [ "$$ok" = y ] || { echo "not applied"; rm -f infra/azure/tfplan; exit 1; }
+	@$(MAKE) --no-print-directory infra-apply STACK=azure
+	@$(MAKE) --no-print-directory uc
+
+uc:
+	@DBX="$(DBX)" scripts/uc.sh
 
 # --- Bundle -------------------------------------------------------------------
 validate: guard-target
@@ -125,37 +132,13 @@ generate-stop: guard-target
 	  while [ "$$($(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))')" != "0" ]; do sleep 5; done; \
 	  echo "stopped $$j"; done
 
-# New subscription: a SQL rule from src/subscriptions/_template[_join].sql (FORMAT=yml for the YAML form) plus a
-# pipeline resource from the mode's template.
-MODE ?= rtm
-FORMAT ?= sql
-# JOIN only matters for rtm (join settings + a bigger cluster); micro-batch joins need nothing extra.
-SUB_TEMPLATE := resources/pipelines/_templates/sub_$(MODE)$(if $(and $(JOIN),$(filter rtm,$(MODE))),_join).yml.tmpl
-RULE_TEMPLATE := src/subscriptions/_template$(if $(and $(JOIN),$(filter sql,$(FORMAT))),_join).$(FORMAT)
-sub-new:
-	@test -n "$(NAME)" || { echo "usage: make sub-new NAME=<name> [MODE=rtm|microbatch] [JOIN=1] [FORMAT=sql|yml]"; exit 2; }
-	@test -f $(SUB_TEMPLATE) || { echo "error: no template $(SUB_TEMPLATE)"; exit 2; }
-	@test ! -f src/subscriptions/$(NAME).sql -a ! -f src/subscriptions/$(NAME).yml || { echo "error: subscription $(NAME) already exists"; exit 2; }
-	@sed -e 's/^-- name: _template\(_join\)*$$/-- name: $(NAME)/' -e 's/^-- mode: rtm$$/-- mode: $(MODE)/' \
-	  -e 's/^name: _template/name: $(NAME)/' -e 's/^mode: rtm /mode: $(MODE) /' \
-	  $(if $(and $(JOIN),$(filter yml,$(FORMAT))),-e 's/^# then: /then: /' -e 's/^#   source:/  source:/' -e 's/^#   filter:/  filter:/' -e 's/^# within:/within:/') \
-	  $(RULE_TEMPLATE) > src/subscriptions/$(NAME).$(FORMAT)
-	@sed 's/__NAME__/$(NAME)/g' $(SUB_TEMPLATE) | sed 's#src/subscriptions/$(NAME).yml#src/subscriptions/$(NAME).$(FORMAT)#' > resources/pipelines/sub_$(NAME).yml
-	@echo "created src/subscriptions/$(NAME).$(FORMAT) and resources/pipelines/sub_$(NAME).yml"
-	@echo "next: edit the rule, make infra-plan && make infra-apply (adds hub sub_$(NAME)), make deploy <env>, make mirror-restart <env>"
-
-# Pipelines that write Delta tables: the lakehouse mirror and micro-batch (serverless) subscriptions. Full-refreshing
-# them empties their tables and restarts them at the live edge in ~2 minutes; RTM pipelines keep running.
-DELTA_PIPELINES := lakehouse $(patsubst resources/pipelines/%.yml,%,$(shell grep -l "serverless: true" resources/pipelines/sub_*.yml 2>/dev/null))
+# The lakehouse mirror writes the Delta tables the dashboard reads. A full refresh empties them and restarts at the live
+# edge in ~2 minutes; RTM pipelines keep running.
+DELTA_PIPELINES := lakehouse
 clear-data: guard-target
 	@for p in $(DELTA_PIPELINES); do $(DBX) pipelines stop $(call resource_id,pipelines,$$p) >/dev/null; \
 	  $(BUNDLE) run -t $(TARGET) --no-wait --full-refresh-all $$p >/dev/null && echo "cleared $$p"; done
 	@echo "tables refill from live data within ~2 minutes; refresh the dashboard (its own refresh button)"
-
-# The mirror reads src/subscriptions/ when it starts, so restart it after adding or removing a rule (keeps data).
-mirror-restart: guard-target
-	@$(DBX) pipelines stop $(call resource_id,pipelines,lakehouse) >/dev/null; \
-	  $(BUNDLE) run -t $(TARGET) --no-wait lakehouse >/dev/null && echo "restarted lakehouse (~1-2 min to RUNNING)"
 
 # Demo-only: discards checkpoints so streams start at kafka_starting_offsets (latest) instead of
 # resuming. Production should always resume from the checkpoint so no message is skipped.

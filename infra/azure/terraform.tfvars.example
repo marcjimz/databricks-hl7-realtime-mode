@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+subscription_id       = "00000000-0000-0000-0000-000000000000"
+tenant_id             = "00000000-0000-0000-0000-000000000000"
+databricks_account_id = "00000000-0000-0000-0000-000000000000"
+metastore_id          = "00000000-0000-0000-0000-000000000000" # existing UC metastore in `location`
+owner                 = "you@example.com"
+prefix                = "hl7rtm" # Event Hubs and storage names are globally unique: make it yours
+location              = "westus2"
+catalog               = "hl7_rtm" # created by `make uc`; hubs are named <catalog>.<schema>.<table>

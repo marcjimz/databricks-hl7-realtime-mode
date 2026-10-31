@@ -363,3 +363,129 @@ In steady state there were 0 duplicates. Consumers that need exactly-once should
 **Join fan-out follows the data.** The synthetic feed gives each patient ~3 ED registrations an hour at 200 msg/s,
 so each critical lab matches several registrations (~160 matches/s in steady state). That's correct for the rule as
 written; real ED traffic is far sparser.
+
+# Azure, one region (workspace, Event Hubs, storage in westus2), UC service credential auth
+
+The repo moved from the AWS workspace (cross-cloud to Event Hubs in eastus, SAS connection string) to an Azure
+Databricks workspace in the same region as Event Hubs Premium, authenticated with a Unity Catalog service credential
+(Entra ID, SAS keys disabled). Same code, same 200 msg/s HL7 feed plus the 200 msg/s Epic JSON feed, same RTM sizing
+(2 × Standard_D4ds_v5 = 8 slots per hop for 4 partitions).
+
+## Auth works everywhere
+- Classic RTM pipelines (bronze, silver, gold) read and write through `dp.create_sink` Kafka sinks with only
+  `databricks.serviceCredential`: no flow errors.
+- The serverless mirror and Epic JSON pipelines read the same way.
+- The serverless confluent-kafka generators produce with OAUTHBEARER tokens from
+  `dbutils.credentials.getServiceCredentialsProvider`.
+- 0 duplicate keys in every table after ~15 hours of continuous running (11.5M raw messages).
+
+## 12-minute soaks (≈140k msgs/hop, 2 epoch boundaries per pipeline, zero flow errors)
+
+| Hop (p99 ms) | 1 PU | 2 PU | AWS cross-cloud, 2 PU (Phase 5) |
+|---|---|---|---|
+| producer → raw | 143 | 87 | n/a |
+| raw → bronze | 278 | **237** | 47 |
+| bronze → silver | 985 | **312** | 94 |
+| silver → gold | 251 | **94** | 47 |
+| raw → gold end to end | 1656 | 1094 | 625 (KPI) |
+| Event Hubs namespace CPU (max) | 82–83% | 23–43% | n/a |
+
+- **1 PU is not enough** for this load: 8 hubs at ~200 msg/s each, each read by RTM and the mirror. CPU sat at ~83% and
+  every hop's tail grew. `processing_units` now defaults to 2.
+- **At 2 PU, the remaining p99 misses are the epoch boundaries.** Minutes without a boundary run ~94 ms p99. Minutes
+  with one run 1.0–3.3 s p99 (driver log: `Interbatch latency` 0.4–2.1 s), at bronze :19/:24 and silver :16/:21/:26.
+  Epoch pauses are the same order as on AWS. What differs is the baseline the catch-up drains into.
+- **The baseline is ~3× AWS's** (bronze p95 62 vs 19 ms), evenly across all 4 output partitions (p99 126–188 ms each),
+  so it's not a single stalled partition (Phase 3's signature).
+
+## Investigation (2026-10-30): what's different on Azure
+
+**Test A (hot path only, mirror and Epic JSON off):** p99 got *worse* (raw → bronze 2 s, max 60 s). So the serverless
+consumers' bursty fetches are not the cause.
+
+**Event Hubs namespace config is the same as eastus:** Premium, 2 PU, zone-redundant, Kafka, 4 partitions, 24 h retention.
+Only the region and `disableLocalAuth` differ.
+
+**Auth is not the cause.** At every epoch boundary each executor reconnects and runs the service-credential OAUTHBEARER
+login. The token comes from cache in the same second. The logged `UnsupportedCallbackException` from
+`retrieveCustomExtensions` is the Kafka client probing for optional SASL extensions; it's harmless (INFO).
+
+**Two Azure-only behaviours, both outside Spark:**
+1. **Producer connections hang, then drop.** These are bronze executor logs (`Cancelled in-flight PRODUCE request ... due
+   to node N being disconnected`):
+
+   | Time | Connection | Hung for |
+   |---|---|---|
+   | 19:34:56 | bronze producer → node 1 | 18.9 s |
+   | 19:49:52 | bronze producer → node 0 | **60.0 s** (= `request.timeout.ms`) |
+
+   RTM can't progress while its sink waits, so the hop shows the full hang. Over 16 h, bronze's hourly max hit 13 s,
+   28 s, and 64 s. Consumer disconnects in the same window cost 5–21 ms.
+2. **Namespace-wide ~300 ms stalls.** In the same second, independent clients writing different hubs (the serverless
+   generator → raw, and three classic clusters → bronze, silver, gold) all show the same ~300–500 ms max. That happens
+   ~6 seconds per 12 min at 2 PU, and more at 1 PU. A shared stall across separate clients points at the namespace or the
+   network path, not at the clients.
+
+**Network path:** classic clusters reach the public Event Hubs endpoint through the workspace's managed NAT gateway
+(1 public IP, idle timeout 20 min). The serverless generator uses Databricks serverless egress. On AWS both went through
+AWS NAT over the internet.
+
+**Capacity:** a 4 PU soak (hot path only, CPU 18–38%) gave p99 raw → bronze 99, silver → gold 94. The namespace-wide
+stalls fell from 8 to 3 seconds per window. Hangs still happened: silver's producer hung 77 s at 4 PU, so capacity
+doesn't fix them.
+
+**Hang guard:** `rtm.HUNG_REQUEST_GUARD` sets `kafka.request.timeout.ms` = 5000 on RTM readers and sinks (sinks also
+get `delivery.timeout.ms` = 30000). A hung request is abandoned after 5 s and retried on a new connection. Verified:
+every hang since then ended at 5.0–6.0 s, versus 18–77 s before. The mirror and Epic JSON keep Microsoft's 60 s.
+
+**Auth A/B: Entra is not slower.** A classic cluster on the same network path ran 12 alternating rounds, each opening
+new connections, with the UC service credential versus a temporary SAS rule. SAS was re-disabled afterwards; nothing
+was committed.
+
+| Median (p90), ms | Entra | SAS |
+|---|---|---|
+| Write (connect + SASL + ack) | 285 (351) | 291 (345) |
+| Read (connect + SASL + metadata + fetch) | 1315 (1506) | 1211 (1392) |
+
+**Where a checkpoint boundary goes:** the driver commit gap is ~1.0–1.7 s, the same at 5 and 15 minutes. RTM then opens
+new Kafka consumers for every task, and the hop catches up. In total a boundary delays ~2 s of traffic, ~0.7% of
+records per 5-minute epoch. That alone pushes a 12-minute p99 over 200 ms.
+
+**Checkpoint every 15 minutes:** `rtm_trigger_interval` changed from 5 to 15 minutes, so there are 3× fewer boundaries.
+The trade-off is that a crash replays up to 15 minutes, not 5. That's at-least-once, and the mirror upserts.
+
+### Result: 4 PU + hang guard + 15-minute checkpoints, 30-minute steady-state soak
+
+Measured from the topics with `read_kafka`, 02:22–02:52 UTC, two boundaries per pipeline, 200 msg/s:
+
+| Hop | n | p50 | p99 | p99.9 | max |
+|---|---|---|---|---|---|
+| producer → raw | 363,680 | −5 | **50** | n/a | 544 |
+| raw → bronze | 360,004 | 7 | **93** | 1,516 | 26,268 |
+| bronze → silver | 356,412 | 0 | **94** | 1,876 | 3,203 |
+| silver → gold | 509,256 | 0 | **156** | 9,064 | 11,079 |
+
+**Every hop is under 200 ms at p99.** The tail beyond p99 is still seconds:
+- The checkpoint minutes (02:34, 02:49).
+- Hangs capped at ~5 s.
+- One raw → bronze record took 26 s. It was retried within the 30 s delivery timeout.
+
+### Full demo load (mirror + Epic JSON pipeline + both feeds on), 30-minute window
+
+| Hop | n | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|
+| producer → raw | 363,435 | −5 | 9 | **53** | 932 |
+| raw → bronze | 363,459 | 7 | 47 | **94** | 5,159 |
+| bronze → silver | 359,871 | 0 | 31 | **78** | 6,173 |
+| silver → gold | 515,228 | 0 | 19 | **78** | 6,236 |
+
+All 5 pipelines RUNNING with 0 flow errors. Every hang was capped at 5–6 s, and the max is now set by the guard.
+
+## Still open (not yet explained)
+- **Why Event Hubs connections hang** for 18–77 s (until the 60 s request timeout, or longer when the retry also hangs),
+  and **what causes the namespace-wide ~300 ms stalls.** Both are outside Spark, and neither showed in eastus from AWS.
+  Candidates, none tested yet:
+  - Westus2 Premium placement (a fresh namespace would test it).
+  - The NAT gateway path; a private endpoint would test it.
+- **Gold's ~11 s burst at its 02:49 boundary.** The driver commit gap was 1.3 s, and no hang was logged at that time.
+- **The p99.9 and max tail** (seconds) are not addressed; only p99 is.

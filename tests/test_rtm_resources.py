@@ -11,7 +11,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 RTM_KEY = "spark.databricks.streaming.realTimeMode.enabled"
 # Cores per node for the node types we size against. Extend when adding a node type.
-CORES = {"m6id.xlarge": 4, "m6id.2xlarge": 8, "i3.xlarge": 4, "Standard_D4ds_v5": 4, "Standard_D8ds_v5": 8}
+CORES = {"Standard_D4ds_v5": 4, "Standard_D8ds_v5": 8}
 HEADROOM = 1.2  # slots >= 1.2x tasks (AGENTS.md: ~20%+ spare; exactly-equal crashes at the epoch handoff)
 
 
@@ -47,7 +47,8 @@ def test_rtm_pipelines_follow_compute_rules():
         assert clusters, f"{name}: needs an explicit cluster spec"
         for c in clusters:
             assert "autoscale" not in c and isinstance(c.get("num_workers"), int), f"{name}: fixed num_workers only"
-            assert c.get("aws_attributes", {}).get("availability", "ON_DEMAND") == "ON_DEMAND", f"{name}: no spot"
+            assert "aws_attributes" not in c and "gcp_attributes" not in c, f"{name}: Azure compute"
+            assert c.get("azure_attributes", {}).get("availability") == "ON_DEMAND_AZURE", f"{name}: no spot"
 
 
 def test_rtm_pipelines_have_slot_headroom():

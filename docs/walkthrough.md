@@ -1,51 +1,40 @@
 # Demo walkthrough (~20 minutes)
 
-## Before the demo (once)
+## Before the demo (once, and again after the Sunday sandbox wipe)
 ```bash
 make install
-cp infra/eventhubs/terraform.tfvars.example infra/eventhubs/terraform.tfvars   # subscription, owner, catalog
-make infra-plan && make infra-apply      # Event Hubs Premium + one hub per table
-make secrets dev                         # connection string -> secret scope
+cp infra/azure/terraform.tfvars.example infra/azure/terraform.tfvars   # subscription, tenant, metastore, prefix, catalog
+make up              # Terraform plan -> confirm -> apply (workspace, ADLS, Event Hubs), then Unity Catalog (make uc)
 ```
 
 ## 1. Start everything (10 minutes before you present)
 ```bash
 make demo dev        # deploy, start every pipeline, start the HL7 feed, print the dashboard URL
 ```
-Classic Real-Time Mode clusters take ~9 minutes to start. The dashboard fills in once they're running.
+Classic Real-Time Mode clusters take ~9 minutes to start. The dashboard fills in once they're running. Then
+`make clear-data dev` so start-up catch-up doesn't skew the numbers.
 
 ## 2. Show the flow
 1. **The source:** raw HL7 v2 (ADT, ORU, ORM, MDM) arrives at 200 msg/s in topic `<catalog>.<schema>.raw_hl7`.
 2. **The hot path** (Real-Time Mode, one Event Hubs topic between each layer): bronze → silver (HL7 parsed with
-   plain Spark into the Epic silver contract) → gold (encounters, observations, orders) → subscriptions.
-3. **The lakehouse path:** every topic also lands in the Delta table of the same name. Open `silver_hl7` in Catalog
-   Explorer: same columns as the existing Epic silver table.
+   plain Spark into the Epic silver contract) → gold (encounters, observations, orders).
+3. **The lakehouse path:** every topic also lands in the streaming table of the same name. Open `silver_hl7` in
+   Catalog Explorer: same columns as the existing Epic silver table.
 
 ## 3. Show the numbers (dashboard)
-- **p99 per hop:** every bar is well under 200 ms (typically 30–80 ms).
+- **p99 per hop:** every bar is well under 200 ms.
 - **p99 by minute:** flat lines, with a short blip every 5 minutes when each pipeline checkpoints.
-- **Alerts table:** an ED registration followed by a critical lab for the same patient within 60 minutes, delivered
-  ~30–80 ms after the lab reached gold.
+- **Critical labs:** HH / LL results in gold, with their raw → gold latency.
 - **Quarantine:** malformed messages are kept with a reason, not dropped.
 
-## 4. Self-service: add a subscription live
-`src/subscriptions/hyperkalemia.sql` (or `make sub-new NAME=hyperkalemia MODE=microbatch` and edit the query):
-```sql
--- name: hyperkalemia
--- mode: microbatch
--- key: patient_id
-SELECT _meta, patient_id, visit_id, patient_facility, value_num, abnormal_flag
-FROM gold_observations
-WHERE observation_cd = '2823-3' AND value_num > 6.0
-```
-```bash
-make infra-plan && make infra-apply     # topic sub_hyperkalemia
-make deploy dev                          # table + topic sub_hyperkalemia fill within ~2 minutes
-make mirror-restart dev                  # the dashboard picks it up
-```
-Use `MODE=rtm` for millisecond delivery (classic cluster), or `MODE=microbatch` for seconds on serverless.
+## 4. Show the security story
+- Catalog Explorer → External data → Credentials → `<catalog>_eventhubs`: a Unity Catalog service credential backed by
+  the workspace's access connector (managed identity).
+- The pipeline settings have no secrets. Kafka options are just the bootstrap server and
+  `databricks.serviceCredential`. The Event Hubs namespace has SAS keys disabled, and access is Azure RBAC
+  (Event Hubs Data Sender / Receiver) on the managed identity.
 
 ## 5. Stop
 ```bash
-make stop dev        # stops every pipeline and the feed; Event Hubs keeps running (Terraform owns it)
+make stop dev        # stops every pipeline and the feed; Event Hubs keeps billing until the sandbox is wiped or destroyed
 ```

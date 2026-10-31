@@ -20,8 +20,7 @@ resources:
         hl7.rtm.trigger_interval: ${var.rtm_trigger_interval}
         hl7.rtm.max_partitions: ${var.rtm_max_partitions}
         hl7.eh.namespace: ${var.eh_namespace}
-        hl7.eh.secret_scope: ${var.eh_secret_scope}
-        hl7.eh.secret_key: ${var.eh_secret_key}
+        hl7.eh.service_credential: ${var.eh_service_credential}
         hl7.kafka.starting_offsets: ${var.kafka_starting_offsets}
         hl7.topics.raw: ${var.hl7_raw_topic}
         hl7.topics.bronze: ${var.hl7_bronze_topic}

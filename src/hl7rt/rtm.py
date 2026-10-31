@@ -11,6 +11,12 @@ from hl7rt.config import conf
 # Latency over batching on the producer side; Event Hubs Premium acks quickly.
 _SINK_TUNING = {"kafka.linger.ms": "0", "kafka.acks": "1"}
 
+# On Azure, an Event Hubs connection occasionally stops answering: in-flight requests sit until request.timeout.ms
+# (60 s per Microsoft's guidance) and the RTM hop stalls that long. Normal acks and fetches take milliseconds, so the
+# hot path gives up after 5 s and retries on a new connection (at-least-once; the mirror upserts). See docs/latency.md.
+HUNG_REQUEST_GUARD = {"kafka.request.timeout.ms": "5000"}
+_SINK_DELIVERY = {"kafka.delivery.timeout.ms": "30000"}  # must be >= linger.ms + request.timeout.ms
+
 
 def read_topic(spark: SparkSession, topic: str) -> DataFrame:
     """Streaming read of one Event Hubs topic for an RTM flow (one task per maxPartitions)."""
@@ -21,13 +27,14 @@ def read_topic(spark: SparkSession, topic: str) -> DataFrame:
         .option("startingOffsets", conf(spark, "kafka.starting_offsets"))
         .option("maxPartitions", conf(spark, "rtm.max_partitions"))
         .option("kafka.fetch.max.wait.ms", "50")  # RTM runbook: don't let an empty fetch wait the default 500 ms
+        .options(**HUNG_REQUEST_GUARD)
         .load()
     )
 
 
 def sink_options(spark: SparkSession, topic: str | None = None) -> dict[str, str]:
     """Options for dp.create_sink(..., "kafka", ...). Without `topic`, records route by their `topic` column."""
-    opts = {**eventhubs.kafka_options_from_conf(spark), **_SINK_TUNING}
+    opts = {**eventhubs.kafka_options_from_conf(spark), **_SINK_TUNING, **HUNG_REQUEST_GUARD, **_SINK_DELIVERY}
     return {**opts, "topic": topic} if topic else opts
 
 

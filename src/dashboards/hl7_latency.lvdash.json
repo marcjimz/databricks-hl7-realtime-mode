@@ -10,9 +10,7 @@
         "  round(avg(CASE WHEN hop_ms < 200 THEN 1.0 ELSE 0.0 END), 4) AS under_200ms\n",
         "FROM (SELECT '1 raw → bronze' AS hop, kafka_timestamp AS ts, hop_ms, e2e_ms FROM bronze_hl7\n",
         "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_hl7\n",
-        "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations\n",
-        "UNION ALL SELECT concat('4 gold → ', subscription),\n",
-        "  kafka_timestamp, hop_ms, e2e_ms FROM subscription_latency WHERE mode = 'rtm') WHERE ts >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000 GROUP BY hop ORDER BY hop\n"
+        "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations) WHERE ts >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000 GROUP BY hop ORDER BY hop\n"
       ]
     },
     {
@@ -23,9 +21,7 @@
         "  round(percentile_approx(hop_ms, 0.99)) AS p99_ms\n",
         "FROM (SELECT '1 raw → bronze' AS hop, kafka_timestamp AS ts, hop_ms, e2e_ms FROM bronze_hl7\n",
         "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_hl7\n",
-        "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations\n",
-        "UNION ALL SELECT concat('4 gold → ', subscription),\n",
-        "  kafka_timestamp, hop_ms, e2e_ms FROM subscription_latency WHERE mode = 'rtm') WHERE ts >= timestampadd(MINUTE, -60, current_timestamp()) AND hop_ms < 600000 GROUP BY hop, date_trunc('MINUTE', ts)\n"
+        "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations) WHERE ts >= timestampadd(MINUTE, -60, current_timestamp()) AND hop_ms < 600000 GROUP BY hop, date_trunc('MINUTE', ts)\n"
       ]
     },
     {
@@ -35,18 +31,17 @@
         "SELECT\n",
         "  (SELECT round(count(*) / 900.0, 1) FROM raw_hl7 WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS msgs_per_sec,\n",
         "  (SELECT round(percentile_approx(e2e_ms, 0.99)) FROM gold_observations WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp()) AND e2e_ms < 600000) AS raw_to_gold_p99_ms,\n",
-        "  (SELECT count(*) FROM subscription_latency WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS subscription_records,\n",
+        "  (SELECT count(*) FROM gold_observations WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS gold_observations,\n",
         "  (SELECT count(*) FROM quarantine_hl7 WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS quarantined\n"
       ]
     },
     {
-      "name": "alerts",
-      "displayName": "Latest ED → critical lab matches",
+      "name": "critical_labs",
+      "displayName": "Latest critical labs in gold",
       "queryLines": [
-        "SELECT kafka_timestamp AS delivered_at, patient_id, patient_facility,\n",
-        "  observation_cd_desc, value_num, abnormal_flag, round(matched_after_ms / 60000.0, 1) AS minutes_after_registration,\n",
-        "  round(hop_ms) AS gold_to_sub_ms\n",
-        "FROM sub_ed_critical_lab ORDER BY kafka_timestamp DESC LIMIT 50\n"
+        "SELECT kafka_timestamp AS gold_at, patient_id, patient_facility, observation_cd_desc, value_num,\n",
+        "  abnormal_flag, round(e2e_ms) AS raw_to_gold_ms\n",
+        "FROM gold_observations WHERE abnormal_flag IN ('HH', 'LL') ORDER BY kafka_timestamp DESC LIMIT 50\n"
       ]
     },
     {
@@ -55,17 +50,6 @@
       "queryLines": [
         "SELECT reason, count(*) AS messages FROM quarantine_hl7\n",
         "WHERE kafka_timestamp >= timestampadd(MINUTE, -60, current_timestamp()) GROUP BY reason\n"
-      ]
-    },
-    {
-      "name": "microbatch_subs",
-      "displayName": "Micro-batch subscriptions, last 15 minutes",
-      "queryLines": [
-        "SELECT subscription, count(*) AS records,\n",
-        "  round(percentile_approx(hop_ms, 0.5) / 1000, 1) AS p50_s, round(percentile_approx(hop_ms, 0.99) / 1000, 1) AS p99_s\n",
-        "FROM subscription_latency\n",
-        "WHERE mode = 'microbatch' AND kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000\n",
-        "GROUP BY subscription ORDER BY subscription\n"
       ]
     }
   ],
@@ -80,7 +64,7 @@
             "name": "title",
             "multilineTextboxSpec": {
               "lines": [
-                "## HL7 v2 on Real-Time Mode: live latency  ·  RTM hops, p99 target < 200 ms  ·  backlog replay (> 10 min) excluded"
+                "## HL7 v2 on Real-Time Mode: live latency  ·  every hop, p99 target < 200 ms  ·  backlog replay (> 10 min) excluded"
               ]
             }
           },
@@ -173,7 +157,7 @@
         },
         {
           "widget": {
-            "name": "kpi-matches",
+            "name": "kpi-gold",
             "queries": [
               {
                 "name": "main_query",
@@ -181,8 +165,8 @@
                   "datasetName": "kpis",
                   "fields": [
                     {
-                      "name": "subscription_records",
-                      "expression": "`subscription_records`"
+                      "name": "gold_observations",
+                      "expression": "`gold_observations`"
                     }
                   ],
                   "disaggregated": true
@@ -194,13 +178,13 @@
               "widgetType": "counter",
               "encodings": {
                 "value": {
-                  "fieldName": "subscription_records",
-                  "displayName": "Subscription records (15 min)"
+                  "fieldName": "gold_observations",
+                  "displayName": "Gold observations (15 min)"
                 }
               },
               "frame": {
                 "showTitle": true,
-                "title": "Subscription records (15 min)"
+                "title": "Gold observations (15 min)"
               }
             }
           },
@@ -427,7 +411,7 @@
           "position": {
             "x": 0,
             "y": 9,
-            "width": 4,
+            "width": 6,
             "height": 5
           }
         },
@@ -491,23 +475,23 @@
           },
           "position": {
             "x": 4,
-            "y": 9,
+            "y": 14,
             "width": 2,
             "height": 5
           }
         },
         {
           "widget": {
-            "name": "alerts",
+            "name": "critical-labs",
             "queries": [
               {
                 "name": "main_query",
                 "query": {
-                  "datasetName": "alerts",
+                  "datasetName": "critical_labs",
                   "fields": [
                     {
-                      "name": "delivered_at",
-                      "expression": "`delivered_at`"
+                      "name": "gold_at",
+                      "expression": "`gold_at`"
                     },
                     {
                       "name": "patient_id",
@@ -530,12 +514,8 @@
                       "expression": "`abnormal_flag`"
                     },
                     {
-                      "name": "minutes_after_registration",
-                      "expression": "`minutes_after_registration`"
-                    },
-                    {
-                      "name": "gold_to_sub_ms",
-                      "expression": "`gold_to_sub_ms`"
+                      "name": "raw_to_gold_ms",
+                      "expression": "`raw_to_gold_ms`"
                     }
                   ],
                   "disaggregated": true
@@ -548,8 +528,8 @@
               "encodings": {
                 "columns": [
                   {
-                    "fieldName": "delivered_at",
-                    "displayName": "Delivered"
+                    "fieldName": "gold_at",
+                    "displayName": "In gold"
                   },
                   {
                     "fieldName": "patient_id",
@@ -572,18 +552,14 @@
                     "displayName": "Flag"
                   },
                   {
-                    "fieldName": "minutes_after_registration",
-                    "displayName": "Min after ED registration"
-                  },
-                  {
-                    "fieldName": "gold_to_sub_ms",
-                    "displayName": "gold → alert ms"
+                    "fieldName": "raw_to_gold_ms",
+                    "displayName": "raw → gold ms"
                   }
                 ]
               },
               "frame": {
                 "showTitle": true,
-                "title": "Latest ED registration → critical lab alerts"
+                "title": "Latest critical labs (HH / LL) in gold"
               }
             }
           },
@@ -591,72 +567,6 @@
             "x": 0,
             "y": 14,
             "width": 4,
-            "height": 5
-          }
-        },
-        {
-          "widget": {
-            "name": "microbatch-subs",
-            "queries": [
-              {
-                "name": "main_query",
-                "query": {
-                  "datasetName": "microbatch_subs",
-                  "fields": [
-                    {
-                      "name": "subscription",
-                      "expression": "`subscription`"
-                    },
-                    {
-                      "name": "records",
-                      "expression": "`records`"
-                    },
-                    {
-                      "name": "p50_s",
-                      "expression": "`p50_s`"
-                    },
-                    {
-                      "name": "p99_s",
-                      "expression": "`p99_s`"
-                    }
-                  ],
-                  "disaggregated": true
-                }
-              }
-            ],
-            "spec": {
-              "version": 2,
-              "widgetType": "table",
-              "encodings": {
-                "columns": [
-                  {
-                    "fieldName": "subscription",
-                    "displayName": "Subscription"
-                  },
-                  {
-                    "fieldName": "records",
-                    "displayName": "Records"
-                  },
-                  {
-                    "fieldName": "p50_s",
-                    "displayName": "p50 (s)"
-                  },
-                  {
-                    "fieldName": "p99_s",
-                    "displayName": "p99 (s)"
-                  }
-                ]
-              },
-              "frame": {
-                "showTitle": true,
-                "title": "Micro-batch subscriptions (seconds tier)"
-              }
-            }
-          },
-          "position": {
-            "x": 4,
-            "y": 14,
-            "width": 2,
             "height": 5
           }
         }
