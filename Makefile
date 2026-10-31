@@ -6,8 +6,8 @@
 #   make clean                   remove local build/test artifacts (.build/, caches)
 #
 #   make up                      build or rebuild Azure (plan, confirm, apply) + Unity Catalog. Rerun after the weekly wipe
-#   make infra-plan [STACK=]     terraform plan for infra/<STACK>/ (default: azure) -> tfplan
-#   make infra-apply [STACK=]    terraform apply that saved plan (only the reviewed plan)
+#   make infra-plan              terraform plan for infra/azure -> tfplan
+#   make infra-apply             terraform apply that saved plan (only the reviewed plan)
 #   make uc                      create or repair the catalog, storage + Event Hubs service credentials (idempotent)
 #
 #   make validate dev            databricks bundle validate
@@ -21,27 +21,22 @@
 #   make stop dev                stop all pipelines + generators (stops compute billing)
 #   make destroy dev             databricks bundle destroy
 #
-# Auth: Azure CLI (`az login`) against the workspace in infra/azure's Terraform outputs, so a rebuilt workspace needs
-# no login or config. To use a Databricks CLI profile instead, put PROFILE=<profile> in local.mk (see local.mk.example).
+# Your environment lives in infra/azure/terraform.tfvars (gitignored). Auth is the Azure CLI (`az login`) against the
+# workspace in Terraform's outputs, so a rebuilt workspace needs no login or config.
 
 # Bundle targets treated as an env word. Kept in sync with databricks.yml `targets:`, so a
 # typo like `make deploy devv` fails loudly instead of silently doing nothing.
 ENVS := dev
 
 TARGET  := $(filter $(ENVS),$(MAKECMDGOALS))
--include local.mk   # optional, gitignored: your PROFILE=<databricks cli profile> (see local.mk.example)
-PROFILE ?= $(DATABRICKS_CONFIG_PROFILE)
-DBX     := databricks $(if $(PROFILE),-p $(PROFILE))
+DBX     := databricks
 BUNDLE  := $(DBX) bundle
-STACK   ?= azure
-TF      := terraform -chdir=infra/$(STACK)
+TF      := terraform -chdir=infra/azure
 
 # Workspace, catalog, and namespace come from Terraform outputs (they change when the sandbox is rebuilt).
-tf_out = $(shell terraform -chdir=infra/azure output -raw $(1) 2>/dev/null)
-ifeq ($(PROFILE),)
-  export DATABRICKS_HOST      ?= $(call tf_out,workspace_url)
-  export DATABRICKS_AUTH_TYPE ?= azure-cli
-endif
+tf_out = $(shell $(TF) output -raw $(1) 2>/dev/null)
+export DATABRICKS_HOST         ?= $(call tf_out,workspace_url)
+export DATABRICKS_AUTH_TYPE    ?= azure-cli
 export BUNDLE_VAR_catalog      ?= $(call tf_out,catalog)
 export BUNDLE_VAR_eh_namespace ?= $(call tf_out,eh_namespace)
 
@@ -89,20 +84,20 @@ clean:
 # --- Infra (Terraform, one stack per folder under infra/) ---------------------
 # Two steps on purpose: review the plan, then apply exactly that plan.
 infra-plan:
-	@test -f infra/$(STACK)/terraform.tfvars || { echo "error: copy infra/$(STACK)/terraform.tfvars.example to terraform.tfvars"; exit 2; }
+	@test -f infra/azure/terraform.tfvars || { echo "error: copy infra/azure/terraform.tfvars.example to terraform.tfvars"; exit 2; }
 	$(TF) init -input=false -upgrade=false >/dev/null
 	$(TF) plan -input=false -out=tfplan
 
 infra-apply:
-	@test -f infra/$(STACK)/tfplan || { echo "error: run 'make infra-plan STACK=$(STACK)' first"; exit 2; }
+	@test -f infra/azure/tfplan || { echo "error: run 'make infra-plan' first"; exit 2; }
 	$(TF) apply -input=false tfplan
-	@rm -f infra/$(STACK)/tfplan
+	@rm -f infra/azure/tfplan
 
 # Build or rebuild everything outside the bundle. The plan is shown and applied only after you confirm it.
 up:
-	@$(MAKE) --no-print-directory infra-plan STACK=azure
+	@$(MAKE) --no-print-directory infra-plan
 	@read -p "Apply this plan? [y/N] " ok && [ "$$ok" = y ] || { echo "not applied"; rm -f infra/azure/tfplan; exit 1; }
-	@$(MAKE) --no-print-directory infra-apply STACK=azure
+	@$(MAKE) --no-print-directory infra-apply
 	@$(MAKE) --no-print-directory uc
 
 uc:

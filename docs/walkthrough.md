@@ -3,7 +3,7 @@
 ## Before the demo (once, and again after the Sunday sandbox wipe)
 ```bash
 make install
-cp infra/azure/terraform.tfvars.example infra/azure/terraform.tfvars   # subscription, tenant, metastore, prefix, catalog
+cp infra/azure/terraform.tfvars.example infra/azure/terraform.tfvars   # once: subscription, tenant, metastore, prefix, catalog
 make up              # Terraform plan -> confirm -> apply (workspace, ADLS, Event Hubs), then Unity Catalog (make uc)
 ```
 

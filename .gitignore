@@ -1,21 +1,19 @@
 # Session notes
 MEMORY.md
 
-# Phase 0 feasibility code (kept local, not part of the scaffold)
-spikes/
 
 # Databricks
 .databricks/
 
-# Terraform (one stack per folder: infra/<stack>/)
-infra/**/.terraform/
-infra/**/*.tfstate
-infra/**/*.tfstate.*
-infra/**/terraform.tfstate.d/
-infra/**/*.tfvars
-!infra/**/*.tfvars.example
-infra/**/tfplan
-infra/**/.terraform.lock.hcl
+# Terraform: state, tfvars (your environment), and plans stay local, wherever the stack lives
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/terraform.tfstate.d/
+**/*.tfvars
+!**/*.tfvars.example
+**/tfplan
+**/.terraform.lock.hcl
 
 # Python
 __pycache__/
@@ -34,6 +32,3 @@ dist/
 .idea/
 .vscode/
 .DS_Store
-
-# Local Makefile settings (CLI profile)
-local.mk

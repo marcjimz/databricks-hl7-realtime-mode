@@ -58,16 +58,16 @@ src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path 
 src/dashboards/       the AI/BI dashboard definition (.lvdash.json)
 infra/azure/          Terraform for everything Azure: workspace (+ metastore assignment), ADLS, access connector,
                       Event Hubs + hubs, RBAC. tfvars/state gitignored (local state).
-infra/eventhubs/      legacy: the eastus namespace the old AWS workspace reads. Not used by this target.
 scripts/uc.sh         idempotent Unity Catalog bootstrap (`make uc`): credentials, external location, catalog
-examples/subscriptions/   parked subscription phase (see its README)
+examples/             not deployed, linted, or tested: subscriptions/ (next phase), aws-cross-cloud/ (phases 0–5 setup)
 tests/                pytest with local Spark (.venv via uv)
 docs/                 latency results, walkthrough, Epic JSON notes
 ```
 
 - Put logic in `src/hl7rt` as functions of DataFrames, so it's testable without a cluster. Keep
   `src/pipelines/*` to decorators + wiring.
-- Throwaway experiments go in `spikes/` (gitignored, never committed).
+- **Keep the repo to what's deployed or tested.** Anything else goes to `examples/` with a README. Throwaway experiments
+  stay outside the repo folder.
 - Generators are console scripts in the `hl7rt` wheel. The bundle `artifacts:` block builds it into
   `.build/` (gitignored; `make clean` removes it), and it runs as serverless `python_wheel_task` jobs with
   `environment_version: "3"` (Python 3.12).
@@ -208,7 +208,8 @@ docs/                 latency results, walkthrough, Epic JSON notes
   `lookup` by name per target. `tests/test_dashboard.py` enforces portability and that every table it reads is
   produced.
 - **Machines that sleep stall background soaks.** Wrap long local waits in `caffeinate -i` (macOS).
-- `PROFILE=<profile>` in `local.mk` (gitignored) overrides the Azure CLI auth. Leave it unset for the Terraform workspace.
+- **One environment per `infra/azure/terraform.tfvars`** (gitignored). The repo carries only the `.example`. Your
+  sandbox values and a customer's never meet in git.
 
 ## Spark patterns and pitfalls
 
