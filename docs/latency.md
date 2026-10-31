@@ -470,6 +470,17 @@ Measured from the topics with `read_kafka`, 02:22–02:52 UTC, two boundaries pe
 - Hangs capped at ~5 s.
 - One raw → bronze record took 26 s. It was retried within the 30 s delivery timeout.
 
+### Full demo load (mirror + Epic JSON pipeline + both feeds on), 30-minute window
+
+| Hop | n | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|
+| producer → raw | 363,435 | −5 | 9 | **53** | 932 |
+| raw → bronze | 363,459 | 7 | 47 | **94** | 5,159 |
+| bronze → silver | 359,871 | 0 | 31 | **78** | 6,173 |
+| silver → gold | 515,228 | 0 | 19 | **78** | 6,236 |
+
+All 5 pipelines RUNNING with 0 flow errors. Every hang was capped at 5–6 s, and the max is now set by the guard.
+
 ## Still open (not yet explained)
 - **Why Event Hubs connections hang** for 18–77 s (until the 60 s request timeout, or longer when the retry also hangs),
   and **what causes the namespace-wide ~300 ms stalls.** Both are outside Spark, and neither showed in eastus from AWS.

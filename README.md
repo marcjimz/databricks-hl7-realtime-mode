@@ -43,8 +43,8 @@ Azure (every hop crossing clouds); Azure same-region numbers: [docs/latency.md](
 | silver → gold | 15 ms | **32 ms** |
 
 On AWS every Real-Time Mode hop was under 200 ms at p99. **On Azure (this target), every hop is under 200 ms at p99
-too**: raw → bronze 93 ms, bronze → silver 94 ms, and silver → gold 156 ms (30-minute soak, 4 PU, 15-minute
-checkpoints, 5 s hung-request guard). The tail past p99 is still seconds: checkpoint pauses, and Event Hubs
+too**: raw → bronze 94 ms, bronze → silver 78 ms, and silver → gold 78 ms (30-minute soak at full demo load, 4 PU,
+15-minute checkpoints, 5 s hung-request guard). The tail past p99 is still seconds: checkpoint pauses, and Event Hubs
 connections that occasionally hang. Details: [docs/latency.md](docs/latency.md).
 
 ## Set up (and after every Sunday sandbox wipe)
