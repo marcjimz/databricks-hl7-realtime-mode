@@ -1,16 +1,12 @@
-# Hot path, bronze — Real-Time Mode: raw_hl7 -> bronze_hl7 topics. One RTM flow on its own fixed-size cluster.
+# Hot path, bronze — Real-Time Mode (serverless, GA): raw_hl7 -> bronze_hl7 topics. One RTM flow per pipeline.
 resources:
   pipelines:
     hl7_bronze:
       name: hl7rt-${bundle.target}-hl7-bronze
       catalog: ${var.catalog}
       schema: ${resources.schemas.hl7.name}
-      serverless: false
-      photon: false
-      edition: ADVANCED
+      serverless: true
       continuous: true
-      clusters:
-        - ${var.rtm_cluster}
       root_path: ../../src
       libraries:
         - glob:

@@ -1,16 +1,12 @@
-# Hot path, gold — Real-Time Mode: silver_hl7 -> gold_{encounters,observations,orders} topics (one flow, routed per record).
+# Hot path, gold — Real-Time Mode (serverless, GA): silver_hl7 -> gold_{encounters,observations,orders} topics (one flow, routed per record).
 resources:
   pipelines:
     hl7_gold:
       name: hl7rt-${bundle.target}-hl7-gold
       catalog: ${var.catalog}
       schema: ${resources.schemas.hl7.name}
-      serverless: false
-      photon: false
-      edition: ADVANCED
+      serverless: true
       continuous: true
-      clusters:
-        - ${var.rtm_cluster}
       root_path: ../../src
       libraries:
         - glob:

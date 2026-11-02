@@ -87,12 +87,11 @@ docs/                 latency results, walkthrough, Epic JSON notes
     updated. `uc.sh` records the connector's principal ID (Terraform output `access_connector_principal_id`) in each
     credential's comment and updates on a mismatch.
 
-## Real-Time Mode rules (learned in Phase 0, see docs/latency.md)
+## Real-Time Mode rules (GA on SDP; see docs/latency.md)
 
-- **Use the shared wiring:** every RTM hop uses `hl7rt.rtm` (`read_topic`, `sink_options`, `flow_conf`) and the
-  `rtm_cluster` complex bundle variable. Don't hand-roll Kafka options or cluster specs per pipeline.
-  `tests/test_rtm_resources.py` enforces continuous, RTM flag, classic, no Photon, fixed workers, on-demand,
-  slot headroom ≥ 1.2×, and no development-mode targets. Event Hubs client settings follow Microsoft's guidance
+- **Use the shared wiring:** every RTM hop uses `hl7rt.rtm` (`read_topic`, `sink_options`, `flow_conf`). Don't hand-roll
+  Kafka options per pipeline. `tests/test_rtm_resources.py` enforces continuous, serverless, no cluster spec, the GA
+  (`CURRENT`) channel, `maxPartitions` set, and no development-mode targets. Event Hubs client settings follow Microsoft's guidance
   (`eventhubs._JAVA_CLIENT` / `_LIBRDKAFKA`: metadata and idle < 240 s), enforced by `tests/test_eventhubs.py`.
 - **Route, don't fork:** a sink created without a `topic` routes each record by its `topic` column. Silver
   writes the silver and quarantine topics from **one** flow (one read, no extra slots), not two flows.
@@ -101,29 +100,28 @@ docs/                 latency results, walkthrough, Epic JSON notes
   "pipelines.trigger.interval": "5 minutes"})`. Sinks are `dp.create_sink(name, "kafka", {..., "topic": ...})`.
   The topic is static, so use one sink per output topic.
 - **One RTM flow per pipeline, one pipeline per cluster.** Flows that share slots contend.
-- **Compute:** classic, fixed `num_workers` (no autoscale), `photon: false`, `azure_attributes.availability: ON_DEMAND_AZURE`.
-  DBR 18.3+ (SDP `CURRENT` channel).
-- **Size with headroom:** total task slots ≥ tasks across all stages (Kafka `maxPartitions` + each
-  shuffle's partitions) **plus ~20% or more spare**. With exactly as many slots as tasks, the epoch
-  handoff fails with `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT`, the flow crashes, and SDP restarts it.
-  That looks like a 6–10 s "latency spike". Current sizing: stateless hop = 2 × `Standard_D4ds_v5` (8 slots,
-  `rtm_cluster`) for 4 partitions.
-- **Cold start is ~9 min per classic cluster; instance pools aren't used.** Pools only skip VM acquisition (internal
-  guidance: ~20 s with a preloaded runtime; cases with warm pools still took 2–5 min), pipeline docs don't cover pool
-  keys, and a continuous-pipeline-on-pool cluster failure is on record. Start the demo early instead (`make demo`).
+- **Compute: serverless, `CURRENT` channel (GA).** Databricks sizes compute. Flows reach RUNNING within about a minute,
+  where classic clusters took ~9 min.
+  - On this channel each source's reader task count is fixed, so set `maxPartitions` to the hub's partition count
+    (`rtm_max_partitions`).
+  - Several RTM flows per pipeline without slot contention, and adaptive source partitioning, exist only on the
+    `PREVIEW` channel (Beta). Don't use them until they're GA.
+- **Classic compute (phases 0–5, and the investigation in docs/latency.md)** needed fixed workers, Photon off, and
+  slots ≥ tasks across all stages plus ~20% headroom. With exactly as many slots as tasks, the epoch handoff failed with
+  `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT`. It doesn't apply on serverless.
 - **Never use bundle `mode: development`** for RTM targets: it turns `continuous` off.
 - **A first non-RTM run leaves a v1 checkpoint** → `CHECKPOINT_FORMAT_V1_NOT_SUPPORTED`. Fix with a
   full refresh.
 - **`asyncProgressTrackingEnabled` is rejected on SDP classic** (standard access mode). It isn't needed:
   async progress tracking and async state checkpointing are on by default in DBR 18.3.
-- **Supported in RTM:** stateless ops, `explode`, tumbling/sliding windows with watermark, aggregations,
-  `dropDuplicates`, `transformWithState` (row API), stream-static joins, and stream-stream **inner** joins (DBR 18+,
-  join settings in the pipeline `configuration`; see `examples/subscriptions`). Output mode is update only.
-  **Not supported:** Delta source/sink, `foreachBatch`, session windows, `mapPartitions`,
-  `transformWithStateInPandas`.
-- **A one-off `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT` seconds after a cold start** can happen. SDP retries it
-  and steady state is fine (seen once in Phase 2, then clean across every boundary). A repeat at 5-minute
-  boundaries means real under-sizing.
+- **Supported in RTM pipelines (GA docs, `ldp/real-time`):**
+  - Stateless ops, `explode`, tumbling/sliding windows, aggregations, and `dropDuplicates`.
+  - `transformWithState` (row API, no event-time timers), broadcast (stream-static) joins, `union`, and `forEach` sinks.
+  - Output mode is update only.
+- **Not supported:** stream-to-stream joins, Delta source/sink, `foreachBatch`, session windows, `mapPartitions`,
+  `flatMapGroupsWithState`, and `transformWithStateInPandas`.
+  - The parked `examples/subscriptions` join ran on classic before GA. "Event A then event B" subscriptions need
+    `transformWithState`, or micro-batch.
 - **Epoch boundaries pause by design.** Every `pipelines.trigger.interval` the engine commits offsets, checkpoints, and
   plans the next epoch (driver: `Interbatch latency for batch N`, ~1–1.7 s). The next epoch then opens new Kafka
   consumers. There is no zero-pause mode.
@@ -209,8 +207,8 @@ docs/                 latency results, walkthrough, Epic JSON notes
   workspace needs no login or config edits. `uc.sh` clears the local bundle cache when it recreates the catalog.
 - **`make clear-data <env>`** empties the Delta tables (full refresh of the lakehouse mirror) without touching RTM
   pipelines. Use it after downtime so backlog catch-up doesn't skew the dashboard.
-- **Don't restart RTM pipelines between tests.** Classic cold start is ~9 min. Change load, not
-  pipelines.
+- **Don't restart RTM pipelines between tests.** A restart replays from the checkpoint and skews latency. Change load,
+  not pipelines.
 - Spark's Kafka source **resumes from its checkpoint, not the consumer group**. `kafka_starting_offsets`
   only applies to a new checkpoint. `make reset <env>` (full refresh) starts at the live edge, for demos
   only. Production must resume from the checkpoint so no HL7 message is skipped.
@@ -224,12 +222,13 @@ docs/                 latency results, walkthrough, Epic JSON notes
 
 ## Spark patterns and pitfalls
 
-- **Watch for `grows beyond 64 KB` in driver logs.** If a projection's whole-stage code exceeds the JVM method
+- **Watch for `grows beyond 64 KB` in driver logs** (classic only; serverless has no cluster log delivery). If a projection's whole-stage code exceeds the JVM method
   limit, the failed compile is retried at every RTM epoch boundary (silver: +3 s per boundary, p99 407 → 125 ms
   once fixed). Set `rtm.NO_WHOLE_STAGE_CODEGEN` on that flow. Execution already falls back to non-fused code. This **doesn't
   reproduce on local open-source Spark** (silver compiles fine there), so check the driver logs of every new RTM flow on dev.
-- **Diagnose epoch pauses from driver logs.** RTM clusters deliver logs to the `cluster_logs` volume. Compare
-  `Finished task (4/4)` → `Committing sources` → next `Starting task` timestamps per boundary.
+- **Diagnose from the topics and the event log.** Serverless pipelines don't deliver driver or executor logs. Read latency
+  per minute and per partition with `read_kafka` (see "Measuring latency"), and check the pipeline event log for flow
+  WARN/ERROR. The classic investigation used driver logs; see docs/latency.md.
 - **Keep plans small: split once, read many.** Build parsed data in staged projections (`hl7v2.with_segments`):
   split the message into segments once and each needed segment into fields once, then read fields from those
   columns. Spark won't collapse a projection if that would duplicate an expensive expression. Inlining the
