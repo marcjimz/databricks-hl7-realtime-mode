@@ -14,6 +14,11 @@ output "access_connector_id" {
   value       = azurerm_databricks_access_connector.this.id
 }
 
+output "access_connector_principal_id" {
+  description = "The connector's managed identity. It changes when the connector is recreated, even though its ID doesn't."
+  value       = azurerm_databricks_access_connector.this.identity[0].principal_id
+}
+
 output "storage_url" {
   description = "ADLS Gen2 URL for the UC external location."
   value       = "abfss://${azurerm_storage_container.uc.name}@${azurerm_storage_account.uc.name}.dfs.core.windows.net/"
