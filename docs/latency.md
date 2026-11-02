@@ -481,6 +481,11 @@ Measured from the topics with `read_kafka`, 02:22–02:52 UTC, two boundaries pe
 
 All 5 pipelines RUNNING with 0 flow errors. Every hang was capped at 5–6 s, and the max is now set by the guard.
 
+### After a real Sunday-wipe replay (2026-11-01: resource group deleted by FE cleanup, then `make up` + `make demo dev`)
+
+12 minutes at full load on the rebuilt workspace: p99 producer → raw 57, raw → bronze **94**, bronze → silver **63**,
+silver → gold **78** ms. Max ~1.4 s, 0 duplicate keys, all pipelines RUNNING.
+
 ## Still open (not yet explained)
 - **Why Event Hubs connections hang** for 18–77 s (until the 60 s request timeout, or longer when the retry also hangs),
   and **what causes the namespace-wide ~300 ms stalls.** Both are outside Spark, and neither showed in eastus from AWS.

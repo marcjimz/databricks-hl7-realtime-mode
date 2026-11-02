@@ -15,6 +15,7 @@ set -euo pipefail
 tf() { terraform -chdir=infra/azure output -raw "$1"; }
 WORKSPACE_ID=$(tf workspace_id)
 CONNECTOR=$(tf access_connector_id)
+PRINCIPAL=$(tf access_connector_principal_id)
 STORAGE_URL=${STORAGE_URL:-$(tf storage_url)}
 CATALOG=${CATALOG:-$(tf catalog)}  # override only for a scratch test
 DBX=${DBX:-databricks}
@@ -22,19 +23,20 @@ DBX=${DBX:-databricks}
 json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.argv[1]) or '')" "$1" 2>/dev/null; }
 identity="{\"azure_managed_identity\":{\"access_connector_id\":\"$CONNECTOR\"}}"
 
-# credential NAME PURPOSE: create, or repoint to the current access connector.
+# credential NAME PURPOSE: create, or repoint it. A rebuilt connector keeps its resource ID but gets a new identity, which
+# Unity Catalog only picks up on update. So the comment records the identity, and a mismatch triggers the update.
 credential() {
-  local current
-  if current=$($DBX credentials get-credential "$1" -o json 2>/dev/null | json "d.get('azure_managed_identity',{}).get('access_connector_id')"); then
-    if [ "$current" = "$CONNECTOR" ]; then
+  local note="access connector identity $PRINCIPAL" current
+  if current=$($DBX credentials get-credential "$1" -o json 2>/dev/null | json "d.get('comment')"); then
+    if [ "$current" = "$note" ]; then
       echo "ok       $2 credential $1"
     else
-      $DBX credentials update-credential "$1" --json "$identity" --skip-validation --force >/dev/null
-      echo "updated  $2 credential $1 -> $(basename "$CONNECTOR")"
+      $DBX credentials update-credential "$1" --comment "$note" --json "$identity" --skip-validation --force >/dev/null
+      echo "updated  $2 credential $1 (the access connector was recreated)"
     fi
   else
     $DBX credentials create-credential --skip-validation \
-      --json "{\"name\":\"$1\",\"purpose\":\"$2\",${identity:1:${#identity}-2}}" >/dev/null
+      --json "{\"name\":\"$1\",\"purpose\":\"$2\",\"comment\":\"$note\",${identity:1:${#identity}-2}}" >/dev/null
     echo "created  $2 credential $1"
   fi
 }
@@ -54,6 +56,12 @@ else
   echo "created  external location $LOCATION"
 fi
 
+bind="{\"add\":[{\"workspace_id\":$WORKSPACE_ID,\"binding_type\":\"BINDING_TYPE_READ_WRITE\"}]}"
+# After a rebuild the catalog is still bound (ISOLATED) to the deleted workspace, so this one can't see it yet: bind it.
+if [[ "$($DBX catalogs get "$CATALOG" 2>&1 || true)" == *"not accessible in current workspace"* ]]; then
+  $DBX workspace-bindings update-bindings catalog "$CATALOG" --json "$bind" >/dev/null
+  echo "bound    catalog $CATALOG to this workspace (it was bound to a deleted one)"
+fi
 if built_for=$($DBX catalogs get "$CATALOG" -o json 2>/dev/null | json "d.get('properties',{}).get('hl7.workspace_id','none')"); then
   if [ "$built_for" = "none" ]; then
     echo "error: catalog $CATALOG exists but wasn't created by make uc; set another catalog in infra/azure/terraform.tfvars" >&2
@@ -70,8 +78,7 @@ if [ -z "${built_for:-}" ]; then
   $DBX catalogs create --json "{\"name\":\"$CATALOG\",\"storage_root\":\"${STORAGE_URL%/}/$CATALOG\",
     \"comment\":\"HL7 on Spark Real-Time Mode (make uc)\",\"properties\":{\"hl7.workspace_id\":\"$WORKSPACE_ID\"}}" >/dev/null
   # Shared metastore: keep the catalog visible to this workspace only.
-  $DBX workspace-bindings update-bindings catalog "$CATALOG" \
-    --json "{\"add\":[{\"workspace_id\":$WORKSPACE_ID,\"binding_type\":\"BINDING_TYPE_READ_WRITE\"}]}" >/dev/null
+  $DBX workspace-bindings update-bindings catalog "$CATALOG" --json "$bind" >/dev/null
   $DBX catalogs update "$CATALOG" --isolation-mode ISOLATED >/dev/null
   echo "created  catalog $CATALOG (bound to workspace $WORKSPACE_ID)"
   # The bundle's local deployment cache points at the old workspace's resources.

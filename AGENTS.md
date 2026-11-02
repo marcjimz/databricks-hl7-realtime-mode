@@ -75,6 +75,17 @@ docs/                 latency results, walkthrough, Epic JSON notes
   outlive the weekly sandbox wipe, so Terraform state for them would go stale. `scripts/uc.sh` creates or repoints them
   and recreates a catalog built for an earlier workspace (catalog property `hl7.workspace_id`). It refuses to touch a catalog
   it didn't create. Azure names are deterministic (prefix-based) so a rebuild reuses the same storage URL.
+- **Replaying a wipe (verified 2026-11-01, real Sunday wipe).** `make up` handled stale Terraform state by itself
+  (resources seen as deleted, 18 recreated, metastore assignment replaced). Three things needed handling, and
+  `tests/test_infra.py` guards each:
+  - **The old managed resource group can survive the wipe.** Don't pin `managed_resource_group_name`; Azure generates a
+    unique one.
+  - **An ISOLATED catalog stays bound to the deleted workspace.** The new workspace can't see it, but create says it
+    exists. `uc.sh` adds a binding for the new workspace, then drops and recreates the catalog.
+  - **A recreated access connector keeps its resource ID but gets a new managed identity.** Unity Catalog fails with
+    "storage credential was not found ... access connector may have been deleted or recreated" until the credential is
+    updated. `uc.sh` records the connector's principal ID (Terraform output `access_connector_principal_id`) in each
+    credential's comment and updates on a mismatch.
 
 ## Real-Time Mode rules (learned in Phase 0, see docs/latency.md)
 
