@@ -60,7 +60,7 @@ up:
 	@$(MAKE) --no-print-directory uc
 
 uc:
-	@DBX="$(DBX)" scripts/uc.sh
+	@DBX="$(DBX)" infra/uc.sh
 
 # Continuous pipelines start on deploy; `run` starts any that are stopped (running ones are left alone).
 demo: guard-target

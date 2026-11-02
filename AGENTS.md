@@ -58,7 +58,7 @@ src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path 
 src/dashboards/       the AI/BI dashboard definition (.lvdash.json)
 infra/azure/          Terraform for everything Azure: workspace (+ metastore assignment), ADLS, access connector,
                       Event Hubs + hubs, RBAC. tfvars/state gitignored (local state).
-scripts/uc.sh         idempotent Unity Catalog bootstrap (`make uc`): credentials, external location, catalog
+infra/uc.sh           idempotent Unity Catalog bootstrap (`make uc`): credentials, external location, catalog
 examples/             not deployed, linted, or tested: subscriptions/ (next phase), aws-cross-cloud/ (phases 0–5 setup)
 tests/                pytest with local Spark (.venv via uv)
 docs/                 latency results (history in examples/aws-cross-cloud), Epic JSON notes
@@ -72,7 +72,7 @@ docs/                 latency results (history in examples/aws-cross-cloud), Epi
   `.build/` (gitignored), and it runs as serverless `python_wheel_task` jobs with
   `environment_version: "3"` (Python 3.12).
 - **Terraform owns Azure; the Databricks CLI owns Unity Catalog.** UC objects live in the shared regional metastore and
-  outlive the weekly sandbox wipe, so Terraform state for them would go stale. `scripts/uc.sh` creates or repoints them
+  outlive the weekly sandbox wipe, so Terraform state for them would go stale. `infra/uc.sh` creates or repoints them
   and recreates a catalog built for an earlier workspace (catalog property `hl7.workspace_id`). It refuses to touch a catalog
   it didn't create. Azure names are deterministic (prefix-based) so a rebuild reuses the same storage URL.
 - **Replaying a wipe (verified 2026-11-01, real Sunday wipe).** `make up` handled stale Terraform state by itself

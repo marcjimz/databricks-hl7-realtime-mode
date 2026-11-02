@@ -1,4 +1,4 @@
-"""Durable guard: infra/azure keeps Event Hubs key-free and exposes every output the Makefile and scripts/uc.sh read."""
+"""Durable guard: infra/azure keeps Event Hubs key-free and exposes every output the Makefile and infra/uc.sh read."""
 
 import re
 from pathlib import Path
@@ -27,13 +27,13 @@ def test_access_connector_can_send_and_receive():
 
 
 def test_makefile_and_uc_script_read_existing_outputs():
-    used = _read_outputs((ROOT / "Makefile").read_text()) | _read_outputs((ROOT / "scripts/uc.sh").read_text())
+    used = _read_outputs((ROOT / "Makefile").read_text()) | _read_outputs((ROOT / "infra/uc.sh").read_text())
     assert used, "expected Terraform outputs to be read"
     assert used <= _outputs(), f"reads missing outputs: {used - _outputs()}"
 
 
 # Lessons from replaying a real sandbox wipe (resource group deleted, then `make up`). See AGENTS.md.
-UC = (ROOT / "scripts/uc.sh").read_text()
+UC = (ROOT / "infra/uc.sh").read_text()
 
 
 def test_workspace_managed_resource_group_name_is_not_fixed():

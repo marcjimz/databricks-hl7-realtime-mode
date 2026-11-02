@@ -86,7 +86,7 @@ make help              # everything else
 
 ```
 infra/azure/     Terraform: workspace, storage, access connector, Event Hubs
-scripts/uc.sh    Unity Catalog bootstrap (make uc)
+infra/uc.sh      Unity Catalog bootstrap (make uc)
 databricks.yml   bundle variables and targets; resources/ has the pipelines, jobs, and dashboard
 src/hl7rt/       the logic: HL7 parsing, gold, Event Hubs wiring, generators
 src/pipelines/   thin pipeline definitions
