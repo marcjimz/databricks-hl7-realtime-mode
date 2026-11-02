@@ -486,6 +486,23 @@ All 5 pipelines RUNNING with 0 flow errors. Every hang was capped at 5–6 s, an
 12 minutes at full load on the rebuilt workspace: p99 producer → raw 57, raw → bronze **94**, bronze → silver **63**,
 silver → gold **78** ms. Max ~1.4 s, 0 duplicate keys, all pipelines RUNNING.
 
+### Serverless, GA Real-Time Mode (2026-11-02)
+
+Bronze, silver, and gold moved from classic fixed clusters to serverless continuous pipelines on the GA (`CURRENT`)
+channel. The code, `maxPartitions` = 4, the 15-minute checkpoints, and the 5 s hang guard are unchanged. Flows reached
+RUNNING within seconds of their update starting (classic took ~9 min).
+
+18-minute window at full demo load, measured from the topics:
+
+| Hop | n | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|
+| producer → raw | 219,642 | −1 | 14 | **57** | 582 |
+| raw → bronze | 219,684 | 7 | 47 | **86** | 1,374 |
+| bronze → silver | 217,460 | 0 | 31 | **78** | 2,063 |
+| silver → gold | 311,004 | 0 | 31 | **78** | 1,484 |
+
+0 duplicate keys, and no flow WARN/ERROR. Serverless matches classic (94 / 63 / 78 ms) without any sizing.
+
 ## Still open (not yet explained)
 - **Why Event Hubs connections hang** for 18–77 s (until the 60 s request timeout, or longer when the retry also hangs),
   and **what causes the namespace-wide ~300 ms stalls.** Both are outside Spark, and neither showed in eastus from AWS.

@@ -1,4 +1,4 @@
-"""Durable guard: Real-Time Mode pipelines follow the rules learned in Phase 0 (see AGENTS.md).
+"""Durable guard: Real-Time Mode pipelines follow the GA rules (see AGENTS.md).
 
 A pipeline is RTM if its configuration enables spark.databricks.streaming.realTimeMode.enabled.
 """
@@ -10,9 +10,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 RTM_KEY = "spark.databricks.streaming.realTimeMode.enabled"
-# Cores per node for the node types we size against. Extend when adding a node type.
-CORES = {"Standard_D4ds_v5": 4, "Standard_D8ds_v5": 8}
-HEADROOM = 1.2  # slots >= 1.2x tasks (AGENTS.md: ~20%+ spare; exactly-equal crashes at the epoch handoff)
 
 
 def _bundle():
@@ -38,28 +35,15 @@ def test_there_are_rtm_pipelines():
     assert list(_rtm_pipelines()), "expected at least one RTM pipeline"
 
 
-def test_rtm_pipelines_follow_compute_rules():
+def test_rtm_pipelines_are_serverless_ga():
+    """GA Real-Time Mode on serverless: continuous, Databricks sizes compute (no cluster spec), on the current (GA)
+    channel, where each source's reader task count is fixed, so maxPartitions must be set."""
     for name, spec, variables in _rtm_pipelines():
         assert spec.get("continuous") is True, f"{name}: RTM requires continuous: true"
-        assert spec.get("serverless") is False, f"{name}: RTM pipelines here run on classic, fixed-size compute"
-        assert spec.get("photon") is False, f"{name}: RTM requires Photon off"
-        clusters = [_resolve(c, variables) for c in spec.get("clusters", [])]
-        assert clusters, f"{name}: needs an explicit cluster spec"
-        for c in clusters:
-            assert "autoscale" not in c and isinstance(c.get("num_workers"), int), f"{name}: fixed num_workers only"
-            assert "aws_attributes" not in c and "gcp_attributes" not in c, f"{name}: Azure compute"
-            assert c.get("azure_attributes", {}).get("availability") == "ON_DEMAND_AZURE", f"{name}: no spot"
-
-
-def test_rtm_pipelines_have_slot_headroom():
-    for name, spec, variables in _rtm_pipelines():
-        conf = spec["configuration"]
-        partitions = int(_resolve(conf["hl7.rtm.max_partitions"], variables))
-        stages = int(conf.get("hl7.rtm.stage_tasks_multiplier", 1))  # stateless single-stage hop = 1
-        cluster = _resolve(spec["clusters"][0], variables)
-        slots = cluster["num_workers"] * CORES[cluster["node_type_id"]]
-        tasks = partitions * stages
-        assert slots >= HEADROOM * tasks, f"{name}: {slots} slots for {tasks} tasks; need >= {HEADROOM}x headroom"
+        assert spec.get("serverless") is True, f"{name}: RTM pipelines run on serverless"
+        assert not spec.get("clusters"), f"{name}: serverless pipelines take no cluster spec"
+        assert spec.get("channel", "CURRENT") == "CURRENT", f"{name}: GA channel only (multi-flow RTM is preview/Beta)"
+        assert int(_resolve(spec["configuration"]["hl7.rtm.max_partitions"], variables)) >= 1
 
 
 def test_bundle_never_uses_development_mode():

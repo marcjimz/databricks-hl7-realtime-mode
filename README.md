@@ -9,7 +9,7 @@
 Millisecond HL7 processing on Azure Databricks. Raw HL7 v2 is parsed and split into clinical entities in tens of
 milliseconds per layer, and every layer also lands in Delta. Built on
 [Real-Time Mode](https://www.databricks.com/blog/introducing-real-time-mode-apache-sparktm-structured-streaming),
-Lakeflow Spark Declarative Pipelines, and Azure Event Hubs, connected through a Unity Catalog service credential, with
+serverless Lakeflow Spark Declarative Pipelines, and Azure Event Hubs, connected through a Unity Catalog service credential, with
 no keys or connection strings.
 
 ```
@@ -26,11 +26,11 @@ STREAMING TABLES (seconds)
 
 ## Results
 
-Measured at 200 msg/s over 30 minutes at full demo load, with workspace and Event Hubs in one region:
+Measured at 200 msg/s at full demo load on serverless Real-Time Mode (GA), with workspace and Event Hubs in one region:
 
 | Hop | p50 | p99 |
 |---|---|---|
-| raw → bronze | 7 ms | **94 ms** |
+| raw → bronze | 7 ms | **86 ms** |
 | bronze → silver (full HL7 parse) | 0 ms | **78 ms** |
 | silver → gold | 0 ms | **78 ms** |
 
@@ -61,7 +61,7 @@ make up                                                            # plan -> con
 ## Run the demo
 
 ```bash
-make demo dev          # deploy, start all pipelines and the HL7 feed, print the dashboard URL (~10 min cold start)
+make demo dev          # deploy, start all pipelines and the HL7 feeds, print the dashboard URL (serverless: ~2 min)
 make clear-data dev    # once every hop shows data: drop start-up catch-up from the dashboard
 make stop dev          # stop pipelines and feeds (Event Hubs keeps billing until the sandbox is wiped)
 make help              # everything else

@@ -1,16 +1,12 @@
-# Hot path, silver — Real-Time Mode: bronze_hl7 -> silver_hl7 | quarantine_hl7 topics (routed per record by one flow).
+# Hot path, silver — Real-Time Mode (serverless, GA): bronze_hl7 -> silver_hl7 | quarantine_hl7 topics (routed per record by one flow).
 resources:
   pipelines:
     hl7_silver:
       name: hl7rt-${bundle.target}-hl7-silver
       catalog: ${var.catalog}
       schema: ${resources.schemas.hl7.name}
-      serverless: false
-      photon: false
-      edition: ADVANCED
+      serverless: true
       continuous: true
-      clusters:
-        - ${var.rtm_cluster}
       root_path: ../../src
       libraries:
         - glob:

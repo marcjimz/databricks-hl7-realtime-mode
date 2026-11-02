@@ -71,22 +71,8 @@ variables:
     description: RTM checkpoint interval (pipelines.trigger.interval). Each boundary pauses a hop ~2 s on Azure; see docs/latency.md.
     default: 15 minutes
   rtm_max_partitions:
-    description: Kafka reader tasks per RTM flow (maxPartitions); match the hub partition count.
+    description: Kafka reader tasks per RTM flow (maxPartitions). Fixed on the GA channel; match the hub partition count.
     default: "4"
-  rtm_cluster:
-    description: Fixed classic cluster per RTM hop (2 x 4 cores = 8 slots for 4 tasks).
-    type: complex
-    default:
-      label: default
-      num_workers: 2
-      node_type_id: Standard_D4ds_v5
-      azure_attributes:
-        availability: ON_DEMAND_AZURE
-        first_on_demand: 3
-      cluster_log_conf:
-        volumes:
-          destination: /Volumes/${var.catalog}/${var.schema}/cluster_logs
-
   # Kafka source behavior
   kafka_starting_offsets:
     description: Where a new checkpoint starts reading (latest | earliest).

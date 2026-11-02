@@ -1,7 +1,0 @@
-resources:
-  volumes:
-    cluster_logs:
-      catalog_name: ${var.catalog}
-      schema_name: ${resources.schemas.hl7.name}
-      name: cluster_logs
-      comment: Driver/executor logs from the RTM pipeline clusters (inter-batch latency diagnostics).

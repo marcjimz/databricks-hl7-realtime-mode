@@ -11,7 +11,7 @@ make up              # Terraform plan -> confirm -> apply (workspace, ADLS, Even
 ```bash
 make demo dev        # deploy, start every pipeline, start the HL7 feed, print the dashboard URL
 ```
-Classic Real-Time Mode clusters take ~9 minutes to start. The dashboard fills in once they're running. Then
+Serverless Real-Time Mode pipelines are running within ~2 minutes; the dashboard fills in once data flows. Then
 `make clear-data dev` so start-up catch-up doesn't skew the numbers.
 
 ## 2. Show the flow
