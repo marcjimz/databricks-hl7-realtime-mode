@@ -15,5 +15,5 @@ Table names and the silver column contract (names, order, types) are unchanged. 
 > Note for an existing deployment: switching bronze from Z-order to `cluster_by` applies to the new table; an
 > existing table keeps its layout until it's rebuilt.
 
-Starting offsets: Spark's Kafka source resumes from its **checkpoint**, not the consumer group. `make reset <env>`
+Starting offsets: Spark's Kafka source resumes from its **checkpoint**, not the consumer group. a full refresh
 (full refresh) starts at the live edge, which is for demos only. In production, always resume from the checkpoint.

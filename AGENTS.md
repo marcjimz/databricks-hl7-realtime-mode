@@ -32,7 +32,7 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
    default to `${var.catalog}.${var.schema}.<table>`, Terraform (`infra/azure`) names hubs from `catalog`/`schema`/`tables`,
    and the mirror lands each topic in the table of that name. New layers follow the same rule.
    `tests/test_topic_names.py` enforces it. Renaming a hub recreates it (data is dropped), so pipelines then need
-   `make reset` (new checkpoints).
+   a full refresh (new checkpoints).
 3. **No keys or connection strings, anywhere.** Event Hubs auth is Entra ID through the Unity Catalog service credential
    `<catalog>_eventhubs` (the access connector's managed identity, with Event Hubs Data Sender + Receiver). The namespace has SAS
    keys disabled (`local_authentication_enabled = false`). Spark uses the Kafka option `databricks.serviceCredential` and must set
@@ -58,10 +58,10 @@ src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path 
 src/dashboards/       the AI/BI dashboard definition (.lvdash.json)
 infra/azure/          Terraform for everything Azure: workspace (+ metastore assignment), ADLS, access connector,
                       Event Hubs + hubs, RBAC. tfvars/state gitignored (local state).
-scripts/uc.sh         idempotent Unity Catalog bootstrap (`make uc`): credentials, external location, catalog
+infra/uc.sh           idempotent Unity Catalog bootstrap (`make uc`): credentials, external location, catalog
 examples/             not deployed, linted, or tested: subscriptions/ (next phase), aws-cross-cloud/ (phases 0–5 setup)
 tests/                pytest with local Spark (.venv via uv)
-docs/                 latency results, walkthrough, Epic JSON notes
+docs/                 latency results (history in examples/aws-cross-cloud), Epic JSON notes
 ```
 
 - Put logic in `src/hl7rt` as functions of DataFrames, so it's testable without a cluster. Keep
@@ -69,10 +69,10 @@ docs/                 latency results, walkthrough, Epic JSON notes
 - **Keep the repo to what's deployed or tested.** Anything else goes to `examples/` with a README. Throwaway experiments
   stay outside the repo folder.
 - Generators are console scripts in the `hl7rt` wheel. The bundle `artifacts:` block builds it into
-  `.build/` (gitignored; `make clean` removes it), and it runs as serverless `python_wheel_task` jobs with
+  `.build/` (gitignored), and it runs as serverless `python_wheel_task` jobs with
   `environment_version: "3"` (Python 3.12).
 - **Terraform owns Azure; the Databricks CLI owns Unity Catalog.** UC objects live in the shared regional metastore and
-  outlive the weekly sandbox wipe, so Terraform state for them would go stale. `scripts/uc.sh` creates or repoints them
+  outlive the weekly sandbox wipe, so Terraform state for them would go stale. `infra/uc.sh` creates or repoints them
   and recreates a catalog built for an earlier workspace (catalog property `hl7.workspace_id`). It refuses to touch a catalog
   it didn't create. Azure names are deterministic (prefix-based) so a rebuild reuses the same storage URL.
 - **Replaying a wipe (verified 2026-11-01, real Sunday wipe).** `make up` handled stale Terraform state by itself
@@ -106,7 +106,7 @@ docs/                 latency results, walkthrough, Epic JSON notes
     (`rtm_max_partitions`).
   - Several RTM flows per pipeline without slot contention, and adaptive source partitioning, exist only on the
     `PREVIEW` channel (Beta). Don't use them until they're GA.
-- **Classic compute (phases 0–5, and the investigation in docs/latency.md)** needed fixed workers, Photon off, and
+- **Classic compute (phases 0–5; examples/aws-cross-cloud/latency-history.md)** needed fixed workers, Photon off, and
   slots ≥ tasks across all stages plus ~20% headroom. With exactly as many slots as tasks, the epoch handoff failed with
   `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT`. It doesn't apply on serverless.
 - **Never use bundle `mode: development`** for RTM targets: it turns `continuous` off.
@@ -180,7 +180,7 @@ docs/                 latency results, walkthrough, Epic JSON notes
   Every table is an AUTO CDC (SCD 1) upsert keyed by the record's raw-topic coordinates (`lakehouse.KEYS`), so a repeat
   updates its row. Don't key on `msg_control_id`: generators and sources can reuse it.
 - **Exclude backlog replay:** after downtime, hops drain backlog at "minutes" of apparent latency.
-  Filter on fresh records (`upstream_ts` within the window), or `make reset` for demos.
+  Filter on fresh records (`upstream_ts` within the window), or `make clear-data` for demos.
 - **Break a bad tail down by Event Hubs partition before blaming Spark.** The mirror tables don't keep the output
   partition, so read the topic directly from SQL with `read_kafka(..., serviceCredential => '<catalog>_eventhubs')` and
   group `timestamp - upstream_ts` by `partition`. In Phase 3 one partition of two freshly recreated hubs had p99
@@ -198,9 +198,9 @@ docs/                 latency results, walkthrough, Epic JSON notes
 
 ## Operating the demo
 
-- `make deploy <env>` starts only **new or changed** continuous pipelines; `make start <env>` starts the rest
-  (running ones are left alone). `make generate <env>` / `make generate-stop <env>` control load (`generate-stop`
-  waits until runs end). `make stop <env>` stops compute billing. `make demo <env>` = deploy + start + generate.
+- **Targets:** `make up` (Azure + `make uc`), `make demo dev` (deploy + start all pipelines and both feeds),
+  `make clear-data dev`, `make stop dev` (stops compute billing). Deploy starts new or changed continuous pipelines;
+  `demo` starts the rest.
 - **`make up`** builds or rebuilds Azure (Terraform plan → you confirm → apply) and then runs `make uc`. The FE sandbox is
   wiped every Sunday: rerun `make up`, then `make demo dev`. The Makefile reads the workspace URL, `catalog`, and
   `eh_namespace` from Terraform outputs (`DATABRICKS_HOST`, `BUNDLE_VAR_*`) and authenticates with the Azure CLI, so a new
@@ -210,8 +210,8 @@ docs/                 latency results, walkthrough, Epic JSON notes
 - **Don't restart RTM pipelines between tests.** A restart replays from the checkpoint and skews latency. Change load,
   not pipelines.
 - Spark's Kafka source **resumes from its checkpoint, not the consumer group**. `kafka_starting_offsets`
-  only applies to a new checkpoint. `make reset <env>` (full refresh) starts at the live edge, for demos
-  only. Production must resume from the checkpoint so no HL7 message is skipped.
+  only applies to a new checkpoint. A full refresh (`databricks bundle run --full-refresh-all`) starts at the live
+  edge, for demos only. Production must resume from the checkpoint so no HL7 message is skipped.
 - **Dashboard** (`resources/dashboards/hl7_latency.yml` → `src/dashboards/hl7_latency.lvdash.json`): queries use
   unqualified table names, and the bundle sets `dataset_catalog` / `dataset_schema`. The warehouse is a
   `lookup` by name per target. `tests/test_dashboard.py` enforces portability and that every table it reads is
@@ -228,7 +228,7 @@ docs/                 latency results, walkthrough, Epic JSON notes
   reproduce on local open-source Spark** (silver compiles fine there), so check the driver logs of every new RTM flow on dev.
 - **Diagnose from the topics and the event log.** Serverless pipelines don't deliver driver or executor logs. Read latency
   per minute and per partition with `read_kafka` (see "Measuring latency"), and check the pipeline event log for flow
-  WARN/ERROR. The classic investigation used driver logs; see docs/latency.md.
+  WARN/ERROR. The classic investigation used driver logs (latency history).
 - **Keep plans small: split once, read many.** Build parsed data in staged projections (`hl7v2.with_segments`):
   split the message into segments once and each needed segment into fields once, then read fields from those
   columns. Spark won't collapse a projection if that would duplicate an expensive expression. Inlining the
@@ -257,7 +257,7 @@ docs/                 latency results, walkthrough, Epic JSON notes
 - **Before pushing:** `make test`, `make lint`, `databricks bundle validate -t dev`. For pipeline changes,
   deploy to dev and verify against live data (row counts, quarantine reasons, event-log errors, latency),
   then `make stop dev`.
-- **Infra:** always `make infra-plan` → review → `make infra-apply` (applies only the saved plan; `make up` asks first).
+- **Infra:** `make up` shows the Terraform plan and applies exactly that plan only after you confirm.
   Never auto-approve. Azure sandbox policy requires an `owner` tag (`var.owner`).
 - **Confirm before** creating paid or outward-facing resources (namespaces, tiers, new clusters), destroying
   anything, or forcing destructive bundle deploys (e.g. schema recreation). Don't bypass those prompts.

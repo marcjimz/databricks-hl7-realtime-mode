@@ -67,7 +67,13 @@ make stop dev          # stop pipelines and feeds (Event Hubs keeps billing unti
 make help              # everything else
 ```
 
-The 20-minute demo script is [docs/walkthrough.md](docs/walkthrough.md).
+**Demo flow:**
+1. Show the source: raw HL7 v2 (ADT, ORU, ORM, MDM) at 200 msg/s.
+2. Show the hot path: an Event Hubs topic between each layer. Silver has the Epic silver columns. In Catalog Explorer,
+   every topic has a streaming table of the same name.
+3. Show the dashboard: p99 per hop (all under 200 ms), p99 by minute, critical labs reaching gold, and quarantine.
+4. Show security: Catalog Explorer → External data → Credentials → `<catalog>_eventhubs`. The pipelines hold no secrets,
+   and the Event Hubs namespace has SAS keys disabled.
 
 ## Configure
 
@@ -80,12 +86,12 @@ The 20-minute demo script is [docs/walkthrough.md](docs/walkthrough.md).
 
 ```
 infra/azure/     Terraform: workspace, storage, access connector, Event Hubs
-scripts/uc.sh    Unity Catalog bootstrap (make uc)
+infra/uc.sh      Unity Catalog bootstrap (make uc)
 databricks.yml   bundle variables and targets; resources/ has the pipelines, jobs, and dashboard
 src/hl7rt/       the logic: HL7 parsing, gold, Event Hubs wiring, generators
 src/pipelines/   thin pipeline definitions
 tests/           unit tests (local Spark)
-docs/            latency results, demo walkthrough, Epic JSON notes
+docs/            latency results, Epic JSON notes
 examples/        not deployed: self-service subscriptions (next phase), the earlier AWS cross-cloud setup
 ```
 

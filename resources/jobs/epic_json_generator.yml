@@ -1,4 +1,4 @@
-# Continuous synthetic Epic JSON feed. Start/stop with `make generate <env>` / `make generate-stop <env>`.
+# Continuous synthetic Epic JSON feed. Started by `make demo <env>`, stopped by `make stop <env>`.
 resources:
   jobs:
     epic_json_generator:
