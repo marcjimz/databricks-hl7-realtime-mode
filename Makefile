@@ -1,37 +1,23 @@
-# HL7 on Spark Real-Time Mode — bundle, infra, and local dev helpers.
+# HL7 on Spark Real-Time Mode.
 #
-# Usage (env is a positional word, e.g. `make deploy dev`):
-#   make install                 create .venv with dev dependencies (uv)
-#   make test | lint | fmt       local checks (pytest with local Spark, ruff, terraform fmt)
-#   make clean                   remove local build/test artifacts (.build/, caches)
+#   make install          local Python env (uv)
+#   make test | lint      unit tests (local Spark) | ruff + terraform fmt
 #
-#   make up                      build or rebuild Azure (plan, confirm, apply) + Unity Catalog. Rerun after the weekly wipe
-#   make infra-plan              terraform plan for infra/azure -> tfplan
-#   make infra-apply             terraform apply that saved plan (only the reviewed plan)
-#   make uc                      create or repair the catalog, storage + Event Hubs service credentials (idempotent)
+#   make up               build or rebuild Azure (Terraform plan -> you confirm -> apply), then make uc
+#   make uc               create or repair the Unity Catalog catalog and credentials (idempotent)
 #
-#   make validate dev            databricks bundle validate
-#   make deploy dev              validate + deploy (continuous pipelines start automatically)
-#   make start dev               start every pipeline (resumes checkpoints; already-running ones are left alone)
-#   make demo dev                deploy + start + generate, then print the dashboard URL
-#   make generate dev            start the continuous synthetic feed (runs until generate-stop)
-#   make generate-stop dev       cancel the synthetic feed
-#   make clear-data dev          empty the Delta tables and refill from live data (~2 min; hot path keeps running)
-#   make reset dev               full refresh: new checkpoints, start at the live edge (DEMO ONLY)
-#   make stop dev                stop all pipelines + generators (stops compute billing)
-#   make destroy dev             databricks bundle destroy
+#   make demo dev         deploy, start every pipeline and both feeds, print the dashboard URL
+#   make clear-data dev   empty the Delta tables and refill from live data (~2 min; RTM keeps running)
+#   make stop dev         stop the feeds and every pipeline (stops Databricks billing)
 #
 # Your environment lives in infra/azure/terraform.tfvars (gitignored). Auth is the Azure CLI (`az login`) against the
 # workspace in Terraform's outputs, so a rebuilt workspace needs no login or config.
 
-# Bundle targets treated as an env word. Kept in sync with databricks.yml `targets:`, so a
-# typo like `make deploy devv` fails loudly instead of silently doing nothing.
-ENVS := dev
-
-TARGET  := $(filter $(ENVS),$(MAKECMDGOALS))
-DBX     := databricks
-BUNDLE  := $(DBX) bundle
-TF      := terraform -chdir=infra/azure
+ENVS   := dev
+TARGET := $(filter $(ENVS),$(MAKECMDGOALS))
+DBX    := databricks
+BUNDLE := $(DBX) bundle
+TF     := terraform -chdir=infra/azure
 
 # Workspace, catalog, and namespace come from Terraform outputs (they change when the sandbox is rebuilt).
 tf_out = $(shell $(TF) output -raw $(1) 2>/dev/null)
@@ -40,27 +26,19 @@ export DATABRICKS_AUTH_TYPE    ?= azure-cli
 export BUNDLE_VAR_catalog      ?= $(call tf_out,catalog)
 export BUNDLE_VAR_eh_namespace ?= $(call tf_out,eh_namespace)
 
-# Hot-path RTM pipelines first, then the mirror and Epic JSON.
 PIPELINES  := hl7_bronze hl7_silver hl7_gold lakehouse epic_json
 GENERATORS := hl7_generator epic_json_generator
-
-# Resolve a deployed resource id from the bundle summary: $(call resource_id,pipelines,epic_json)
+active_runs = $(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))'
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")
-bundle_var  = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['variables']['$(1)']['value'])")
 
-.PHONY: help install test lint fmt clean up infra-plan infra-apply uc validate deploy start demo generate generate-stop \
-        clear-data \
-        reset stop destroy guard-target $(ENVS)
+.PHONY: help install test lint up uc demo clear-data stop guard-target $(ENVS)
 
 help:
-	@sed -n '3,25p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
-	@echo "  <env> is one of: $(ENVS)"
+	@sed -n '3,14p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 
 guard-target:
-	@if [ -z "$(TARGET)" ]; then echo "error: specify a target env, e.g. 'make deploy dev' (valid: $(ENVS))"; exit 2; fi
-	@if [ $(words $(TARGET)) -gt 1 ]; then echo "error: pick ONE env, got: $(TARGET)"; exit 2; fi
+	@test -n "$(TARGET)" || { echo "error: name the environment, e.g. 'make demo dev' (one of: $(ENVS))"; exit 2; }
 
-# --- Local --------------------------------------------------------------------
 install:
 	uv sync
 
@@ -72,80 +50,38 @@ lint:
 	uv run ruff format --check src tests
 	terraform fmt -check -recursive infra
 
-fmt:
-	uv run ruff check --fix src tests
-	uv run ruff format src tests
-	terraform fmt -recursive infra
-
-clean:
-	rm -rf .build dist .pytest_cache .ruff_cache
-	find src tests -type d -name __pycache__ -prune -exec rm -rf {} +
-
-# --- Infra (Terraform, one stack per folder under infra/) ---------------------
-# Two steps on purpose: review the plan, then apply exactly that plan.
-infra-plan:
-	@test -f infra/azure/terraform.tfvars || { echo "error: copy infra/azure/terraform.tfvars.example to terraform.tfvars"; exit 2; }
-	$(TF) init -input=false -upgrade=false >/dev/null
-	$(TF) plan -input=false -out=tfplan
-
-infra-apply:
-	@test -f infra/azure/tfplan || { echo "error: run 'make infra-plan' first"; exit 2; }
-	$(TF) apply -input=false tfplan
-	@rm -f infra/azure/tfplan
-
-# Build or rebuild everything outside the bundle. The plan is shown and applied only after you confirm it.
+# The plan is applied only after you confirm it (never auto-approved).
 up:
-	@$(MAKE) --no-print-directory infra-plan
+	@test -f infra/azure/terraform.tfvars || { echo "error: cp infra/azure/terraform.tfvars.example infra/azure/terraform.tfvars"; exit 2; }
+	@$(TF) init -input=false >/dev/null
+	@$(TF) plan -input=false -out=tfplan
 	@read -p "Apply this plan? [y/N] " ok && [ "$$ok" = y ] || { echo "not applied"; rm -f infra/azure/tfplan; exit 1; }
-	@$(MAKE) --no-print-directory infra-apply
+	@$(TF) apply -input=false tfplan && rm -f infra/azure/tfplan
 	@$(MAKE) --no-print-directory uc
 
 uc:
 	@DBX="$(DBX)" scripts/uc.sh
 
-# --- Bundle -------------------------------------------------------------------
-validate: guard-target
-	$(BUNDLE) validate -t $(TARGET)
-
-deploy: guard-target
-	$(BUNDLE) validate -t $(TARGET)
-	$(BUNDLE) deploy   -t $(TARGET)
-
-start: guard-target
+# Continuous pipelines start on deploy; `run` starts any that are stopped (running ones are left alone).
+demo: guard-target
+	$(BUNDLE) deploy -t $(TARGET)
 	@for p in $(PIPELINES); do $(BUNDLE) run -t $(TARGET) --no-wait $$p >/dev/null 2>&1 && echo "started $$p" || echo "running $$p"; done
-
-demo: deploy start generate
+	@for j in $(GENERATORS); do id=$(call resource_id,jobs,$$j); \
+	  if [ "$$($(active_runs))" = "0" ]; then $(BUNDLE) run -t $(TARGET) --no-wait $$j >/dev/null && echo "started $$j"; else echo "running $$j"; fi; done
 	@echo "dashboard: $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['dashboards']['hl7_latency']['url'])")"
-	@echo "classic RTM clusters take ~9 min to start; latency appears once they're RUNNING. Stop with: make stop $(TARGET)"
 
-generate: guard-target
-	@for j in $(GENERATORS); do $(BUNDLE) run -t $(TARGET) --no-wait $$j; done
-
-# Waits until the runs have actually stopped, so a following `make generate` doesn't queue behind them.
-generate-stop: guard-target
-	@for j in $(GENERATORS); do id=$(call resource_id,jobs,$$j); $(DBX) jobs cancel-all-runs --job-id $$id >/dev/null; \
-	  while [ "$$($(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))')" != "0" ]; do sleep 5; done; \
-	  echo "stopped $$j"; done
-
-# The lakehouse mirror writes the Delta tables the dashboard reads. A full refresh empties them and restarts at the live
-# edge in ~2 minutes; RTM pipelines keep running.
-DELTA_PIPELINES := lakehouse
+# A full refresh of the mirror empties the Delta tables the dashboard reads and restarts them at the live edge.
 clear-data: guard-target
-	@for p in $(DELTA_PIPELINES); do $(DBX) pipelines stop $(call resource_id,pipelines,$$p) >/dev/null; \
-	  $(BUNDLE) run -t $(TARGET) --no-wait --full-refresh-all $$p >/dev/null && echo "cleared $$p"; done
-	@echo "tables refill from live data within ~2 minutes; refresh the dashboard (its own refresh button)"
+	@$(DBX) pipelines stop $(call resource_id,pipelines,lakehouse) >/dev/null
+	@$(BUNDLE) run -t $(TARGET) --no-wait --full-refresh-all lakehouse >/dev/null && echo "cleared; tables refill within ~2 minutes"
 
-# Demo-only: discards checkpoints so streams start at kafka_starting_offsets (latest) instead of
-# resuming. Production should always resume from the checkpoint so no message is skipped.
-reset: guard-target
-	@for p in $(PIPELINES); do $(BUNDLE) run -t $(TARGET) --no-wait --full-refresh-all $$p; done
-
-stop: guard-target generate-stop
+# Waits for the feeds to stop, so a following `make demo` doesn't queue behind them.
+stop: guard-target
+	@for j in $(GENERATORS); do id=$(call resource_id,jobs,$$j); $(DBX) jobs cancel-all-runs --job-id $$id >/dev/null; \
+	  while [ "$$($(active_runs))" != "0" ]; do sleep 5; done; \
+	  echo "stopped $$j"; done
 	@for p in $(PIPELINES); do $(DBX) pipelines stop $(call resource_id,pipelines,$$p) >/dev/null && echo "stopped $$p"; done
 
-destroy: guard-target
-	$(BUNDLE) destroy -t $(TARGET)
-
-# Env words are goals too; make them no-ops.
+# Environment words are goals too; make them no-ops.
 $(ENVS):
 	@:
