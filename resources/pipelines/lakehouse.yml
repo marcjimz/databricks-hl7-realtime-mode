@@ -25,4 +25,3 @@ resources:
         hl7.topics.gold_observations: ${var.hl7_gold_observations_topic}
         hl7.topics.gold_orders: ${var.hl7_gold_orders_topic}
         hl7.topics.prefix: ${var.catalog}.${var.schema}
-        hl7.subscriptions.dir: ${workspace.file_path}/src/subscriptions

@@ -1,4 +1,7 @@
-# Subscriptions (parked)
+# Subscriptions: the earlier SQL-file design (superseded)
+
+**Superseded by runtime subscriptions** ([docs/subscriptions.md](../../docs/subscriptions.md)): rules registered at
+runtime in a Lakebase registry as structured predicates, one hub pipeline for all apps. Kept for reference.
 
 Self-service subscriptions over the gold topics: a SQL (or YAML) rule per subscription, run in Real-Time Mode
 (milliseconds, classic cluster) or micro-batch (seconds, serverless). They were built and measured on the AWS

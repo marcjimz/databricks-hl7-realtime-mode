@@ -3,12 +3,15 @@
 #   make install          local Python env (uv)
 #   make test | lint      unit tests (local Spark) | ruff + terraform fmt
 #
-#   make up               build or rebuild Azure (Terraform plan -> you confirm -> apply), then make uc
+#   make up               build or rebuild Azure (Terraform plan -> you confirm -> apply), then make uc + registry
 #   make uc               create or repair the Unity Catalog catalog and credentials (idempotent)
+#   make registry         create or repair the Lakebase subscription registry and onboard subscriber apps (idempotent)
 #
 #   make demo dev         deploy, start every pipeline and both feeds, print the dashboard URL
 #   make clear-data dev   empty the Delta tables and refill from live data (~2 min; RTM keeps running)
 #   make stop dev         stop the feeds and every pipeline (stops Databricks billing)
+#
+# The Java subscriber app runs on its own (java -jar; its workspace E2E job is its own bundle): src/subscriber/README.md.
 #
 # Your environment lives in infra/azure/terraform.tfvars (gitignored). Auth is the Azure CLI (`az login`) against the
 # workspace in Terraform's outputs, so a rebuilt workspace needs no login or config.
@@ -26,15 +29,15 @@ export DATABRICKS_AUTH_TYPE    ?= azure-cli
 export BUNDLE_VAR_catalog      ?= $(call tf_out,catalog)
 export BUNDLE_VAR_eh_namespace ?= $(call tf_out,eh_namespace)
 
-PIPELINES  := hl7_bronze hl7_silver hl7_gold lakehouse epic_json
+PIPELINES  := hl7_bronze hl7_silver hl7_gold lakehouse epic_json subscription_hub
 GENERATORS := hl7_generator epic_json_generator
 active_runs = $(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))'
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")
 
-.PHONY: help install test lint up uc demo clear-data stop guard-target $(ENVS)
+.PHONY: help install test lint up uc registry demo clear-data stop guard-target $(ENVS)
 
 help:
-	@sed -n '3,14p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
+	@sed -n '3,17p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 
 guard-target:
 	@test -n "$(TARGET)" || { echo "error: name the environment, e.g. 'make demo dev' (one of: $(ENVS))"; exit 2; }
@@ -44,10 +47,11 @@ install:
 
 test:
 	uv run pytest
+	mvn -q -f src/subscriber/pom.xml test
 
 lint:
-	uv run ruff check src tests
-	uv run ruff format --check src tests
+	uv run ruff check src tests infra
+	uv run ruff format --check src tests infra
 	terraform fmt -check -recursive infra
 
 # The plan is applied only after you confirm it (never auto-approved).
@@ -57,10 +61,13 @@ up:
 	@$(TF) plan -input=false -out=tfplan
 	@read -p "Apply this plan? [y/N] " ok && [ "$$ok" = y ] || { echo "not applied"; rm -f infra/azure/tfplan; exit 1; }
 	@$(TF) apply -input=false tfplan && rm -f infra/azure/tfplan
-	@$(MAKE) --no-print-directory uc
+	@$(MAKE) --no-print-directory uc registry
 
 uc:
 	@DBX="$(DBX)" infra/uc.sh
+
+registry:
+	@uv run python infra/registry.py
 
 # Continuous pipelines start on deploy; `run` starts any that are stopped (running ones are left alone).
 demo: guard-target

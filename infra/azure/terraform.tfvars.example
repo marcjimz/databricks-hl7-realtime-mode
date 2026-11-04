@@ -5,5 +5,14 @@ databricks_account_id = "00000000-0000-0000-0000-000000000000"
 metastore_id          = "00000000-0000-0000-0000-000000000000" # existing UC metastore in `location`
 owner                 = "you@example.com"
 prefix                = "hl7rtm" # Event Hubs and storage names are globally unique: make it yours
-location              = "westus2"
+location              = "eastus2"
 catalog               = "hl7_rtm" # created by `make uc`; hubs are named <catalog>.<schema>.<table>
+
+# Subscriber apps (docs/subscriptions.md): each brings its own Databricks service principal.
+# subscriber_apps = {
+#   "lab-alerts" = {
+#     application_id = "00000000-0000-0000-0000-000000000000"
+#     sources        = ["gold_observations"]
+#     fields         = ["patient_id", "observation_cd_desc", "value_num", "units", "abnormal_flag"]
+#   }
+# }

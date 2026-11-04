@@ -32,3 +32,14 @@ dist/
 .idea/
 .vscode/
 .DS_Store
+
+# Local reference docs (not for the repo)
+docs/Databricks_Dynamic_Subscription_Feasibility_Spec_v0_3.md
+
+# Java subscriber: build output and the local config
+src/subscriber/target/
+src/subscriber/subscriber.properties
+src/subscriber/apps/
+
+# Slide deck: ~21 MB of template assets; regenerate or share via Drive instead of committing
+docs/diagrams/*.pptx

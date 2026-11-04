@@ -36,9 +36,11 @@ def test_makefile_and_uc_script_read_existing_outputs():
 UC = (ROOT / "infra/uc.sh").read_text()
 
 
-def test_workspace_managed_resource_group_name_is_not_fixed():
-    """The wipe can leave the old managed RG behind; a fixed name would block the rebuild."""
-    assert not re.search(r"^\s*managed_resource_group_name\s*=", (STACK / "databricks.tf").read_text(), re.M)
+def test_workspace_managed_resource_group_is_named_per_region():
+    """A deleted workspace's managed RG can outlive it. Azure's default name ignores the region, so a rebuild in another
+    region collides with the leftover."""
+    m = re.search(r"^\s*managed_resource_group_name\s*=\s*(.+)$", (STACK / "databricks.tf").read_text(), re.M)
+    assert m and "var.location" in m.group(1)
 
 
 def test_uc_rebinds_a_catalog_left_bound_to_a_deleted_workspace():
