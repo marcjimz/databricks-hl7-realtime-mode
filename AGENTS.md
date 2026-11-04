@@ -170,6 +170,10 @@ docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; 
   service credential, ACCESS granted to its SP only (`subscriber_apps` in Terraform, then `make uc`).
 - **No silent states in the app.** It exits non-zero on a refused or failed rule, an unconfirmed activation, a stopped
   hub (heartbeat), or a non-SP identity. It prints only the revisions it just registered.
+  - **It never skips a match.** Its consumer group resumes from its last commit, so after time away it works through the
+    backlog and reports it as a count ("catching up" / "caught up") before printing live matches. Re-registering an
+    identical rule keeps the revision and prints `(unchanged)`.
+  - **Library logs are at WARN** (`simplelogger.properties`), so the demo output stays readable.
 - **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). Its flows run
   batches concurrently, so the shared registry client serializes access (`tests/test_hub_registry.py`). Use pg8000:
   psycopg[binary] aborted the serverless Python process.
