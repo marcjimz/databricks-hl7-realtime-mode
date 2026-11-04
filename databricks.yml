@@ -7,11 +7,12 @@ bundle:
 include:
   - resources/**/*.yml
 
-# Pipelines only need src/; parked examples and Terraform stay local.
+# Pipelines only need src/; parked examples, Terraform, and the local Java subscriber stay local.
 sync:
   exclude:
     - examples/**
     - infra/**
+    - src/subscriber/**
 
 artifacts:
   hl7rt:
@@ -80,6 +81,17 @@ variables:
   kafka_max_offsets_per_trigger:
     description: Micro-batch cap for the Epic JSON (non-RTM) pipeline.
     default: "50000"
+
+  # Subscription hub (Lakebase registry; infra/registry.py creates it)
+  registry_project:
+    description: Lakebase project holding the subscription registry.
+    default: hl7-subscriptions
+  registry_endpoint:
+    description: Lakebase endpoint the hub connects to.
+    default: projects/${var.registry_project}/branches/production/endpoints/primary
+  registry_database:
+    description: Postgres database with the registry schemas.
+    default: databricks_postgres
 
   # Generators
   generator_rate:

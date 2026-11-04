@@ -17,8 +17,10 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
   every topic ─► the Delta streaming table of the same name (audit, replay, BI) + per-record latency telemetry
 ```
 
-- Layers are **raw → bronze → silver → gold**, each both an RTM Kafka topic and an SDP streaming table. Self-service
-  subscriptions over gold are parked in `examples/subscriptions/` (not deployed, linted, or tested) for a later phase.
+- Layers are **raw → bronze → silver → gold**, each both an RTM Kafka topic and an SDP streaming table.
+- **Subscriptions** over gold: apps register rules at runtime in a Lakebase registry, a micro-batch hub pipeline
+  delivers matches to each app's own hub, and a Java app (`src/subscriber`) shows the client side. See
+  "Subscription rules" and docs/subscriptions.md. The earlier SQL-file design is in `examples/subscriptions/`.
 - Phases 0–5 were built on an AWS workspace (cross-cloud to Event Hubs); the repo now targets one Azure region end
   to end. New work: one branch + one PR per unit, verified on dev before merging.
 
@@ -59,8 +61,11 @@ src/dashboards/       the AI/BI dashboard definition (.lvdash.json)
 infra/azure/          Terraform for everything Azure: workspace (+ metastore assignment), ADLS, access connector,
                       Event Hubs + hubs, RBAC. tfvars/state gitignored (local state).
 infra/uc.sh           idempotent Unity Catalog bootstrap (`make uc`): credentials, external location, catalog
-examples/             not deployed, linted, or tested: subscriptions/ (next phase), aws-cross-cloud/ (phases 0–5 setup)
-tests/                pytest with local Spark (.venv via uv)
+infra/registry.py     idempotent Lakebase registry bootstrap (`make registry`): project, schema, Data API, apps
+src/registry/         the subscription registry: schema, validation, API functions, grants (registry.sql)
+src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), JUnit tests. Not in the wheel or bundle sync.
+examples/             not deployed, linted, or tested: subscriptions/ (earlier SQL-file design), aws-cross-cloud/
+tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
 docs/                 latency results (history in examples/aws-cross-cloud), Epic JSON notes
 ```
 
@@ -78,8 +83,11 @@ docs/                 latency results (history in examples/aws-cross-cloud), Epi
 - **Replaying a wipe (verified 2026-11-01, real Sunday wipe).** `make up` handled stale Terraform state by itself
   (resources seen as deleted, 18 recreated, metastore assignment replaced). Three things needed handling, and
   `tests/test_infra.py` guards each:
-  - **The old managed resource group can survive the wipe.** Don't pin `managed_resource_group_name`; Azure generates a
-    unique one.
+  - **The old managed resource group can survive the wipe or a workspace delete.** Azure's default name
+    (`databricks-rg-<resource group>`) is fixed and ignores the region, so the westus2 → eastus2 move failed with
+    "Resource group already exists in location 'westus2'". The name is `databricks-rg-<prefix>-<location>`. A leftover in
+    the *same* region still blocks; deleting the failed workspace (`az databricks workspace delete`) removes its managed
+    RG.
   - **An ISOLATED catalog stays bound to the deleted workspace.** The new workspace can't see it, but create says it
     exists. `uc.sh` adds a binding for the new workspace, then drops and recreates the catalog.
   - **A recreated access connector keeps its resource ID but gets a new managed identity.** Unity Catalog fails with
@@ -140,8 +148,37 @@ docs/                 latency results (history in examples/aws-cross-cloud), Epi
   - Size it by namespace CPU (`az monitor metrics` NamespaceCpuUsage). In westus2, 1 PU ran at ~83% and every hop's
     tail grew. 4 PU (the default) also halves the namespace-wide ~300 ms stalls seen at 2 PU.
   - Capacity wasn't the issue for Phase 3's partition stall (client config was), and it doesn't fix hung connections.
-- **Workspace, Event Hubs, and storage share one Azure region** (`location`, default westus2, which has the shared sandbox
-  metastore). Phases 0–5 ran AWS us-east-1 → Azure eastus, crossing clouds on every hop (~8 ms produce round trip).
+- **Workspace, Event Hubs, and storage share one Azure region** (`location` + `metastore_id`, default eastus2 with
+  `fevm-shared-sandbox-eastus2`). Phases 0–5 ran AWS us-east-1 → Azure eastus, crossing clouds on every hop (~8 ms
+  produce round trip). The latency results were measured in westus2.
+  - **A region's features depend on its control-plane shard, not just the region.** New westus2 workspaces land on the
+    new `westus2-c3` shard (`dig <workspace host>`), where Lakebase Autoscaling was still off (Nov 2026: "Lakebase
+    Autoscaling is not enabled in this region"), while older westus2 workspaces have it. We moved to eastus2. Check
+    the features you need on a fresh workspace before committing to a region.
+
+## Subscription rules (see docs/subscriptions.md)
+
+- **Rules are structured predicates, never SQL text.** The registry validates them when written (trigger, so direct SQL
+  too) and answers ACCEPTED or a domain error in the same call. The hub builds Spark filters from `F.col` and literals
+  (`hl7rt.subscriptions.compile_predicate`). Don't add a path that executes app-written SQL: in the spike, a
+  `(SELECT ...)` inside a SQL predicate parsed and ran with the hub's permissions. Joins, subqueries, aggregates, and
+  cross-event logic become new platform-built gold sources, not app rules.
+- **Filtering on a column is reading it.** Predicate fields must be in the app's granted `fields`, like output fields.
+- **Identity comes from the Data API, not the request.** Owner = `current_user` (the SP's Postgres role); RLS keeps apps
+  apart; destination = the app's binding. `tests/test_registry.py` covers spoofing, direct writes, and cross-app access.
+- **Each app reads only its own hub:** its own access connector with Data Receiver on that hub, behind its own UC
+  service credential, ACCESS granted to its SP only (`subscriber_apps` in Terraform, then `make uc`).
+- **No silent states in the app.** It exits non-zero on a refused or failed rule, an unconfirmed activation, a stopped
+  hub (heartbeat), or a non-SP identity. It prints only the revisions it just registered.
+- **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). Its flows run
+  batches concurrently, so the shared registry client serializes access (`tests/test_hub_registry.py`). Use pg8000:
+  psycopg[binary] aborted the serverless Python process.
+- **Lakebase Data API accepts the SP's Databricks OAuth token** (no database credential needed for apps). Enable it by
+  API (`POST .../databases/<db>/data-api`), exposing `subscription_api` only.
+- **The Databricks SDK lets `DATABRICKS_*` environment variables override a profile.** The app pins
+  `auth_type=oauth-m2m` from its profile and refuses to run as anything but a service principal.
+- **Maven Central is blocked on the Databricks network.** Use the internal mirror in `~/.m2/settings.xml`
+  (`maven-proxy.dev.databricks.com`). Keep it out of the repo: customers won't have it.
 
 ## Data contracts
 
@@ -156,8 +193,7 @@ docs/                 latency results (history in examples/aws-cross-cloud), Epi
   `NM`), orders (ORM). One flow writes all three: build an array of `(topic, value)` per silver record and
   `explode` it. Gold JSON uses `to_json(..., {"ignoreNullFields": "false"})` so every record has the full shape
   subscribers code against. (Spark's default drops null fields.) Change a gold schema only additively.
-- **Gold tables carry `_meta`** (record_id, gold_ts, raw_ts), a stable record identity for downstream consumers (the
-  parked subscriptions select it).
+- **Gold tables carry `_meta`** (record_id, gold_ts, raw_ts), a stable record identity for downstream consumers.
 - Each hot-path record carries the upstream broker timestamps (`raw_ts`, `bronze_ts`, ...). The lakehouse mirror
   (`hl7rt.lakehouse`) turns them into `hop_ms` / `e2e_ms` columns.
 

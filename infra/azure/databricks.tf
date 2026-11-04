@@ -4,8 +4,10 @@ resource "azurerm_databricks_workspace" "this" {
   resource_group_name = azurerm_resource_group.this.name
   sku                 = "premium" # Unity Catalog
   tags                = local.tags
-  # No fixed managed_resource_group_name: the sandbox wipe can leave the old managed RG behind, and a fixed name would
-  # then block the rebuild. Azure generates a unique one per workspace.
+  # Azure's default managed RG name (databricks-rg-<resource group>) ignores the region. A deleted workspace's managed
+  # RG can outlive it, and a rebuild in another region then fails ("Resource group already exists in location ...").
+  # Naming it per region keeps a region move from colliding with a leftover.
+  managed_resource_group_name = "databricks-rg-${var.prefix}-${var.location}"
 }
 
 # Attach the workspace to the account's existing Unity Catalog metastore in this region.

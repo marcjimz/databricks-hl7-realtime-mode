@@ -8,6 +8,8 @@
 #   external location  <catalog>_root      -> the ADLS container
 #   catalog            <catalog>           -> managed storage under that location, bound to this workspace only
 #   service credential <catalog>_eventhubs -> the same connector (Event Hubs Data Sender + Receiver)
+#   service credential sub_<app>_eventhubs -> each subscriber app's own connector (Data Receiver on its hub only),
+#                                             ACCESS granted to that app's service principal only
 # A catalog built for an earlier workspace (property hl7.workspace_id) is dropped and recreated: its tables belonged
 # to that workspace's pipelines and their storage is gone.
 set -euo pipefail
@@ -21,12 +23,14 @@ CATALOG=${CATALOG:-$(tf catalog)}  # override only for a scratch test
 DBX=${DBX:-databricks}
 
 json() { python3 -c "import sys,json; d=json.load(sys.stdin); print(eval(sys.argv[1]) or '')" "$1" 2>/dev/null; }
-identity="{\"azure_managed_identity\":{\"access_connector_id\":\"$CONNECTOR\"}}"
 
-# credential NAME PURPOSE: create, or repoint it. A rebuilt connector keeps its resource ID but gets a new identity, which
-# Unity Catalog only picks up on update. So the comment records the identity, and a mismatch triggers the update.
+# credential NAME PURPOSE [CONNECTOR PRINCIPAL]: create, or repoint it (default: the main connector). A rebuilt connector
+# keeps its resource ID but gets a new identity, which Unity Catalog only picks up on update. So the comment records the
+# identity, and a mismatch triggers the update.
 credential() {
-  local note="access connector identity $PRINCIPAL" current
+  local connector=${3:-$CONNECTOR} principal=${4:-$PRINCIPAL}
+  local identity="{\"azure_managed_identity\":{\"access_connector_id\":\"$connector\"}}"
+  local note="access connector identity $principal" current
   if current=$($DBX credentials get-credential "$1" -o json 2>/dev/null | json "d.get('comment')"); then
     if [ "$current" = "$note" ]; then
       echo "ok       $2 credential $1"
@@ -87,3 +91,15 @@ fi
 
 credential "${CATALOG}_eventhubs" SERVICE
 echo "pipelines and generators reach Event Hubs with service credential ${CATALOG}_eventhubs (you own it)"
+
+# Subscriber apps (terraform var subscriber_apps): one credential per app, usable only by that app's service principal.
+terraform -chdir=infra/azure output -json subscriber_apps | python3 -c '
+import sys, json
+for app, a in json.load(sys.stdin).items():
+    print(app, a["application_id"], a["connector_id"], a["connector_principal_id"])' |
+while read -r app sp connector principal; do
+  name="sub_${app//-/_}_eventhubs"
+  credential "$name" SERVICE "$connector" "$principal"
+  $DBX grants update credential "$name" --json "{\"changes\":[{\"principal\":\"$sp\",\"add\":[\"ACCESS\"]}]}" >/dev/null
+  echo "ok       ACCESS on $name for $app ($sp)"
+done

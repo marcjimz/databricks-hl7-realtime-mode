@@ -14,14 +14,14 @@ variable "databricks_account_id" {
 }
 
 variable "metastore_id" {
-  description = "Existing Unity Catalog metastore in var.location to assign the workspace to (e.g. fevm-shared-sandbox-westus2)."
+  description = "Existing Unity Catalog metastore in var.location to assign the workspace to (e.g. fevm-shared-sandbox-eastus2)."
   type        = string
 }
 
 variable "location" {
   description = "One region for the workspace, Event Hubs, and storage (same region keeps every hop local)."
   type        = string
-  default     = "westus2"
+  default     = "eastus2"
 }
 
 variable "prefix" {
@@ -85,4 +85,18 @@ variable "tables" {
     "gold_observations",
     "gold_orders",
   ]
+}
+
+variable "subscriber_apps" {
+  description = "Subscriber apps: name -> its Databricks service principal's application ID and what it may read (gold sources and columns). Each gets its own hub and a hub-scoped identity (subscribers.tf)."
+  type = map(object({
+    application_id = string
+    sources        = list(string)
+    fields         = list(string)
+  }))
+  default = {}
+  validation {
+    condition     = alltrue([for k in keys(var.subscriber_apps) : can(regex("^[a-z0-9][a-z0-9-]{0,40}$", k))])
+    error_message = "Subscriber app names are lowercase letters, digits, and hyphens."
+  }
 }

@@ -33,3 +33,17 @@ output "catalog" {
   description = "Unity Catalog catalog (bundle variable catalog)."
   value       = var.catalog
 }
+
+output "subscriber_apps" {
+  description = "Per subscriber app: SP application ID, its hub, its connector (+ identity), and its grants. Read by make uc / registry."
+  value = {
+    for k, v in var.subscriber_apps : k => {
+      application_id         = v.application_id
+      sources                = v.sources
+      fields                 = v.fields
+      hub                    = azurerm_eventhub.subscriber[k].name
+      connector_id           = azurerm_databricks_access_connector.subscriber[k].id
+      connector_principal_id = azurerm_databricks_access_connector.subscriber[k].identity[0].principal_id
+    }
+  }
+}

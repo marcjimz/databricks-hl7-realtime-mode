@@ -1,0 +1,28 @@
+# Subscription hub — gold topics -> each subscriber app's own topic, by rules registered at runtime in Lakebase.
+# Micro-batch (NOT Real-Time Mode): it needs foreachBatch to apply a changing rule set, which RTM doesn't support.
+# foreach_batch_sink is Public Preview, so this pipeline (only) runs on the PREVIEW channel.
+resources:
+  pipelines:
+    subscription_hub:
+      name: hl7rt-${bundle.target}-subscription-hub
+      catalog: ${var.catalog}
+      schema: ${resources.schemas.hl7.name}
+      serverless: true
+      continuous: true
+      channel: PREVIEW
+      root_path: ../../src
+      libraries:
+        - glob:
+            include: ../../src/pipelines/subscription_hub/**
+      environment:
+        dependencies:
+          - pg8000>=1.31        # pure Python; psycopg[binary] aborted the serverless Python process
+          - databricks-sdk>=0.159  # Lakebase endpoint + database credential APIs
+      configuration:
+        hl7.eh.namespace: ${var.eh_namespace}
+        hl7.eh.service_credential: ${var.eh_service_credential}
+        hl7.registry.endpoint: ${var.registry_endpoint}
+        hl7.registry.database: ${var.registry_database}
+        hl7.topics.gold_encounters: ${var.hl7_gold_encounters_topic}
+        hl7.topics.gold_observations: ${var.hl7_gold_observations_topic}
+        hl7.topics.gold_orders: ${var.hl7_gold_orders_topic}
