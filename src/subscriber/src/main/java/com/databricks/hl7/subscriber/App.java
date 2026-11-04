@@ -35,6 +35,7 @@ public final class App {
     private static final Duration ACTIVATION_TIMEOUT = Duration.ofMinutes(2);
     private static final Duration HUB_STALE_AFTER = Duration.ofMinutes(2);
     private static final Duration HEALTH_CHECK_EVERY = Duration.ofSeconds(30);
+    private static final Duration BACKLOG_AFTER = Duration.ofMinutes(2);
 
     /**
      * java -jar hl7-subscriber.jar [file.properties] [key=value ...] [--duration=PT5M] [--e2e]
@@ -65,14 +66,17 @@ public final class App {
         Map<String, Integer> current = new LinkedHashMap<>();   // subscriptionId -> revision
         String topic = null;
         int refused = 0;
+        Map<String, Integer> before = registered.subscriptions().stream().filter(RegistryClient.Status::enabled)
+                .collect(Collectors.toMap(RegistryClient.Status::name, RegistryClient.Status::revision));
         for (Subscription s : plan.subscribe()) {
             try {
                 var r = registry.subscribe(s);
                 accepted.put(r.name(), r.revision());
                 current.put(r.subscriptionId(), r.revision());
                 topic = r.destination();
-                System.out.printf("subscribed  %-22s revision %d %s%n            %s%n", r.name(), r.revision(), r.state(),
-                        r.predicateSql());
+                boolean unchanged = Integer.valueOf(r.revision()).equals(before.get(r.name()));
+                System.out.printf("subscribed  %-22s revision %d %s%s%n            %s%n", r.name(), r.revision(), r.state(),
+                        unchanged ? " (unchanged)" : "", r.predicateSql());
             } catch (RegistryClient.RegistryException e) {
                 refused++;
                 System.out.printf("refused     %-22s %s%n", s.name(), e.getMessage());
@@ -99,19 +103,47 @@ public final class App {
             Instant nextCheck = Instant.now().plus(HEALTH_CHECK_EVERY);
             Instant nextSkipReport = Instant.now().plusSeconds(10);
             long older = 0;
+            // The consumer group resumes where it last committed (it never skips), so after time away the app first
+            // works through the backlog: counted, with progress, rather than printed line by line.
+            boolean live = false;
+            long replayed = 0;
+            String replayFrom = null;
+            String replayAt = null;
             while (Instant.now().isBefore(stopAt)) {
                 for (ConsumerRecord<String, String> rec : consumer.poll(Duration.ofSeconds(1))) {
                     Notification n = Notification.parse(rec.value());
                     if (!n.isCurrent(current)) {
                         older++;
-                    } else if (seen.add(n.notificationId())) { // at-least-once transport: deduplicate on the stable ID
-                        System.out.printf("%s  %-22s rev %d  %s%n", n.goldTs(), n.subscription(), n.revision(), n.payload());
+                        continue;
                     }
+                    if (!seen.add(n.notificationId())) continue; // at-least-once transport: deduplicate on the stable ID
                     if (seen.size() > 100_000) seen.clear();
+                    if (!live && n.isBacklog(Instant.now(), BACKLOG_AFTER)) {
+                        if (replayFrom == null) {
+                            replayFrom = n.goldTs();
+                            System.out.printf("catching up from %s, where consumer group %s last stopped%n", replayFrom,
+                                    cfg.groupId());
+                        }
+                        replayed++;
+                        replayAt = n.goldTs();
+                        continue;
+                    }
+                    if (!live && replayFrom != null) {
+                        System.out.printf("caught up   %d backlog notifications (%s to %s); live from here%n", replayed,
+                                replayFrom, replayAt);
+                    }
+                    live = true;
+                    System.out.printf("%s  %-22s rev %d  %s%n", n.goldTs(), n.subscription(), n.revision(), n.payload());
                 }
-                if (older > 0 && Instant.now().isAfter(nextSkipReport)) {
-                    System.out.printf("skipped     %d notifications for earlier revisions (backlog on the hub)%n", older);
-                    older = 0;
+                if (Instant.now().isAfter(nextSkipReport)) {
+                    if (!live && replayFrom != null) {
+                        System.out.printf("catching up %d so far, at %s%n", replayed, replayAt);
+                    }
+                    if (older > 0) {
+                        System.out.printf("skipped     %d notifications for other subscriptions or earlier revisions%n",
+                                older);
+                        older = 0;
+                    }
                     nextSkipReport = Instant.now().plusSeconds(10);
                 }
                 consumer.commitSync(); // after handling: a crash replays, never skips
@@ -149,6 +181,7 @@ public final class App {
             throws InterruptedException {
         Instant deadline = Instant.now().plus(ACTIVATION_TIMEOUT);
         Set<String> reported = new HashSet<>();
+        boolean waitingForHub = false;
         while (true) {
             var listing = registry.list();
             for (var s : listing.subscriptions()) {
@@ -160,10 +193,15 @@ public final class App {
             }
             var result = Activation.check(accepted, listing.subscriptions());
             if (result.state() == Activation.State.READY) {
-                // ACTIVE can be left over from an earlier run: also require the hub to be processing right now.
+                // ACTIVE can be left over from an earlier run: also require the hub to be processing right now. A hub
+                // that just restarted reports ACTIVE before its first heartbeat, so wait (up to the deadline) for one.
                 var stale = Activation.staleSources(listing.hub(), sources, Instant.now(), HUB_STALE_AFTER);
                 if (stale.isEmpty()) return;
-                exit(4, "the hub isn't processing " + stale + ": start the subscription_hub pipeline (make demo dev)");
+                if (!waitingForHub) {
+                    System.out.printf("waiting     the hub hasn't finished a batch of %s in %d minutes; waiting up to "
+                            + "%d minutes%n", stale, HUB_STALE_AFTER.toMinutes(), ACTIVATION_TIMEOUT.toMinutes());
+                    waitingForHub = true;
+                }
             }
             if (result.state() == Activation.State.FAILED) exit(3, "the hub could not run: " + result.problems());
             if (Instant.now().isAfter(deadline)) {

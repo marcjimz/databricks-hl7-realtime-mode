@@ -54,8 +54,10 @@ The app stops with a reason instead of listening quietly:
 | 5 | It signed in as something other than a service principal |
 | 6 | The registry refused the identity (app not onboarded) |
 
-While listening, it prints only notifications for the exact subscription revisions it just registered. Earlier
-revisions' matches still on the hub are counted as "skipped". Every 30 seconds it checks the hub's heartbeat and
+While listening, it prints only notifications for the exact subscription revisions it just registered. Matches for
+earlier revisions or other subscriptions still on the hub are counted as "skipped". Its consumer group resumes where it
+last committed, so after time away it first works through the backlog. It reports that backlog as a count ("catching
+up", then "caught up") rather than line by line, then prints live matches. Every 30 seconds it checks the hub's heartbeat and
 warns if a source hasn't been processed for 2 minutes. Notifications carry a stable `notificationId`, so redeliveries
 (the Kafka sink is at-least-once) are deduplicated.
 

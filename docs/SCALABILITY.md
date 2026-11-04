@@ -126,7 +126,7 @@ sets must be equal: no missing match, no extra one, nothing for a cancelled or s
 | E6 | Database token expiry (hourly) during a long run | hub reconnects; no gap in heartbeat > 2 min |
 | E7 | App crash between poll and commit | replays its uncommitted records; app dedupes |
 | E8 | Event Hubs throttling (exceed PU) | hub backs off; the heartbeat keeps advancing; app warns if not |
-| E9 | Rebuild (`make up` after a wipe) | E2E 19/19 PASS on the new environment |
+| E9 | Rebuild (`make up` after a wipe) | E2E 20/20 PASS on the new environment |
 
 ## How elastic scaling works, per component
 
@@ -144,3 +144,71 @@ sets must be equal: no missing match, no extra one, nothing for a cancelled or s
 3. **P1 and P6**, then the single-pass hub if P1 misses the bar.
 4. **P2–P5 and E1–E9**, then the 12-hour soak (P7).
 5. **Results** in `docs/latency.md`, with p50/p99/max and what wasn't verified.
+
+## Implementation plan (agreed, not built yet)
+
+**Where it runs:** on the dev environment, not a separate stack, with dedicated perf hubs. Don't run scale tests during
+RTM latency soaks.
+**Identities:** three real service principals: `sp-hl7-realtime-demo` plus two more (A, B, C).
+
+```
+subscription_scale job (platform bundle, serverless, runs as the deployer)
+  seed     virtual apps = NOLOGIN Postgres roles perf_NNNN in `subscriber`, onboarded in `apps`, routed to perf hubs.
+           Rules are registered by SET ROLE perf_NNNN + subscription_api.subscribe: the real trigger and RLS, no bypass.
+  load     optional: an extra hl7-generator task at the scenario's rate, on top of the demo feed (no pipeline restarts)
+  churn    optional: revise k rules per minute as their owners (P4)
+  measure  after warm-up, over a window [t0, t1]: hub_progress percentiles, delivery latency, correctness vs an oracle
+  clean    run_if ALL_DONE: drop the perf subscriptions, apps rows, and roles
+results → Delta <catalog>.<schema>.scale_results (run_id, scenario, metric, p50, p99, max, bar, pass), also printed.
+          The task exits non-zero if any bar fails.
+```
+
+1. **Hub instrumentation**
+   - A platform-only `subscription_registry.hub_progress` table: source, batch_id, started_at, rules, input_rows,
+     refresh_ms, batch_ms.
+   - `Registry.progress()` writes it, under the existing lock.
+   - The hub times each batch and counts its input rows.
+2. **Per-app quota:** an `apps.max_subscriptions` column (default 100) and a `QUOTA_EXCEEDED` error in `stamp()`.
+3. **Perf hubs:** a Terraform variable `perf_hubs` (default 0) creates `<catalog>.subscribers.perf-<k>`, with
+   4 partitions each and no app connector. Only the platform reads them. Premium bills per PU, so these add no cost.
+4. **`hl7rt.scale`** (unit-tested), with a console script `hl7-scale` (`seed|churn|measure|clean`):
+   - **Synthetic rules with an exact match ratio:** patient MRNs are uniform, so `patient_id ends_with "7"`, `"17"`,
+     and `"117"` match 10%, 1%, and 0.1%. Each rule combines that with realistic `eq`, `ge`, and `in` clauses.
+   - **Scenarios:**
+
+     | Test | Scenarios |
+     |---|---|
+     | P1 | p1-10 … p1-10000, and p1-1000-m10 |
+     | P2 | p2-1000-r1000 and p2-1000-r5000 |
+     | P4 | p4-churn-100 |
+     | P6 | p6-rows-1m |
+
+   - **Correctness oracle:**
+     1. A batch read of the gold topic over the window applies each ACTIVE revision, independent of streaming,
+        batching, routing, and redelivery.
+     2. It compares the set {(subscriptionId, revision, sourcePartition, sourceOffset)} with the delivered
+        notifications, deduplicated by `notificationId`.
+     3. A run passes only with 0 missing and 0 extra. It also reports the duplicate rate.
+   - **Delivery latency:** the app hub's broker time minus `gold_ts`.
+   - **Activation time:** `status.observed_at` minus `subscriptions.updated_at`.
+5. **Job `resources/jobs/subscription_scale.yml`:** `databricks bundle run subscription_scale --params scenario=p1-1000`.
+6. **Semantics tests in CI** (local PostgreSQL + Spark):
+   - **Differential:** Postgres `render()` and Spark `compile_predicate` select the same rows.
+   - **Fuzzing:** with `hypothesis`, every input gives ACCEPTED or a domain error, never an internal error.
+   - **Concurrency:** 100 concurrent revisions with no lost update.
+7. **Live isolation suite** (Java, real SPs):
+   - `java -jar … --isolation` runs as app X against every other onboarded app, after each has registered an
+     `iso-canary`.
+   - It covers S1, S2, S5, S7–S10, and S13, and prints a PASS/FAIL table.
+   - Looping over the three apps covers all 6 ordered pairs.
+   - S12 (revocation) becomes a timed runbook step.
+8. **Docs:** a "Run it" section, a Results table filled from the first runs, and AGENTS.md rules.
+
+**Out of scope until a measurement calls for it:** the single-pass or indexed hub (only if P1 misses its bar), a
+dedicated hub service principal, workload identity, P5 at 500 apps, and the 12-hour soak (P7).
+
+**Prerequisites (your steps):**
+1. Create the two service principals and their secrets. You can do it from the CLI: `databricks service-principals
+   create`, then `databricks service-principal-secrets-proxy create <id>`, writing the secret straight into a
+   `~/.databrickscfg` profile named after the app.
+2. Add both to `subscriber_apps`, set `perf_hubs = 4`, and run `make up`.

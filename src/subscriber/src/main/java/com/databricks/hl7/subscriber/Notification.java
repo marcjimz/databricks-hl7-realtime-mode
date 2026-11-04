@@ -20,6 +20,18 @@ public record Notification(String notificationId, String subscriptionId, String 
         return Integer.valueOf(revision).equals(registered.get(subscriptionId));
     }
 
+    /**
+     * True if its gold record is older than `after`: the consumer group is resuming from where it last stopped (it never
+     * skips), not reading live data.
+     */
+    public boolean isBacklog(java.time.Instant now, java.time.Duration after) {
+        try {
+            return java.time.Instant.parse(goldTs).isBefore(now.minus(after));
+        } catch (java.time.format.DateTimeParseException e) {
+            return false;
+        }
+    }
+
     public static Notification parse(String value) {
         JsonNode n;
         try {

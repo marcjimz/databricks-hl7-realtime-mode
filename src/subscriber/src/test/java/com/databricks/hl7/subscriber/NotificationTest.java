@@ -33,6 +33,17 @@ class NotificationTest {
     }
 
     @Test
+    void isBacklogWhenItsGoldRecordIsOld() {
+        var n = Notification.parse("{\"notificationId\":\"n\",\"subscriptionId\":\"s\",\"revision\":1,"
+                + "\"gold_ts\":\"2026-11-03T12:00:00.123Z\",\"payload\":{}}");
+        var now = java.time.Instant.parse("2026-11-03T12:05:00Z");
+
+        assertEquals(true, n.isBacklog(now, java.time.Duration.ofMinutes(2)));
+        assertEquals(false, n.isBacklog(now, java.time.Duration.ofMinutes(10)));
+        assertEquals(false, parse("s", 1).isBacklog(now, java.time.Duration.ofMinutes(2)), "no gold_ts: unknown, not old");
+    }
+
+    @Test
     void rejectsARecordWithoutIdentity() {
         assertThrows(IllegalArgumentException.class, () -> Notification.parse("{\"payload\":{}}"));
     }
