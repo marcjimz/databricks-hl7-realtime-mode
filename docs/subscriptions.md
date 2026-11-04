@@ -107,18 +107,56 @@ Sunday wipe.
    - **`make uc`:** the UC service credential `sub_my_app_eventhubs`, with ACCESS granted to the SP.
    - **`make registry`:** the Lakebase project and registry if missing, the SP's Postgres role, and its binding
      (hub, sources, fields). It prints `registry.url` and `registry.endpoint` for step 4.
-3. **Add the SP's profile** to `~/.databrickscfg`, then `chmod 600 ~/.databrickscfg`:
+3. **Add the SP's profile** to `~/.databrickscfg`, named after the app, then `chmod 600 ~/.databrickscfg`:
    ```ini
    [my-app]
    host          = https://<workspace host>
    client_id     = <the SP's application ID>
    client_secret = <the secret from step 1>
    ```
-4. **Configure the app:**
+4. **Check it end to end:**
    ```bash
-   cd src/subscriber
-   cp subscriber.properties.example subscriber.properties   # gitignored; fill in the values `make registry` printed
+   cd src/subscriber && mvn -q package
+   java -jar target/hl7-subscriber.jar --e2e      # 20 checks, PASS/FAIL table, exit 1 on any failure
    ```
+   `make registry` wrote the app's settings to `src/subscriber/apps/<app>.properties` (gitignored, no secrets). It
+   rewrites them on every run, because the registry URL changes when the workspace is rebuilt. With a different
+   profile name, set `databricks.profile` in a `subscriber.properties` of your own (see the `.example`).
+
+## End-to-end checks
+
+`--e2e` runs every check below against the live system, as the app's service principal. It uses its own `e2e-*`
+subscriptions and consumer group, cleans up after itself, and exits 1 if any check fails. The same jar runs it in
+the workspace as a serverless job, as the same service principal, with no secret:
+`databricks bundle deploy && databricks bundle run e2e` (from `src/subscriber`). The deployer needs the **Service Principal: User** role on that SP to
+bind the job's `run_as`.
+
+| # | Check | Input | Expected |
+|---|---|---|---|
+| 1 | Sign in | the profile (or the job's identity) | a service principal |
+| 2 | Own Event Hubs credential | `sub_<app>_eventhubs` | token issued |
+| 3 | Another credential | `<catalog>_eventhubs` (the hub's) | denied (no ACCESS) |
+| 4 | Read a hub that isn't this app's | a gold topic | TopicAuthorizationException |
+| 5 | Write to its own hub (forge a notification) | `<catalog>.subscribers.<app>` | TopicAuthorizationException |
+| 6 | Output field not granted | fields include `msg_sending_facility` | FIELDS_DENIED |
+| 7 | Filter on a field not granted | `msg_sending_facility = 'NORTH'` | FIELD_DENIED |
+| 8 | Source not granted | `gold_encounters` | SOURCE_DENIED |
+| 9 | Unknown field | `value_numm > 6` | FIELD_NOT_IN_SOURCE |
+| 10 | Wrong value type | `value_num = "high"` | TYPE_MISMATCH |
+| 11 | SQL text instead of a predicate | `value_num > (SELECT max(...) FROM <gold topic>)` | PREDICATE_INVALID |
+| 12 | Cancel a subscription it doesn't have | `e2e-does-not-exist` | NOT_FOUND_OR_INACCESSIBLE |
+| 13 | Register | potassium ≥ 6.5, fields `patient_id, value_num` | ACCEPTED, with the SQL rendering |
+| 14 | Hub runs it | that revision | ACTIVE |
+| 15 | Notification on its own hub | | exactly those fields, value ≥ 6.5 |
+| 16 | Same rule again | identical definition | same revision |
+| 17 | Change the rule | ≥ 7.0, add `units` | next revision ACCEPTED, then ACTIVE |
+| 18 | Notification reflects the change | | new revision, new fields, value ≥ 7.0 |
+| 19 | Cancel | `unsubscribe` | CANCELLED by the hub |
+| 20 | Hub heartbeat | `gold_observations` | a batch within 2 minutes |
+
+Cross-app cases (another app reading, cancelling, or spoofing your rows) need a second service principal live. Today
+they run against a real PostgreSQL in `tests/test_registry.py`; [SCALABILITY.md](SCALABILITY.md) plans the
+multi-SP suite.
 
 To revoke an app, remove it from `subscriber_apps` and run `make up`. `make registry` deletes its binding, so it
 can't subscribe, and the hub drops its rules at the next batch. Terraform deletes its hub and connector.

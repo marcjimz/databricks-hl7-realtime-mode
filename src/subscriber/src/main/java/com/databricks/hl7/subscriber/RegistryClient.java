@@ -89,9 +89,14 @@ public final class RegistryClient {
     }
 
     public Receipt subscribe(Subscription s) {
-        ObjectNode body = JSON.createObjectNode().put("p_name", s.name()).put("p_source", s.source());
-        body.set("p_predicate", s.where().toJson());
-        body.putArray("p_fields").addAll(s.fields().stream().map(JSON.getNodeFactory()::textNode).toList());
+        return subscribe(s.name(), s.source(), s.where().toJson(), s.fields());
+    }
+
+    /** Sends any predicate JSON as-is (the E2E checks use it to send what the builder can't, such as SQL text). */
+    Receipt subscribe(String name, String source, JsonNode predicate, List<String> fields) {
+        ObjectNode body = JSON.createObjectNode().put("p_name", name).put("p_source", source);
+        body.set("p_predicate", predicate);
+        body.putArray("p_fields").addAll(fields.stream().map(JSON.getNodeFactory()::textNode).toList());
         JsonNode r = call("subscribe", body);
         return new Receipt(r.path("subscriptionId").asText(), r.path("name").asText(), r.path("revision").asInt(),
                 r.path("destination").asText(), r.path("state").asText(), r.path("predicateSql").asText());

@@ -34,6 +34,11 @@ output "catalog" {
   value       = var.catalog
 }
 
+output "schema" {
+  description = "Schema of the hot-path tables and topics (bundle variable schema)."
+  value       = var.schema
+}
+
 output "subscriber_apps" {
   description = "Per subscriber app: SP application ID, its hub, its connector (+ identity), and its grants. Read by make uc / registry."
   value = {

@@ -7,6 +7,8 @@
   subscriber apps   terraform var subscriber_apps: a Postgres role per app SP, member of `subscriber`, usable by the
                     Data API, plus its binding (hub, sources, fields). Apps removed from Terraform lose their binding,
                     so they can't subscribe and the hub stops serving their rules.
+  app settings      src/subscriber/apps/<app>.properties (gitignored) for the Java app: the registry URL changes when
+                    the workspace is rebuilt, so this is rewritten every run. The profile name defaults to the app name.
 
 Runs as you (the project owner), authenticated like the rest of the Makefile (DATABRICKS_HOST + Azure CLI).
 """
@@ -108,8 +110,46 @@ def main():
     for (gone,) in removed:
         print(f"removed  app {gone} (no longer in subscriber_apps)")
 
-    print(f"\nregistry.url      = {status.get('url', '')}")
-    print(f"registry.endpoint = {ENDPOINT}")
+    url = status.get("url", "")
+    ns, catalog, schema = tf_output("eh_namespace"), tf_output("catalog"), tf_output("schema")
+    out = ROOT / "src/subscriber/apps"
+    out.mkdir(exist_ok=True)
+    for name in apps:
+        (out / f"{name}.properties").write_text(
+            "# Written by `make registry` (rewritten every run). No secrets: the profile holds the SP's credentials.\n"
+            f"databricks.profile   = {name}\n"
+            f"registry.url         = {url}\n"
+            f"registry.endpoint    = {ENDPOINT}\n"
+            f"eventhubs.namespace  = {ns}\n"
+            f"eventhubs.credential = sub_{name.replace('-', '_')}_eventhubs\n"
+            "# E2E checks (--e2e): both must be refused to this app.\n"
+            f"e2e.forbidden_credential = {catalog}_eventhubs\n"
+            f"e2e.forbidden_topic      = {catalog}.{schema}.gold_observations\n"
+            f"e2e.own_topic            = {apps[name]['hub']}\n"
+        )
+        print(f"wrote    src/subscriber/apps/{name}.properties")
+    # The subscriber bundle (src/subscriber/databricks.yml, the workspace E2E job) for the first app.
+    if apps:
+        name, a = sorted(apps.items())[0]
+        overrides = ROOT / "src/subscriber/.databricks/bundle/dev/variable-overrides.json"
+        overrides.parent.mkdir(parents=True, exist_ok=True)
+        overrides.write_text(
+            json.dumps(
+                {
+                    "app": name,
+                    "app_id": a["application_id"],
+                    "credential": f"sub_{name.replace('-', '_')}_eventhubs",
+                    "registry_url": url,
+                    "registry_endpoint": ENDPOINT,
+                    "eh_namespace": ns,
+                    "forbidden_credential": f"{catalog}_eventhubs",
+                    "forbidden_topic": f"{catalog}.{schema}.gold_observations",
+                    "own_topic": a["hub"],
+                },
+                indent=2,
+            )
+        )
+        print(f"wrote    src/subscriber/.databricks/bundle/dev/variable-overrides.json ({name})")
 
 
 if __name__ == "__main__":

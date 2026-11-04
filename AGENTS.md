@@ -66,7 +66,7 @@ src/registry/         the subscription registry: schema, validation, API functio
 src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), JUnit tests. Not in the wheel or bundle sync.
 examples/             not deployed, linted, or tested: subscriptions/ (earlier SQL-file design), aws-cross-cloud/
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
-docs/                 latency results (history in examples/aws-cross-cloud), Epic JSON notes
+docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; diagrams/ (.drawio + PNG + slides)
 ```
 
 - Put logic in `src/hl7rt` as functions of DataFrames, so it's testable without a cluster. Keep
@@ -177,6 +177,11 @@ docs/                 latency results (history in examples/aws-cross-cloud), Epi
   API (`POST .../databases/<db>/data-api`), exposing `subscription_api` only.
 - **The Databricks SDK lets `DATABRICKS_*` environment variables override a profile.** The app pins
   `auth_type=oauth-m2m` from its profile and refuses to run as anything but a service principal.
+- **`--e2e` is the acceptance test** (20 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
+  every new guarantee, and keep docs/subscriptions.md's table in step. Plans beyond one SP: docs/SCALABILITY.md.
+- **Serverless JAR tasks need environment_version 4+** (`java_dependencies`). Binding a job's `run_as` to an SP needs
+  the deployer to have **Service Principal: User** on it, so the app's job is its own bundle (`src/subscriber`):
+  in the platform bundle it made every `make demo` fail for deployers without that role.
 - **Maven Central is blocked on the Databricks network.** Use the internal mirror in `~/.m2/settings.xml`
   (`maven-proxy.dev.databricks.com`). Keep it out of the repo: customers won't have it.
 

@@ -28,6 +28,22 @@ class SubscriberConfigTest {
     }
 
     @Test
+    void withoutAProfileItUsesTheAmbientIdentity() {
+        var p = props();
+        p.remove("databricks.profile");
+        var c = SubscriberConfig.from(p);
+        assertEquals(null, c.profile());
+        assertEquals("subscriber", c.groupId());
+    }
+
+    @Test
+    void argumentsOverrideTheFile() {
+        var merged = SubscriberConfig.merge(props(), java.util.List.of("--e2e", "eventhubs.namespace=ns2", "x=a=b"));
+        assertEquals("ns2", SubscriberConfig.from(merged).namespace());
+        assertEquals("a=b", merged.getProperty("x"));
+    }
+
+    @Test
     void namesTheMissingSetting() {
         var p = props();
         p.remove("eventhubs.credential");

@@ -36,16 +36,19 @@ public final class App {
     private static final Duration HUB_STALE_AFTER = Duration.ofMinutes(2);
     private static final Duration HEALTH_CHECK_EVERY = Duration.ofSeconds(30);
 
+    /**
+     * java -jar hl7-subscriber.jar [file.properties] [key=value ...] [--duration=PT5M] [--e2e]
+     *
+     * <p>Settings come from the file (default: subscriber.properties, else the one file in apps/, which `make registry`
+     * writes) plus key=value arguments. --e2e runs the end-to-end checks instead of the app.
+     */
     public static void main(String[] args) throws Exception {
-        SubscriberConfig cfg = SubscriberConfig.from(load(Path.of(args.length > 0 ? args[0] : "subscriber.properties")));
-        // OAuth M2M from the profile only: DATABRICKS_* environment variables would otherwise take precedence.
-        WorkspaceClient workspace = new WorkspaceClient(
-                new DatabricksConfig().setProfile(cfg.profile()).setAuthType("oauth-m2m"));
-        var me = workspace.currentUser().me(new MeRequest());
-        if (!SubscriberConfig.isServicePrincipal(me.getUserName())) {
-            exit(5, "signed in as " + me.getUserName() + ", not a service principal: check profile " + cfg.profile());
-        }
-        System.out.printf("signed in   as %s (%s)%n", me.getDisplayName(), me.getUserName());
+        List<String> argv = List.of(args);
+        SubscriberConfig cfg = SubscriberConfig.from(SubscriberConfig.merge(load(argv), argv));
+        WorkspaceClient workspace = signIn(cfg);
+        if (argv.contains("--e2e")) System.exit(E2E.run(workspace, cfg));
+        Duration runFor = argv.stream().filter(a -> a.startsWith("--duration=")).findFirst()
+                .map(a -> Duration.parse(a.substring("--duration=".length()))).orElse(null);
 
         // 1. Register what the code declares. The Data API runs each call as this SP's own Postgres role, and the
         //    registry validates each rule in the same call: ACCEPTED, or refused with a reason.
@@ -92,10 +95,11 @@ public final class App {
             consumer.subscribe(List.of(topic));
             System.out.printf("listening   on %s as consumer group %s (Ctrl-C to stop)%n", topic, cfg.groupId());
             Set<String> seen = new HashSet<>();
+            Instant stopAt = runFor == null ? Instant.MAX : Instant.now().plus(runFor);
             Instant nextCheck = Instant.now().plus(HEALTH_CHECK_EVERY);
             Instant nextSkipReport = Instant.now().plusSeconds(10);
             long older = 0;
-            while (true) {
+            while (Instant.now().isBefore(stopAt)) {
                 for (ConsumerRecord<String, String> rec : consumer.poll(Duration.ofSeconds(1))) {
                     Notification n = Notification.parse(rec.value());
                     if (!n.isCurrent(current)) {
@@ -120,6 +124,25 @@ public final class App {
                 }
             }
         }
+        exit(0, "ran for " + runFor);
+    }
+
+    /**
+     * With a profile: OAuth M2M from that profile only (DATABRICKS_* environment variables would otherwise take
+     * precedence). Without one: the ambient identity, e.g. a workspace job's run-as service principal. Either way it
+     * must be a service principal.
+     */
+    static WorkspaceClient signIn(SubscriberConfig cfg) {
+        DatabricksConfig c = cfg.profile() == null ? new DatabricksConfig()
+                : new DatabricksConfig().setProfile(cfg.profile()).setAuthType("oauth-m2m");
+        WorkspaceClient workspace = new WorkspaceClient(c);
+        var me = workspace.currentUser().me(new MeRequest());
+        if (!SubscriberConfig.isServicePrincipal(me.getUserName())) {
+            exit(5, "signed in as " + me.getUserName() + ", not a service principal"
+                    + (cfg.profile() == null ? "" : ": check profile " + cfg.profile()));
+        }
+        System.out.printf("signed in   as %s (%s)%n", me.getDisplayName(), me.getUserName());
+        return workspace;
     }
 
     private static void awaitHub(RegistryClient registry, Map<String, Integer> accepted, Set<String> sources)
@@ -153,31 +176,44 @@ public final class App {
         }
     }
 
-    private static void exit(int code, String message) {
+    static void exit(int code, String message) {
         System.out.println((code == 0 ? "done        " : "ERROR       ") + message);
         System.exit(code);
     }
 
     /** The SP's Databricks OAuth token (the SDK refreshes it), which the Data API maps to the SP's Postgres role. */
-    private static String bearer(WorkspaceClient workspace) {
+    static String bearer(WorkspaceClient workspace) {
         Map<String, String> headers = workspace.config().authenticate();
         return headers.get("Authorization").replaceFirst("^Bearer ", "");
     }
 
-    private static EventHubsTokens.Token eventHubsToken(WorkspaceClient workspace, SubscriberConfig cfg) {
+    static EventHubsTokens.Token eventHubsToken(WorkspaceClient workspace, SubscriberConfig cfg) {
+        return eventHubsToken(workspace, cfg.credential(), cfg.namespace());
+    }
+
+    static EventHubsTokens.Token eventHubsToken(WorkspaceClient workspace, String credential, String namespace) {
         TemporaryCredentials c = workspace.credentials().generateTemporaryServiceCredential(
                 new GenerateTemporaryServiceCredentialRequest()
-                        .setCredentialName(cfg.credential())
+                        .setCredentialName(credential)
                         .setAzureOptions(new GenerateTemporaryServiceCredentialAzureOptions()
-                                .setResources(List.of(EventHubsTokens.scope(cfg.namespace())))));
+                                .setResources(List.of(EventHubsTokens.scope(namespace)))));
         return new EventHubsTokens.Token(c.getAzureAad().getAadToken(), Instant.ofEpochMilli(c.getExpirationTime()));
     }
 
-    private static Properties load(Path file) throws IOException {
-        if (!Files.exists(file)) {
-            throw new IllegalArgumentException(file + " not found: cp subscriber.properties.example subscriber.properties");
+    /** The settings file named on the command line, else subscriber.properties, else the one file in apps/. */
+    private static Properties load(List<String> argv) throws IOException {
+        Path file = argv.stream().filter(a -> a.endsWith(".properties")).map(Path::of).findFirst().orElse(null);
+        if (file == null && Files.exists(Path.of("subscriber.properties"))) file = Path.of("subscriber.properties");
+        if (file == null && Files.isDirectory(Path.of("apps"))) {
+            try (var files = Files.list(Path.of("apps"))) {
+                var found = files.filter(f -> f.toString().endsWith(".properties")).toList();
+                if (found.size() == 1) file = found.get(0);
+                else if (found.size() > 1) throw new IllegalArgumentException("several apps in apps/: name one, e.g. " + found.get(0));
+            }
         }
         var p = new Properties();
+        if (file == null) return p;  // all settings as key=value arguments (workspace job)
+        if (!Files.exists(file)) throw new IllegalArgumentException(file + " not found");
         try (InputStream in = Files.newInputStream(file)) {
             p.load(in);
         }

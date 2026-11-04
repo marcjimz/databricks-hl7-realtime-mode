@@ -84,7 +84,10 @@ make help              # everything else
 
 A Java app subscribes at runtime, as its own service principal, to the gold records it needs. Change the code, run it
 again, and the new rule takes effect at the hub's next micro-batch, with no redeploy. One-time setup (the app's
-service principal, its profile, and `subscriber.properties`): [docs/subscriptions.md](docs/subscriptions.md#set-up-bring-your-own-service-principal).
+service principal and its profile): [docs/subscriptions.md](docs/subscriptions.md#set-up-bring-your-own-service-principal).
+To check everything at once, `java -jar target/hl7-subscriber.jar --e2e` runs 20 end-to-end checks with inputs,
+expected, and actual results ([the list](docs/subscriptions.md#end-to-end-checks)), locally or as a workspace job.
+Diagrams and a three-slide overview: [docs/diagrams](docs/diagrams/).
 
 Start the pipelines (`make demo dev`), then:
 
@@ -185,7 +188,7 @@ src/pipelines/   thin pipeline definitions (including the subscription hub)
 src/registry/    the subscription registry's schema, validation, and API (Lakebase Postgres)
 src/subscriber/  the Java subscriber app
 tests/           unit tests (local Spark)
-docs/            latency results, Epic JSON notes
+docs/            latency results, subscriptions, scalability plan, Epic JSON notes; diagrams/ (draw.io + slides)
 examples/        not deployed: the earlier SQL-file subscriptions, the earlier AWS cross-cloud setup
 ```
 
