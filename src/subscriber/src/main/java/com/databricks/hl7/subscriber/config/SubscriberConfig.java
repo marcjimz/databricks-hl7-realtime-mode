@@ -1,4 +1,4 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.config;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -63,11 +63,6 @@ public record SubscriberConfig(String profile, String registryUrl, String regist
             if (i > 0) p.setProperty(a.substring(0, i).trim(), a.substring(i + 1).trim());
         }
         return p;
-    }
-
-    /** A service principal's Databricks user name is its application ID (a UUID); a person's is an email. */
-    public static boolean isServicePrincipal(String userName) {
-        return userName != null && userName.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
     }
 
     private static String required(Properties p, String key) {

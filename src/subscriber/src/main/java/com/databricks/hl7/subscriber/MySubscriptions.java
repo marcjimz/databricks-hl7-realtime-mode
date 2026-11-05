@@ -1,7 +1,8 @@
 package com.databricks.hl7.subscriber;
 
-import static com.databricks.hl7.subscriber.Predicate.field;
+import static com.databricks.hl7.subscriber.rules.Predicate.field;
 
+import com.databricks.hl7.subscriber.rules.Subscription;
 import java.util.List;
 
 /**

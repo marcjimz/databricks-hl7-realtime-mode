@@ -1,4 +1,4 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.eventhubs;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;

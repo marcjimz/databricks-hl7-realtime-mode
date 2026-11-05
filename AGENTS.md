@@ -64,6 +64,8 @@ infra/uc.sh           idempotent Unity Catalog bootstrap (`make uc`): credential
 infra/registry.py     idempotent Lakebase registry bootstrap (`make registry`): project, schema, Data API, apps
 src/registry/         the subscription registry: schema, validation, API functions, grants (registry.sql)
 src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), JUnit tests. Not in the wheel or bundle sync.
+                      Packages by responsibility: config, identity, rules, registry, eventhubs, delivery, e2e
+                      (src/subscriber/README.md). App only wires them together.
 examples/             not deployed, linted, or tested: subscriptions/ (earlier SQL-file design), aws-cross-cloud/
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
 docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; diagrams/ (.drawio + PNG + slides)
@@ -173,6 +175,8 @@ docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; 
   - **It never skips a match.** Its consumer group resumes from its last commit, so after time away it works through the
     backlog and reports it as a count ("catching up" / "caught up") before printing live matches. Re-registering an
     identical rule keeps the revision and prints `(unchanged)`.
+  - **Running the app as an SP rewrites that SP's subscriptions** to match the code it was built from. Use `--e2e`
+    (only `e2e-*` names) or another app for checks while someone is using that SP.
   - **Library logs are at WARN** (`simplelogger.properties`), so the demo output stays readable.
 - **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). Its flows run
   batches concurrently, so the shared registry client serializes access (`tests/test_hub_registry.py`). Use pg8000:

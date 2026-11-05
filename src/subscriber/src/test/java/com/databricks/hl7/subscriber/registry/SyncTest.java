@@ -1,8 +1,10 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.registry;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import com.databricks.hl7.subscriber.rules.Predicate;
+import com.databricks.hl7.subscriber.rules.Subscription;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 

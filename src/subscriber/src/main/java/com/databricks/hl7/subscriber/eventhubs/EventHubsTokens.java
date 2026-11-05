@@ -1,8 +1,13 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.eventhubs;
 
+import com.databricks.sdk.WorkspaceClient;
+import com.databricks.sdk.service.catalog.GenerateTemporaryServiceCredentialAzureOptions;
+import com.databricks.sdk.service.catalog.GenerateTemporaryServiceCredentialRequest;
+import com.databricks.sdk.service.catalog.TemporaryCredentials;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -23,6 +28,21 @@ public final class EventHubsTokens implements Supplier<EventHubsTokens.Token> {
     public EventHubsTokens(Supplier<Token> fetch, Clock clock) {
         this.fetch = Objects.requireNonNull(fetch);
         this.clock = Objects.requireNonNull(clock);
+    }
+
+    /** Tokens for `credential` (this app's sub_<app>_eventhubs), cached and refreshed before they expire. */
+    public static EventHubsTokens forCredential(WorkspaceClient workspace, String credential, String namespace) {
+        return new EventHubsTokens(() -> mint(workspace, credential, namespace), Clock.systemUTC());
+    }
+
+    /** One token from Unity Catalog; fails with PERMISSION_DENIED unless this identity has ACCESS on `credential`. */
+    public static Token mint(WorkspaceClient workspace, String credential, String namespace) {
+        TemporaryCredentials c = workspace.credentials().generateTemporaryServiceCredential(
+                new GenerateTemporaryServiceCredentialRequest()
+                        .setCredentialName(credential)
+                        .setAzureOptions(new GenerateTemporaryServiceCredentialAzureOptions()
+                                .setResources(List.of(scope(namespace)))));
+        return new Token(c.getAzureAad().getAadToken(), Instant.ofEpochMilli(c.getExpirationTime()));
     }
 
     public static String scope(String namespace) {

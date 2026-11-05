@@ -1,9 +1,11 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.registry;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.databricks.hl7.subscriber.rules.Predicate;
+import com.databricks.hl7.subscriber.rules.Subscription;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.net.http.HttpRequest;
