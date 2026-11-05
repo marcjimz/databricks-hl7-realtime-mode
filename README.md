@@ -96,10 +96,12 @@ model: [docs/subscriptions.md](docs/subscriptions.md). Diagrams and a three-slid
 3. **Its profile:** `[<app>]` in `~/.databrickscfg` with the SP's `client_id` and `client_secret`.
 4. **The pipelines running:** `make demo dev`, which includes the subscription hub.
 
+Run every command below from the repo root.
+
 ### 0. Check everything end to end
 
 ```
-$ cd src/subscriber && mvn -q package && java -jar target/hl7-subscriber.jar --e2e
+$ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar --e2e
 …
 | 1 | Sign in | profile sp-hl7-realtime-demo | a service principal | 38fafc55-… | PASS |
 | 2 | Own Event Hubs credential | sub_sp_hl7_realtime_demo_eventhubs | token issued | token, expires … | PASS |
@@ -127,7 +129,7 @@ new Subscription("critical-potassium", "gold_observations",
 ```
 
 ```
-$ java -jar target/hl7-subscriber.jar
+$ java -jar src/subscriber/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 1 ACCEPTED
             (observation_cd_desc = 'Potassium') AND (value_num >= 6.5)
@@ -151,7 +153,7 @@ listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group s
 
 ### 2. Change the code and run it again
 
-Stop the app with Ctrl-C. Raise the threshold, drop `units`, and add a second subscription:
+Stop the app with Ctrl-C first: rebuilding replaces the jar a running app loads its classes from, and it would crash. Raise the threshold, drop `units`, and add a second subscription:
 
 ```java
 new Subscription("critical-potassium", "gold_observations",
@@ -163,7 +165,7 @@ new Subscription("low-hemoglobin", "gold_observations",
 ```
 
 ```
-$ mvn -q package && java -jar target/hl7-subscriber.jar
+$ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 2 ACCEPTED
             (observation_cd_desc = 'Potassium') AND (value_num >= 7.0)
@@ -194,7 +196,7 @@ new Subscription("by-facility", "gold_observations", field("msg_sending_facility
 ```
 
 ```
-$ mvn -q package && java -jar target/hl7-subscriber.jar
+$ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 2 ACCEPTED (unchanged)
             (observation_cd_desc = 'Potassium') AND (value_num >= 7.0)
@@ -220,7 +222,7 @@ The app doesn't listen silently to a stopped hub. From the repo root, stop the h
 Wait two minutes, then run the app. It waits up to two more minutes for the hub, then exits with code 4:
 
 ```
-$ java -jar target/hl7-subscriber.jar
+$ java -jar src/subscriber/target/hl7-subscriber.jar
 …
 hub         critical-potassium     revision 2 ACTIVE
 hub         low-hemoglobin         revision 1 ACTIVE
@@ -244,7 +246,9 @@ to the SP needs the **Service Principal: User** role on it (Settings → Identit
 Permissions). Then:
 
 ```bash
-cd src/subscriber && databricks bundle deploy && databricks bundle run e2e
+export DATABRICKS_HOST=$(terraform -chdir=infra/azure output -raw workspace_url) DATABRICKS_AUTH_TYPE=azure-cli
+DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle deploy
+DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle run e2e
 ```
 
 ## Configure

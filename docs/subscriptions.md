@@ -123,8 +123,8 @@ Sunday wipe.
    ```
 4. **Check it end to end:**
    ```bash
-   cd src/subscriber && mvn -q package
-   java -jar target/hl7-subscriber.jar --e2e      # 20 checks, PASS/FAIL table, exit 1 on any failure
+   mvn -q -f src/subscriber package
+   java -jar src/subscriber/target/hl7-subscriber.jar --e2e      # 20 checks, PASS/FAIL table, exit 1 on any failure
    ```
    `make registry` wrote the app's settings to `src/subscriber/apps/<app>.properties` (gitignored, no secrets). It
    rewrites them on every run, because the registry URL changes when the workspace is rebuilt. With a different
@@ -135,7 +135,7 @@ Sunday wipe.
 `--e2e` runs every check below against the live system, as the app's service principal. It uses its own `e2e-*`
 subscriptions and consumer group, cleans up after itself, and exits 1 if any check fails. The same jar runs it in
 the workspace as a serverless job, as the same service principal, with no secret:
-`databricks bundle deploy && databricks bundle run e2e` (from `src/subscriber`). The deployer needs the **Service Principal: User** role on that SP to
+`DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle deploy`, then the same with `bundle run e2e`. The deployer needs the **Service Principal: User** role on that SP to
 bind the job's `run_as`.
 
 | # | Check | Input | Expected |

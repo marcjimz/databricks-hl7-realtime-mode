@@ -63,4 +63,23 @@ class SubscriberConfigTest {
         p.setProperty("client.secret", "x");
         assertThrows(IllegalArgumentException.class, () -> SubscriberConfig.from(p));
     }
+
+    @Test
+    void findsTheSettingsFromTheRepoRootThroughTheAppsOwnDirectory(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tmp)
+            throws java.io.IOException {
+        var root = java.nio.file.Files.createDirectories(tmp.resolve("repo"));
+        var app = java.nio.file.Files.createDirectories(root.resolve("src/subscriber/apps"));
+        var file = java.nio.file.Files.writeString(app.resolve("sp-app-a.properties"), "");
+        var home = root.resolve("src/subscriber");
+
+        assertEquals(file, SubscriberConfig.settingsFile(null, java.util.List.of(root, home)), "run from the repo root");
+        assertEquals(file, SubscriberConfig.settingsFile(null, java.util.List.of(home, home)), "run from src/subscriber");
+        var own = java.nio.file.Files.writeString(root.resolve("subscriber.properties"), "");
+        assertEquals(own, SubscriberConfig.settingsFile(null, java.util.List.of(root, home)), "the current directory wins");
+        assertEquals(null, SubscriberConfig.settingsFile(null, java.util.List.of(tmp)), "none: all settings as arguments");
+
+        java.nio.file.Files.writeString(app.resolve("sp-app-b.properties"), "");
+        assertThrows(IllegalArgumentException.class,
+                () -> SubscriberConfig.settingsFile(null, java.util.List.of(home)), "several apps: name one");
+    }
 }

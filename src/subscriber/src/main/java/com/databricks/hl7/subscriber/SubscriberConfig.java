@@ -1,5 +1,9 @@
 package com.databricks.hl7.subscriber;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
 import java.util.Properties;
 
 /**
@@ -8,6 +12,25 @@ import java.util.Properties;
  */
 public record SubscriberConfig(String profile, String registryUrl, String registryEndpoint, String namespace,
         String credential, String groupId, Properties all) {
+
+    /**
+     * The settings file: the one named on the command line, else the first directory (in order) with a
+     * subscriber.properties, or with exactly one file in apps/. Null when there's none (all settings as arguments).
+     */
+    public static Path settingsFile(Path named, List<Path> dirs) throws IOException {
+        if (named != null) return named;
+        for (Path dir : dirs) {
+            if (Files.exists(dir.resolve("subscriber.properties"))) return dir.resolve("subscriber.properties");
+            Path apps = dir.resolve("apps");
+            if (!Files.isDirectory(apps)) continue;
+            try (var files = Files.list(apps)) {
+                var found = files.filter(f -> f.toString().endsWith(".properties")).sorted().toList();
+                if (found.size() == 1) return found.get(0);
+                if (found.size() > 1) throw new IllegalArgumentException("several apps in " + apps + ": name one, e.g. " + found.get(0));
+            }
+        }
+        return null;
+    }
 
     /**
      * databricks.profile is optional: without it the app uses the ambient identity, e.g. the job's run-as service
