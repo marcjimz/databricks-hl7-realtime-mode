@@ -77,6 +77,7 @@ make help              # everything else
 2. Show the hot path: an Event Hubs topic between each layer. Silver has the Epic silver columns. In Catalog Explorer,
    every topic has a streaming table of the same name.
 3. Show the dashboard: p99 per hop (all under 200 ms), p99 by minute, critical labs reaching gold, and quarantine.
+   `make demo dev` prints its URL, the workspace URL, and the subscriptions dashboard's URL.
 4. Show security: Catalog Explorer → External data → Credentials → `<catalog>_eventhubs`. The pipelines hold no secrets,
    and the Event Hubs namespace has SAS keys disabled.
 
@@ -232,6 +233,12 @@ ERROR       the hub isn't processing [gold_observations]: start the subscription
 
 Start the hub again with `make demo dev`. It resumes from its checkpoint, so no gold record is skipped. Its first batch
 covers the time it was stopped, so the app's next run starts with "catching up".
+
+### Watch it on the dashboard
+
+The **HL7 subscriptions** dashboard (`make demo dev` prints its URL) shows each app's subscriptions, rules, and the
+hub's state, read live from the registry. Refresh it after each step above to see revisions, cancellations, and the
+hub's heartbeat change ([details](docs/subscriptions.md#monitoring)).
 
 ### Clean up
 

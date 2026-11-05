@@ -1,0 +1,11 @@
+# Subscription monitoring: every app's rules, the hub's verdict per revision, and the hub's heartbeat, read live from the
+# Lakebase registry through its Unity Catalog catalog (queries: src/dashboards/hl7_subscriptions.lvdash.json). It shows
+# every app's rules, so it's a platform view: share it with the platform team, not with apps.
+resources:
+  dashboards:
+    hl7_subscriptions:
+      display_name: HL7 subscriptions - registry and hub (${bundle.target})
+      file_path: ../../src/dashboards/hl7_subscriptions.lvdash.json
+      warehouse_id: ${var.warehouse_id}
+      dataset_catalog: ${var.registry_catalog}
+      dataset_schema: subscription_monitor

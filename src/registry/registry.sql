@@ -239,6 +239,34 @@ RETURNS jsonb LANGUAGE sql STABLE SECURITY INVOKER AS $$
 $$;
 
 -- ---------------------------------------------------------------------------------------------------------------------
+-- Platform monitoring (the "HL7 subscriptions" dashboard reads these through the registry's Unity Catalog catalog).
+-- Every app's rules in one place, so it's for the platform team only: nothing here is granted to `subscriber`.
+CREATE SCHEMA IF NOT EXISTS subscription_monitor;
+
+DROP VIEW IF EXISTS subscription_monitor.subscriptions;  -- views only: dropped and recreated, so columns can change
+CREATE VIEW subscription_monitor.subscriptions AS
+SELECT a.app_name, s.owner AS service_principal, s.name AS subscription, s.revision, s.source,
+       s.predicate_sql AS rule, array_to_string(s.fields, ', ') AS fields,
+       CASE WHEN st.revision = s.revision THEN st.state WHEN s.enabled THEN 'PENDING' ELSE 'CANCELLING' END AS state,
+       CASE WHEN st.revision = s.revision THEN st.error END AS error,
+       s.updated_at AS registered_at,
+       CASE WHEN st.revision = s.revision THEN st.observed_at END AS confirmed_at,
+       CASE WHEN st.revision = s.revision
+            THEN round(extract(epoch FROM st.observed_at - s.updated_at)::numeric, 1)::float8 END AS seconds_to_confirm
+FROM subscription_registry.subscriptions s
+LEFT JOIN subscription_registry.apps a ON a.app_role = s.owner
+LEFT JOIN subscription_registry.status st USING (subscription_id);
+
+DROP VIEW IF EXISTS subscription_monitor.hub;
+CREATE VIEW subscription_monitor.hub AS
+SELECT source, last_batch_at, round(extract(epoch FROM now() - last_batch_at))::int AS seconds_since_last_batch,
+       batch_id, rules
+FROM subscription_registry.hub_heartbeat;
+
+REVOKE ALL ON SCHEMA subscription_monitor FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA subscription_monitor FROM PUBLIC;
+
+-- ---------------------------------------------------------------------------------------------------------------------
 -- Grants. Apps get the API plus the RLS-filtered table access its INVOKER functions need; nothing by default.
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA subscription_api FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA subscription_registry FROM PUBLIC;

@@ -4,6 +4,8 @@
   registry schema   src/registry/registry.sql (tables, validation, API functions, grants)
   source columns    every gold source's columns and types, from hl7rt.gold
   Data API          exposes schema subscription_api only
+  UC catalog        <catalog>_registry: the registry database in Unity Catalog, read by the subscriptions dashboard
+                    (schema subscription_monitor; platform only, nothing granted to apps)
   subscriber apps   terraform var subscriber_apps: a Postgres role per app SP, member of `subscriber`, usable by the
                     Data API, plus its binding (hub, sources, fields). Apps removed from Terraform lose their binding,
                     so they can't subscribe and the hub stops serving their rules.
@@ -22,6 +24,7 @@ from pathlib import Path
 
 import pg8000.native
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.postgres import Catalog, CatalogCatalogSpec
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -88,6 +91,18 @@ def main():
         status = api.do("POST", data_api, body={"spec": {"db_schemas": [SCHEMA]}})["response"]["status"]
         print(f"created  Data API (exposes {SCHEMA} only)")
     db.run("NOTIFY pgrst, 'reload schema'")  # pick up changed function signatures
+
+    # The registry as a Unity Catalog catalog, so the subscriptions dashboard can read subscription_monitor from SQL.
+    registry_catalog = f"{tf_output('catalog')}_registry"
+    try:
+        w.postgres.get_catalog(name=f"catalogs/{registry_catalog}")
+        print(f"ok       catalog {registry_catalog} (the registry database, for the subscriptions dashboard)")
+    except Exception:  # noqa: BLE001 - not registered yet
+        w.postgres.create_catalog(
+            catalog=Catalog(spec=CatalogCatalogSpec(postgres_database=DATABASE, branch=BRANCH)),
+            catalog_id=registry_catalog,
+        ).wait()
+        print(f"created  catalog {registry_catalog} (the registry database, for the subscriptions dashboard)")
 
     apps = tf_output("subscriber_apps")
     for name, a in apps.items():

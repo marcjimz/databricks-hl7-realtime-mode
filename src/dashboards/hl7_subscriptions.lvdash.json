@@ -1,0 +1,600 @@
+{
+  "datasets": [
+    {
+      "name": "kpis",
+      "displayName": "Headline numbers",
+      "queryLines": [
+        "SELECT count_if(state = 'ACTIVE') AS active, count_if(state = 'FAILED') AS failed, count(DISTINCT CASE WHEN state <> 'CANCELLED' THEN app_name END) AS apps FROM subscriptions"
+      ]
+    },
+    {
+      "name": "current",
+      "displayName": "Current subscriptions (not cancelled)",
+      "queryLines": [
+        "SELECT app_name, service_principal, subscription, revision, source, state, rule, fields, error, registered_at, confirmed_at, seconds_to_confirm FROM subscriptions WHERE state <> 'CANCELLED' ORDER BY app_name, subscription"
+      ]
+    },
+    {
+      "name": "by_app",
+      "displayName": "Subscriptions per app and state",
+      "queryLines": [
+        "SELECT app_name, state, count(*) AS subscriptions FROM subscriptions WHERE state <> 'CANCELLED' GROUP BY app_name, state"
+      ]
+    },
+    {
+      "name": "hub_health",
+      "displayName": "Hub heartbeat per gold source",
+      "queryLines": [
+        "SELECT source, CASE WHEN seconds_since_last_batch > 120 THEN 'STALE' ELSE 'OK' END AS status, seconds_since_last_batch, last_batch_at, batch_id, rules FROM hub ORDER BY source"
+      ]
+    },
+    {
+      "name": "cancelled",
+      "displayName": "Cancelled subscriptions",
+      "queryLines": [
+        "SELECT app_name, service_principal, subscription, revision, source, state, rule, fields, error, registered_at, confirmed_at, seconds_to_confirm FROM subscriptions WHERE state = 'CANCELLED' ORDER BY registered_at DESC"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "subscriptions",
+      "displayName": "Subscriptions",
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layout": [
+        {
+          "widget": {
+            "name": "title",
+            "multilineTextboxSpec": {
+              "lines": [
+                "## HL7 subscriptions: every app's rules and the hub's verdict  \u00b7  live from the Lakebase registry  \u00b7  refresh to update"
+              ]
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 6,
+            "height": 1
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-active",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpis",
+                  "fields": [
+                    {
+                      "name": "active",
+                      "expression": "`active`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "active",
+                  "displayName": "Active subscriptions"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Active subscriptions"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 1,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-failed",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpis",
+                  "fields": [
+                    {
+                      "name": "failed",
+                      "expression": "`failed`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "failed",
+                  "displayName": "Failed (hub could not run)"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Failed (hub could not run)"
+              }
+            }
+          },
+          "position": {
+            "x": 2,
+            "y": 1,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi-apps",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "kpis",
+                  "fields": [
+                    {
+                      "name": "apps",
+                      "expression": "`apps`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "apps",
+                  "displayName": "Apps subscribed"
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Apps subscribed"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 1,
+            "width": 2,
+            "height": 3
+          }
+        },
+        {
+          "widget": {
+            "name": "hub-health",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "hub_health",
+                  "fields": [
+                    {
+                      "name": "source",
+                      "expression": "`source`"
+                    },
+                    {
+                      "name": "status",
+                      "expression": "`status`"
+                    },
+                    {
+                      "name": "seconds_since_last_batch",
+                      "expression": "`seconds_since_last_batch`"
+                    },
+                    {
+                      "name": "last_batch_at",
+                      "expression": "`last_batch_at`"
+                    },
+                    {
+                      "name": "batch_id",
+                      "expression": "`batch_id`"
+                    },
+                    {
+                      "name": "rules",
+                      "expression": "`rules`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "source",
+                    "displayName": "Gold source"
+                  },
+                  {
+                    "fieldName": "status",
+                    "displayName": "Status"
+                  },
+                  {
+                    "fieldName": "seconds_since_last_batch",
+                    "displayName": "Seconds since last batch"
+                  },
+                  {
+                    "fieldName": "last_batch_at",
+                    "displayName": "Last batch"
+                  },
+                  {
+                    "fieldName": "batch_id",
+                    "displayName": "Batch"
+                  },
+                  {
+                    "fieldName": "rules",
+                    "displayName": "Rules running"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Hub heartbeat (STALE after 2 min)"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 4,
+            "width": 3,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "by-app",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "by_app",
+                  "fields": [
+                    {
+                      "name": "app_name",
+                      "expression": "`app_name`"
+                    },
+                    {
+                      "name": "state",
+                      "expression": "`state`"
+                    },
+                    {
+                      "name": "subscriptions",
+                      "expression": "`subscriptions`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "app_name",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "App"
+                },
+                "y": {
+                  "fieldName": "subscriptions",
+                  "scale": {
+                    "type": "quantitative"
+                  },
+                  "displayName": "Subscriptions"
+                },
+                "color": {
+                  "fieldName": "state",
+                  "scale": {
+                    "type": "categorical"
+                  },
+                  "displayName": "State"
+                },
+                "label": {
+                  "show": true
+                }
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Subscriptions per app"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 4,
+            "width": 3,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "current",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "current",
+                  "fields": [
+                    {
+                      "name": "app_name",
+                      "expression": "`app_name`"
+                    },
+                    {
+                      "name": "service_principal",
+                      "expression": "`service_principal`"
+                    },
+                    {
+                      "name": "subscription",
+                      "expression": "`subscription`"
+                    },
+                    {
+                      "name": "revision",
+                      "expression": "`revision`"
+                    },
+                    {
+                      "name": "state",
+                      "expression": "`state`"
+                    },
+                    {
+                      "name": "rule",
+                      "expression": "`rule`"
+                    },
+                    {
+                      "name": "fields",
+                      "expression": "`fields`"
+                    },
+                    {
+                      "name": "source",
+                      "expression": "`source`"
+                    },
+                    {
+                      "name": "registered_at",
+                      "expression": "`registered_at`"
+                    },
+                    {
+                      "name": "confirmed_at",
+                      "expression": "`confirmed_at`"
+                    },
+                    {
+                      "name": "seconds_to_confirm",
+                      "expression": "`seconds_to_confirm`"
+                    },
+                    {
+                      "name": "error",
+                      "expression": "`error`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "app_name",
+                    "displayName": "App"
+                  },
+                  {
+                    "fieldName": "service_principal",
+                    "displayName": "Service principal"
+                  },
+                  {
+                    "fieldName": "subscription",
+                    "displayName": "Subscription"
+                  },
+                  {
+                    "fieldName": "revision",
+                    "displayName": "Rev"
+                  },
+                  {
+                    "fieldName": "state",
+                    "displayName": "State"
+                  },
+                  {
+                    "fieldName": "rule",
+                    "displayName": "Rule"
+                  },
+                  {
+                    "fieldName": "fields",
+                    "displayName": "Fields"
+                  },
+                  {
+                    "fieldName": "source",
+                    "displayName": "Source"
+                  },
+                  {
+                    "fieldName": "registered_at",
+                    "displayName": "Registered"
+                  },
+                  {
+                    "fieldName": "confirmed_at",
+                    "displayName": "Hub confirmed"
+                  },
+                  {
+                    "fieldName": "seconds_to_confirm",
+                    "displayName": "Seconds to confirm"
+                  },
+                  {
+                    "fieldName": "error",
+                    "displayName": "Error"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Current subscriptions: the revision each app registered, and the hub's state"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 9,
+            "width": 6,
+            "height": 8
+          }
+        },
+        {
+          "widget": {
+            "name": "cancelled",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "cancelled",
+                  "fields": [
+                    {
+                      "name": "app_name",
+                      "expression": "`app_name`"
+                    },
+                    {
+                      "name": "service_principal",
+                      "expression": "`service_principal`"
+                    },
+                    {
+                      "name": "subscription",
+                      "expression": "`subscription`"
+                    },
+                    {
+                      "name": "revision",
+                      "expression": "`revision`"
+                    },
+                    {
+                      "name": "state",
+                      "expression": "`state`"
+                    },
+                    {
+                      "name": "rule",
+                      "expression": "`rule`"
+                    },
+                    {
+                      "name": "fields",
+                      "expression": "`fields`"
+                    },
+                    {
+                      "name": "source",
+                      "expression": "`source`"
+                    },
+                    {
+                      "name": "registered_at",
+                      "expression": "`registered_at`"
+                    },
+                    {
+                      "name": "confirmed_at",
+                      "expression": "`confirmed_at`"
+                    },
+                    {
+                      "name": "seconds_to_confirm",
+                      "expression": "`seconds_to_confirm`"
+                    },
+                    {
+                      "name": "error",
+                      "expression": "`error`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "app_name",
+                    "displayName": "App"
+                  },
+                  {
+                    "fieldName": "service_principal",
+                    "displayName": "Service principal"
+                  },
+                  {
+                    "fieldName": "subscription",
+                    "displayName": "Subscription"
+                  },
+                  {
+                    "fieldName": "revision",
+                    "displayName": "Rev"
+                  },
+                  {
+                    "fieldName": "state",
+                    "displayName": "State"
+                  },
+                  {
+                    "fieldName": "rule",
+                    "displayName": "Rule"
+                  },
+                  {
+                    "fieldName": "fields",
+                    "displayName": "Fields"
+                  },
+                  {
+                    "fieldName": "source",
+                    "displayName": "Source"
+                  },
+                  {
+                    "fieldName": "registered_at",
+                    "displayName": "Registered"
+                  },
+                  {
+                    "fieldName": "confirmed_at",
+                    "displayName": "Hub confirmed"
+                  },
+                  {
+                    "fieldName": "seconds_to_confirm",
+                    "displayName": "Seconds to confirm"
+                  },
+                  {
+                    "fieldName": "error",
+                    "displayName": "Error"
+                  }
+                ]
+              },
+              "frame": {
+                "showTitle": true,
+                "title": "Cancelled"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 17,
+            "width": 6,
+            "height": 5
+          }
+        }
+      ]
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED"
+    },
+    "applyModeEnabled": false
+  }
+}

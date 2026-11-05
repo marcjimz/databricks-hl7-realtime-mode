@@ -7,7 +7,7 @@
 #   make uc               create or repair the Unity Catalog catalog and credentials (idempotent)
 #   make registry         create or repair the Lakebase subscription registry and onboard subscriber apps (idempotent)
 #
-#   make demo dev         deploy, start every pipeline and both feeds, print the dashboard URL
+#   make demo dev         deploy, start every pipeline and both feeds, print the workspace and dashboard URLs
 #   make clear-data dev   empty the Delta tables and refill from live data (~2 min; RTM keeps running)
 #   make stop dev         stop the feeds and every pipeline (stops Databricks billing)
 #
@@ -75,7 +75,9 @@ demo: guard-target
 	@for p in $(PIPELINES); do $(BUNDLE) run -t $(TARGET) --no-wait $$p >/dev/null 2>&1 && echo "started $$p" || echo "running $$p"; done
 	@for j in $(GENERATORS); do id=$(call resource_id,jobs,$$j); \
 	  if [ "$$($(active_runs))" = "0" ]; then $(BUNDLE) run -t $(TARGET) --no-wait $$j >/dev/null && echo "started $$j"; else echo "running $$j"; fi; done
-	@echo "dashboard: $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['dashboards']['hl7_latency']['url'])")"
+	@$(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json; d=json.load(sys.stdin)['resources']['dashboards']; \
+	  print('workspace:               $(DATABRICKS_HOST)'); print('latency dashboard:       ' + d['hl7_latency']['url']); \
+	  print('subscriptions dashboard: ' + d['hl7_subscriptions']['url'])"
 
 # A full refresh of the mirror empties the Delta tables the dashboard reads and restarts them at the live edge.
 clear-data: guard-target

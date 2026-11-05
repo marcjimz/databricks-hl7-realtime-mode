@@ -177,6 +177,10 @@ docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; 
 - **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). Its flows run
   batches concurrently, so the shared registry client serializes access (`tests/test_hub_registry.py`). Use pg8000:
   psycopg[binary] aborted the serverless Python process.
+- **Monitoring reads the registry through Unity Catalog.** `make registry` registers the database as `<catalog>_registry`
+  (`w.postgres.create_catalog`). The subscriptions dashboard reads the `subscription_monitor` views (platform only;
+  nothing granted to `subscriber`). Views there are dropped and recreated: `CREATE OR REPLACE VIEW` can't change a
+  column's type. `tests/test_dashboard.py` keeps both dashboards portable.
 - **Lakebase Data API accepts the SP's Databricks OAuth token** (no database credential needed for apps). Enable it by
   API (`POST .../databases/<db>/data-api`), exposing `subscription_api` only.
 - **The Databricks SDK lets `DATABRICKS_*` environment variables override a profile.** The app pins
