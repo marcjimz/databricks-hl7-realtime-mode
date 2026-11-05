@@ -238,17 +238,14 @@ public final class App {
         return new EventHubsTokens.Token(c.getAzureAad().getAadToken(), Instant.ofEpochMilli(c.getExpirationTime()));
     }
 
-    /** The settings file named on the command line, else subscriber.properties, else the one file in apps/. */
+    /**
+     * The settings file named on the command line, else subscriber.properties, else the one file in apps/: in the
+     * current directory, then in the app's own directory (src/subscriber, above target/), so it runs from the repo root.
+     */
     private static Properties load(List<String> argv) throws IOException {
-        Path file = argv.stream().filter(a -> a.endsWith(".properties")).map(Path::of).findFirst().orElse(null);
-        if (file == null && Files.exists(Path.of("subscriber.properties"))) file = Path.of("subscriber.properties");
-        if (file == null && Files.isDirectory(Path.of("apps"))) {
-            try (var files = Files.list(Path.of("apps"))) {
-                var found = files.filter(f -> f.toString().endsWith(".properties")).toList();
-                if (found.size() == 1) file = found.get(0);
-                else if (found.size() > 1) throw new IllegalArgumentException("several apps in apps/: name one, e.g. " + found.get(0));
-            }
-        }
+        Path named = argv.stream().filter(a -> a.endsWith(".properties")).map(Path::of).findFirst().orElse(null);
+        List<Path> dirs = appHome() == null ? List.of(Path.of("")) : List.of(Path.of(""), appHome());
+        Path file = SubscriberConfig.settingsFile(named, dirs);
         var p = new Properties();
         if (file == null) return p;  // all settings as key=value arguments (workspace job)
         if (!Files.exists(file)) throw new IllegalArgumentException(file + " not found");
@@ -256,5 +253,16 @@ public final class App {
             p.load(in);
         }
         return p;
+    }
+
+    /** The directory above the jar's target/ (src/subscriber), or null when it isn't a local build (e.g. a job). */
+    private static Path appHome() {
+        try {
+            Path jar = Path.of(App.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            Path target = jar.getParent();
+            return target != null && "target".equals(String.valueOf(target.getFileName())) ? target.getParent() : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 }
