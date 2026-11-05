@@ -1,6 +1,6 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.rules;
 
-import static com.databricks.hl7.subscriber.Predicate.field;
+import static com.databricks.hl7.subscriber.rules.Predicate.field;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 

@@ -1,4 +1,4 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.eventhubs;
 
 import java.util.List;
 import java.util.Map;

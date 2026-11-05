@@ -1,5 +1,6 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.registry;
 
+import com.databricks.hl7.subscriber.rules.Subscription;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;

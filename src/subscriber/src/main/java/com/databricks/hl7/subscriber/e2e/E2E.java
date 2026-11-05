@@ -1,10 +1,18 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.e2e;
 
-import static com.databricks.hl7.subscriber.Predicate.field;
+import static com.databricks.hl7.subscriber.rules.Predicate.field;
 
+import com.databricks.hl7.subscriber.config.SubscriberConfig;
+import com.databricks.hl7.subscriber.delivery.Notification;
+import com.databricks.hl7.subscriber.eventhubs.EventHubsTokens;
+import com.databricks.hl7.subscriber.eventhubs.KafkaSettings;
+import com.databricks.hl7.subscriber.eventhubs.UcOAuthBearerHandler;
+import com.databricks.hl7.subscriber.identity.Databricks;
+import com.databricks.hl7.subscriber.registry.Activation;
+import com.databricks.hl7.subscriber.registry.RegistryClient;
+import com.databricks.hl7.subscriber.rules.Subscription;
 import com.databricks.sdk.WorkspaceClient;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -22,8 +30,8 @@ import org.apache.kafka.common.errors.AuthorizationException;
  * input, an expected result, and the actual result; the run prints them as a table and exits 1 if any check fails.
  *
  * <pre>
- *   java -jar target/hl7-subscriber.jar --e2e                         (local, with the SP's profile)
- *   databricks bundle deploy && databricks bundle run e2e   (workspace job from src/subscriber, run as the SP)
+ *   java -jar src/subscriber/target/hl7-subscriber.jar --e2e                  (local, with the SP's profile)
+ *   DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle run e2e   (workspace job, run as the SP)
  * </pre>
  *
  * It uses subscriptions named e2e-* (cancelled at the end) and its own consumer group, so it doesn't disturb the app.
@@ -44,7 +52,7 @@ public final class E2E {
     private E2E(WorkspaceClient workspace, SubscriberConfig cfg) {
         this.workspace = workspace;
         this.cfg = cfg;
-        this.registry = new RegistryClient(java.net.URI.create(cfg.registryUrl()), () -> App.bearer(workspace),
+        this.registry = new RegistryClient(java.net.URI.create(cfg.registryUrl()), () -> Databricks.bearer(workspace),
                 RegistryClient.jdkHttp());
     }
 
@@ -64,22 +72,22 @@ public final class E2E {
     private void all() throws Exception {
         String me = workspace.currentUser().me(new com.databricks.sdk.service.iam.MeRequest()).getUserName();
         record("Sign in", "profile " + (cfg.profile() == null ? "(ambient identity)" : cfg.profile()),
-                "a service principal", me, SubscriberConfig.isServicePrincipal(me));
+                "a service principal", me, Databricks.isServicePrincipal(me));
 
         // Event Hubs access through Unity Catalog: own credential yes, anyone else's no.
         record("Own Event Hubs credential", cfg.credential(), "token issued", attempt(() -> {
-            var t = App.eventHubsToken(workspace, cfg);
+            var t = EventHubsTokens.mint(workspace, cfg.credential(), cfg.namespace());
             return "token, expires " + t.expiresAt();
         }), s -> s.startsWith("token"));
         String forbiddenCredential = cfg.get("e2e.forbidden_credential");
         if (forbiddenCredential != null) {
             record("Another credential", forbiddenCredential, "denied (no ACCESS)", attempt(() -> {
-                App.eventHubsToken(workspace, forbiddenCredential, cfg.namespace());
+                EventHubsTokens.mint(workspace, forbiddenCredential, cfg.namespace());
                 return "token issued";
             }), s -> s.contains("ACCESS") || s.contains("PERMISSION_DENIED") || s.contains("does not have"));
         }
         String forbiddenTopic = cfg.get("e2e.forbidden_topic");
-        UcOAuthBearerHandler.use(new EventHubsTokens(() -> App.eventHubsToken(workspace, cfg), Clock.systemUTC()));
+        UcOAuthBearerHandler.use(EventHubsTokens.forCredential(workspace, cfg.credential(), cfg.namespace()));
         if (forbiddenTopic != null) {
             record("Read a hub that isn't this app's", forbiddenTopic, "not authorized", readOnce(forbiddenTopic),
                     s -> s.contains("not authorized") || s.contains("Authorization"));
@@ -157,7 +165,7 @@ public final class E2E {
                 : "never", stale.isEmpty());
     }
 
-    private void refused(String name, com.databricks.hl7.subscriber.Predicate where, List<String> fields, String source,
+    private void refused(String name, com.databricks.hl7.subscriber.rules.Predicate where, List<String> fields, String source,
             String code) {
         var s = new Subscription("e2e-refused", source, where, fields);
         record(name, ruleText(s), code, attempt(() -> {

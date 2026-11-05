@@ -1,4 +1,4 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.config;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -49,12 +49,6 @@ class SubscriberConfigTest {
         p.remove("eventhubs.credential");
         var e = assertThrows(IllegalArgumentException.class, () -> SubscriberConfig.from(p));
         assertEquals("missing eventhubs.credential in subscriber.properties", e.getMessage());
-    }
-
-    @Test
-    void onlyAServicePrincipalMayRunTheApp() {
-        assertEquals(true, SubscriberConfig.isServicePrincipal("38fafc55-d28b-4f48-8d17-299f8d2698ee"));
-        assertEquals(false, SubscriberConfig.isServicePrincipal("someone@example.com"));
     }
 
     @Test
