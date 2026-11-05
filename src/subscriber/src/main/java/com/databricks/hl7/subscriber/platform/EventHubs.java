@@ -1,4 +1,4 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.platform;
 
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.catalog.GenerateTemporaryServiceCredentialAzureOptions;

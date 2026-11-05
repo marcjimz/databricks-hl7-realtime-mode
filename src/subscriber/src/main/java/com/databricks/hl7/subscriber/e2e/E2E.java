@@ -1,5 +1,9 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.e2e;
 
+import com.databricks.hl7.subscriber.App;
+import com.databricks.hl7.subscriber.api.SubscriptionApi;
+import com.databricks.hl7.subscriber.notifications.Notification;
+import com.databricks.hl7.subscriber.platform.EventHubs;
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.iam.MeRequest;
 import com.fasterxml.jackson.databind.JsonNode;
