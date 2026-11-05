@@ -165,6 +165,23 @@ Cross-app cases (another app reading, cancelling, or spoofing your rows) need a 
 they run against a real PostgreSQL in `tests/test_registry.py`; [SCALABILITY.md](SCALABILITY.md) plans the
 multi-SP suite.
 
+## Monitoring
+
+The **HL7 subscriptions** dashboard (`make demo dev` prints its URL) reads the registry live. Refresh it to update.
+- **Counts:** active subscriptions, failed ones, and apps subscribed.
+- **Hub heartbeat:** per gold source, seconds since the last batch and the rules running. A source is STALE after 2
+  minutes.
+- **Current subscriptions:** per app and service principal, the registered revision, its rule (the readable rendering),
+  fields, the hub's state (PENDING, ACTIVE, FAILED with the error, or CANCELLING), and how long the hub took to confirm
+  it.
+- **Cancelled subscriptions**, below.
+
+How it reads the registry:
+- `make registry` registers the registry database in Unity Catalog as `<catalog>_registry`. The dashboard queries the
+  views in its `subscription_monitor` schema from the SQL warehouse.
+- Those views show every app's rules, so they're for the platform team only. Nothing in them is granted to apps.
+- Dashboard viewers query as themselves, so they need access to that catalog.
+
 To revoke an app, remove it from `subscriber_apps` and run `make up`. `make registry` deletes its binding, so it
 can't subscribe, and the hub drops its rules at the next batch. Terraform deletes its hub and connector.
 

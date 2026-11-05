@@ -218,5 +218,28 @@ def test_unsubscribe_cancels_only_your_own(pg):
     assert r["state"] == "CANCELLING" and r["revision"] == 2
 
 
+def test_the_monitor_shows_every_apps_rules_and_the_hubs_verdict(pg):
+    a, b, owner = pg("app_a"), pg("app_b"), pg()
+    sid = subscribe(a, "mon-a", {"field": "value_num", "op": "gt", "value": 6})["subscriptionId"]
+    subscribe(b, "mon-b", {"field": "patient_id", "op": "is_not_null"})
+    subscribe(a, "mon-gone", {"field": "value_num", "op": "lt", "value": 1})
+    a.run("SELECT subscription_api.unsubscribe('mon-gone')")
+    owner.run("INSERT INTO subscription_registry.status (subscription_id, revision, state) "
+              "VALUES (CAST(:s AS uuid), 1, 'ACTIVE')", s=sid)  # fmt: skip
+
+    rows = owner.run("SELECT subscription, app_name, service_principal, rule, state, seconds_to_confirm "
+                     "FROM subscription_monitor.subscriptions WHERE subscription LIKE 'mon-%'")  # fmt: skip
+    seen = {r[0]: r for r in rows}
+    assert seen["mon-a"][1:5] == ["app-a", "app_a", "value_num > 6", "ACTIVE"] and seen["mon-a"][5] is not None
+    assert seen["mon-b"][1] == "app-b" and seen["mon-b"][4] == "PENDING", "both apps' rules, in one view"
+    assert seen["mon-gone"][4] == "CANCELLING", "cancelled, waiting for the hub to stop it"
+    assert owner.run("SELECT count(*) FROM subscription_monitor.hub")[0][0] >= 0
+
+
+def test_apps_cannot_read_the_monitor(pg):
+    with pytest.raises(pg8000.DatabaseError, match="permission denied"):
+        pg("app_a").run("SELECT * FROM subscription_monitor.subscriptions")
+
+
 def test_registry_sql_is_idempotent(pg):
     pg().run(SQL)  # applied on every `make up`
