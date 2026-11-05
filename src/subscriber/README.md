@@ -18,12 +18,9 @@ Code (`src/main/java/com/databricks/hl7/subscriber/`), one package per responsib
 | Package | What it does |
 |---|---|
 | `App`, `MySubscriptions` | Entry point (sign in → register → wait for the hub → listen) and the rules you edit |
-| `config/` | `SubscriberConfig`: the settings file plus `key=value` args; refuses secrets |
-| `identity/` | `Databricks`: signs in as the service principal (OAuth M2M), supplies the bearer token for the Data API |
-| `rules/` | `Predicate`, `Subscription`: what an app can ask for, as structured JSON (never SQL) |
-| `registry/` | `RegistryClient` (Lakebase Data API), `Sync` (code → subscribe/cancel), `Activation` (wait for the hub) |
-| `eventhubs/` | `EventHubsTokens` (Unity Catalog-issued Entra tokens), `UcOAuthBearerHandler`, `KafkaSettings` |
-| `delivery/` | `Notification`, `Listener`: dedupe, skip other revisions, catch up on backlog, commit after handling |
+| `subscriptions/` | What the app asks for: `Predicate`, `Subscription` (structured JSON, never SQL), and `Sync` (code → subscribe/cancel) |
+| `hub/` | The round trip with the platform: `RegistryClient` (Lakebase Data API), `Activation` (wait for the hub), `Notification`, `Listener` (dedupe, skip, catch up, commit after handling) |
+| `platform/` | How it connects: `SubscriberConfig`, `Databricks` (sign in as the SP), `EventHubsTokens` (Unity Catalog-issued Entra tokens), `UcOAuthBearerHandler`, `KafkaSettings`. Uses nothing from the other packages |
 | `e2e/` | `E2E`: the 20 live checks |
 - `apps/<app>.properties` (gitignored): written by `make registry` on every run, because the registry URL changes when
   the workspace is rebuilt. The profile name defaults to the app name. No secrets.
