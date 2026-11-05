@@ -1,12 +1,12 @@
 # cp subscriber.properties.example subscriber.properties (gitignored), then fill in. No secrets here: the app signs in
 # with the Databricks CLI profile below (~/.databrickscfg holds the SP's client_id / client_secret).
+# `make registry` writes these for each onboarded app to apps/<app>.properties, so you usually don't need this file.
 
 # The app's service principal profile in ~/.databrickscfg (host, client_id, client_secret).
 databricks.profile = sp-my-app
 
-# Hub registry: the Lakebase Data API URL (without the schema) and its endpoint.
-registry.url      = https://<endpoint-host>/api/2.0/workspace/<workspace-id>/rest/databricks_postgres
-registry.endpoint = projects/<project>/branches/production/endpoints/primary
+# The Subscription API (a Databricks App): the one way to register subscriptions.
+api.url = https://hl7-subscriptions-dev-<workspace-id>.<n>.azure.databricksapps.com
 
 # Event Hubs: the namespace and this app's own UC service credential (Data Receiver on its hub only).
 eventhubs.namespace  = <namespace>

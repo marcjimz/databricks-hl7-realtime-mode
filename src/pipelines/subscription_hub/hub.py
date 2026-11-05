@@ -1,9 +1,11 @@
 """Subscription hub (micro-batch, NOT Real-Time Mode): every gold topic -> each app's own topic, by its live rules.
 
-Rules live in the Lakebase registry and change at runtime; the pipeline graph never does. Each micro-batch:
+Rules are Databricks SQL registered at runtime through the Subscription API (src/subscription_api) and stored in the
+Lakebase registry; the pipeline graph never changes. Each micro-batch:
   1. reload the registry if its generation moved (one indexed query otherwise),
-  2. build each rule's Spark filter from its structured predicate (hl7rt.subscriptions; no SQL text from apps),
-  3. write the matches to each app's topic (Kafka sink routes by the `topic` column),
+  2. re-check each rule (one filter, granted columns, no outside-the-record functions); a rule that fails is FAILED,
+  3. evaluate all of this source's rules in one pass and write the matches to each app's topic (Kafka sink routes by
+     the `topic` column). If the batch fails, find the rules that fail on it, report them FAILED, and write the rest,
   4. record ACTIVE / CANCELLED / FAILED per revision and a heartbeat for this source.
 
 foreach_batch_sink is Public Preview (PREVIEW channel); Real-Time Mode doesn't support foreachBatch, so this hop is
@@ -19,22 +21,30 @@ from hl7rt.registry import Registry
 _registry = Registry(conf(spark, "registry.endpoint"), conf(spark, "registry.database"))
 
 
+def _write(records, source, rules):
+    out = subscriptions.notifications(records, source, rules)
+    if out is not None:
+        out.write.format("kafka").options(**eventhubs.kafka_options_from_conf(spark)).save()
+
+
 def _hub(source: str, topic: str):
     def match(batch, batch_id):
         _registry.refresh()
-        rules = []
-        for r in _registry.rules(source):
-            try:
-                subscriptions.compile_predicate(r.predicate, source)  # validated at registration; re-checked here
-                rules.append(r)
-                _registry.report(r.subscription_id, r.revision, "ACTIVE")
-            except subscriptions.PredicateError as e:
-                _registry.report(r.subscription_id, r.revision, "FAILED", str(e))
+        rules, failed = subscriptions.runnable(_registry.rules(source))
+        records = subscriptions.events(batch, source)
+        try:
+            _write(records, source, rules)
+        except Exception:  # noqa: BLE001 - one rule's runtime error must not stop every app's delivery
+            failed |= subscriptions.failing(records, rules)
+            rules = [r for r in rules if r.subscription_id not in failed]
+            _write(records, source, rules)
+        by_id = {r.subscription_id: r for r in _registry.rules(source)}
+        for subscription_id, error in failed.items():
+            _registry.report(subscription_id, by_id[subscription_id].revision, "FAILED", error)
+        for r in rules:
+            _registry.report(r.subscription_id, r.revision, "ACTIVE")
         for subscription_id, revision in _registry.cancelled(source):
             _registry.report(subscription_id, revision, "CANCELLED")
-        out = subscriptions.notifications(batch, source, rules)
-        if out is not None:
-            out.write.format("kafka").options(**eventhubs.kafka_options_from_conf(spark)).save()
         _registry.heartbeat(source, batch_id, len(rules))
 
     sink = f"subscription_hub_{source}"

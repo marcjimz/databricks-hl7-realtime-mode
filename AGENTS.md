@@ -18,7 +18,8 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
 ```
 
 - Layers are **raw → bronze → silver → gold**, each both an RTM Kafka topic and an SDP streaming table.
-- **Subscriptions** over gold: apps register rules at runtime in a Lakebase registry, a micro-batch hub pipeline
+- **Subscriptions** over gold: apps register Databricks SQL rules at runtime through the Subscription API (a Databricks
+  App; the rules live in a Lakebase registry), a micro-batch hub pipeline
   delivers matches to each app's own hub, and a Java app (`src/subscriber`) shows the client side. See
   "Subscription rules" and docs/subscriptions.md. The earlier SQL-file design is in `examples/subscriptions/`.
 - Phases 0–5 were built on an AWS workspace (cross-cloud to Event Hubs); the repo now targets one Azure region end
@@ -61,11 +62,11 @@ src/dashboards/       the AI/BI dashboard definition (.lvdash.json)
 infra/azure/          Terraform for everything Azure: workspace (+ metastore assignment), ADLS, access connector,
                       Event Hubs + hubs, RBAC. tfvars/state gitignored (local state).
 infra/uc.sh           idempotent Unity Catalog bootstrap (`make uc`): credentials, external location, catalog
-infra/registry.py     idempotent Lakebase registry bootstrap (`make registry`): project, schema, Data API, apps
-src/registry/         the subscription registry: schema, validation, API functions, grants (registry.sql)
-src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), JUnit tests. Not in the wheel or bundle sync.
-                      Packages: subscriptions (what it asks for), hub (register, wait, receive), platform
-                      (settings, identity, Event Hubs; depends on nothing else), e2e. App only wires them.
+infra/registry.py     idempotent registry bootstrap (`make registry`): Lakebase project, schema, app roles, UC views, API grants
+src/registry/         the subscription registry: schema, owner trigger, RLS, API functions, grants (registry.sql)
+src/subscription_api/ the Subscription API (Databricks App, FastAPI): caller, shape check, Databricks compiles, store, wait
+src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), one package of 7 classes, JUnit tests. Not in the
+                      wheel or bundle sync.
 examples/             not deployed, linted, or tested: subscriptions/ (earlier SQL-file design), aws-cross-cloud/
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
 docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; diagrams/ (.drawio + PNG + slides)
@@ -160,36 +161,67 @@ docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; 
 
 ## Subscription rules (see docs/subscriptions.md)
 
-- **Rules are structured predicates, never SQL text.** The registry validates them when written (trigger, so direct SQL
-  too) and answers ACCEPTED or a domain error in the same call. The hub builds Spark filters from `F.col` and literals
-  (`hl7rt.subscriptions.compile_predicate`). Don't add a path that executes app-written SQL: in the spike, a
-  `(SELECT ...)` inside a SQL predicate parsed and ran with the hub's permissions. Joins, subqueries, aggregates, and
-  cross-event logic become new platform-built gold sources, not app rules.
-- **Filtering on a column is reading it.** Predicate fields must be in the app's granted `fields`, like output fields.
-- **Identity comes from the Data API, not the request.** Owner = `current_user` (the SP's Postgres role); RLS keeps apps
-  apart; destination = the app's binding. `tests/test_registry.py` covers spoofing, direct writes, and cross-app access.
+- **Rules are Databricks SQL, and Databricks compiles them.** The Subscription API (`src/subscription_api`, a Databricks
+  App) runs `DESCRIBE QUERY` against the caller's own views and passes Databricks' errors through unchanged. The only
+  rule logic of our own is the shape check (`rules.py`): one SELECT of columns, from one gold source, with a WHERE. No
+  joins, subqueries, CTEs, set operations, aggregates, parameters, or functions that reach outside the record.
+  - **Why the shape check:** the hub evaluates the WHERE with its own permissions. In the spike, a `(SELECT ...)` inside
+    app SQL ran with the hub's permissions.
+  - **Keep it small.** Don't add custom validation that Databricks already does. Joins and cross-event logic become new
+    platform-built gold sources, not app rules.
+- **The hub evaluates exactly what the SQL editor would.** It runs the stored WHERE with `F.expr` over the record.
+  `tests/test_subscriptions.py` compares the hub with `spark.sql` for each operator, NULLs included. The hub re-checks
+  each rule (shape plus granted columns) before running it, and a rule that fails on data is FAILED alone.
+- **Grants live in Unity Catalog.** Each app's views `<catalog>.sub_<app>.<source>` expose only its granted fields
+  (`make registry`, from `subscriber_apps`). The API's SP may read them; apps don't need to. Filtering on a column is
+  reading it, and an ungranted column is Databricks' own `UNRESOLVED_COLUMN`.
+- **The API is the only way in.**
+  - **Identity:** the caller is the `X-Forwarded-Email` the Apps proxy sets (the SP's application ID). The proxy
+    overwrites a forged copy (verified live).
+  - **Registry access:** app roles are NOLOGIN and granted only to `subscription_service` (the API's SP). The API writes
+    with `SET LOCAL ROLE <app>`, so the owner trigger and RLS see the app.
+  - **No other path:** the Lakebase Data API is off, and old SP login roles are dropped. E2E check 6 and
+    `tests/test_registry.py` guard this.
+- **Postgres 16+:** the role's creator doesn't get `SET` on it. Even the registry owner can't act as an app without an
+  explicit `GRANT <app> TO <me> WITH SET TRUE`, which the perf seeding does and then revokes.
+- **The API is stateless and horizontally scaled:** a fixed 2 instances (`app_min_instances` = `app_max_instances`).
+  - **Why fixed:** load-based autoscaling (min < max) isn't enabled for this workspace ("Autoscaling is not enabled for
+    this workspace"). The Apps team plans it as a private preview, with 2–3 minute scale-up.
+  - **Updating the count:** instance counts change through the new update API (`databricks apps create-update`), not
+    `PATCH`.
 - **Each app reads only its own hub:** its own access connector with Data Receiver on that hub, behind its own UC
   service credential, ACCESS granted to its SP only (`subscriber_apps` in Terraform, then `make uc`).
 - **No silent states in the app.** It exits non-zero on a refused or failed rule, an unconfirmed activation, a stopped
-  hub (heartbeat), or a non-SP identity. It prints only the revisions it just registered.
+  hub (heartbeat), a non-SP identity, or an app that isn't onboarded. It prints only the revisions it just registered.
   - **It never skips a match.** Its consumer group resumes from its last commit, so after time away it works through the
     backlog and reports it as a count ("catching up" / "caught up") before printing live matches. Re-registering an
     identical rule keeps the revision and prints `(unchanged)`.
   - **Running the app as an SP rewrites that SP's subscriptions** to match the code it was built from. Use `--e2e`
-    (only `e2e-*` names) or another app for checks while someone is using that SP.
+    (only `e2e-*` names) or another app for checks while someone is using that SP. Don't rebuild a jar someone is
+    running: it crashes with `NoClassDefFoundError`.
   - **Library logs are at WARN** (`simplelogger.properties`), so the demo output stays readable.
+- **The Java client is deliberately small:**
+  - `App`;
+  - `MySubscriptions` (name → SQL);
+  - `SubscriptionApi` (HTTP);
+  - `EventHubs` (UC token, OAUTHBEARER, consumer settings);
+  - `Listener` and `Notification` (the delivery contract);
+  - `E2E`.
+
+  Keep logic on the server.
 - **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). Its flows run
   batches concurrently, so the shared registry client serializes access (`tests/test_hub_registry.py`). Use pg8000:
-  psycopg[binary] aborted the serverless Python process.
+  psycopg[binary] aborted the serverless Python process. Serverless has no `persist`/`cache`, so a failed batch is
+  recomputed to find the failing rule.
+- **Hub scale is measured, not assumed:** at 1 rule p99 is 4.7 s; at 100 rules 24 s; at 1,000 rules a batch takes ~67 s
+  and it falls behind. Don't claim more until docs/SCALABILITY.md's next steps are measured.
 - **Monitoring reads the registry through Unity Catalog.** `make registry` registers the database as `<catalog>_registry`
   (`w.postgres.create_catalog`). The subscriptions dashboard reads the `subscription_monitor` views (platform only;
   nothing granted to `subscriber`). Views there are dropped and recreated: `CREATE OR REPLACE VIEW` can't change a
   column's type. `tests/test_dashboard.py` keeps both dashboards portable.
-- **Lakebase Data API accepts the SP's Databricks OAuth token** (no database credential needed for apps). Enable it by
-  API (`POST .../databases/<db>/data-api`), exposing `subscription_api` only.
 - **The Databricks SDK lets `DATABRICKS_*` environment variables override a profile.** The app pins
   `auth_type=oauth-m2m` from its profile and refuses to run as anything but a service principal.
-- **`--e2e` is the acceptance test** (20 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
+- **`--e2e` is the acceptance test** (24 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
   every new guarantee, and keep docs/subscriptions.md's table in step. Plans beyond one SP: docs/SCALABILITY.md.
 - **Serverless JAR tasks need environment_version 4+** (`java_dependencies`). Binding a job's `run_as` to an SP needs
   the deployer to have **Service Principal: User** on it, so the app's job is its own bundle (`src/subscriber`):

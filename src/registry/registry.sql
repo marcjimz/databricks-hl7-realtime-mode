@@ -1,36 +1,30 @@
--- Subscription registry (Lakebase Postgres). Idempotent: infra/registry.py applies it on every `make up`.
+-- Subscription registry (Lakebase Postgres). Idempotent: infra/registry.py applies it on every `make registry`.
 --
--- Apps call the functions in schema subscription_api through the Lakebase Data API, each as its own service principal's
--- Postgres role (member of `subscriber`). The hub pipeline reads subscription_registry and writes status + heartbeat.
+-- Only the Subscription API writes here (src/subscription_api, a Databricks App, as role `subscription_service`). For
+-- each call it switches to the calling app's role (SET LOCAL ROLE), so the owner trigger and row-level security below
+-- see the app, not the service. App roles are NOLOGIN and granted only to `subscription_service`: an app can't connect
+-- or use the Lakebase Data API, so the API is the only way in. The hub pipeline reads subscription_registry and writes
+-- status + heartbeat.
 --
--- A subscription's rule is a structured predicate (JSON), never SQL text:
---   {"and": [p, ...]} | {"or": [p, ...]} | {"not": p} | {"field": "<column>", "op": "<op>"[, "value": <literal>]}
--- It is validated when it is written (trigger), so `subscribe` either returns ACCEPTED or raises a domain error:
---   APP_NOT_ONBOARDED, SOURCE_DENIED, FIELDS_DENIED, FIELD_NOT_IN_SOURCE, FIELD_DENIED, OPERATOR_NOT_ALLOWED,
---   TYPE_MISMATCH, PREDICATE_INVALID, PREDICATE_TOO_COMPLEX, NOT_FOUND_OR_INACCESSIBLE, OWNERSHIP_DENIED
--- The hub builds its Spark filter from the same structure (hl7rt.subscriptions), so an accepted rule always runs.
+-- A rule is Databricks SQL, compiled by Databricks against the app's own views when it is registered:
+--   query: SELECT <fields> FROM <source> WHERE <where_sql>    (canonical; paste it into the SQL editor)
+-- Domain errors raised here: APP_NOT_ONBOARDED, SOURCE_DENIED, FIELDS_DENIED, NOT_FOUND_OR_INACCESSIBLE, OWNERSHIP_DENIED.
 
 DO $$ BEGIN CREATE ROLE subscriber NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE subscription_service NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
-CREATE SCHEMA IF NOT EXISTS subscription_registry;  -- internal; never exposed by the Data API
-CREATE SCHEMA IF NOT EXISTS subscription_api;       -- exposed; functions only
+CREATE SCHEMA IF NOT EXISTS subscription_registry;
+CREATE SCHEMA IF NOT EXISTS subscription_api;  -- functions only
 
--- Platform-owned: the gold sources and their columns (from hl7rt.gold, written by infra/registry.py).
-CREATE TABLE IF NOT EXISTS subscription_registry.source_columns (
-  source      text NOT NULL,
-  column_name text NOT NULL,
-  data_type   text NOT NULL CHECK (data_type IN ('string', 'int', 'long', 'double', 'timestamp')),
-  PRIMARY KEY (source, column_name)
-);
-
--- Platform-owned onboarding: what each app may read and where its notifications go.
+-- Platform-owned onboarding: who each app is, what it may read, and where its notifications go.
 CREATE TABLE IF NOT EXISTS subscription_registry.apps (
-  app_role          text PRIMARY KEY,  -- the app's Postgres role = its service principal's application ID
+  app_role          text PRIMARY KEY,  -- the app's NOLOGIN Postgres role (app_<name>)
   app_name          text NOT NULL UNIQUE,
   destination_topic text NOT NULL,     -- the app's own Event Hub
   allowed_sources   text[] NOT NULL,
-  allowed_fields    text[] NOT NULL    -- readable and filterable columns
+  allowed_fields    text[] NOT NULL    -- readable and filterable columns (also the columns of its UC views)
 );
+ALTER TABLE subscription_registry.apps ADD COLUMN IF NOT EXISTS service_principal text UNIQUE;  -- application ID
 
 CREATE SEQUENCE IF NOT EXISTS subscription_registry.generation;
 
@@ -41,14 +35,30 @@ CREATE TABLE IF NOT EXISTS subscription_registry.subscriptions (
   revision        int  NOT NULL DEFAULT 1,
   enabled         bool NOT NULL DEFAULT true,
   source          text NOT NULL,
-  predicate       jsonb NOT NULL,
-  predicate_sql   text NOT NULL DEFAULT '',  -- human-readable rendering; never executed
+  query           text NOT NULL,
+  where_sql       text,              -- NULL: every record
   fields          text[] NOT NULL,
   generation      bigint NOT NULL DEFAULT 0,
   updated_at      timestamptz NOT NULL DEFAULT now(),
   UNIQUE (owner, name)
 );
 CREATE INDEX IF NOT EXISTS subscriptions_generation ON subscription_registry.subscriptions (generation);
+
+-- Migration from structured predicates (2026-11): their owners were the old SP-named roles, so the rows go; apps
+-- re-register their SQL rules on their next run.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = 'subscription_registry' AND table_name = 'subscriptions' AND column_name = 'predicate') THEN
+    DROP VIEW IF EXISTS subscription_monitor.subscriptions;  -- recreated below
+    DELETE FROM subscription_registry.subscriptions;
+    ALTER TABLE subscription_registry.subscriptions DROP COLUMN predicate, DROP COLUMN predicate_sql,
+      ADD COLUMN query text NOT NULL, ADD COLUMN where_sql text;
+  END IF;
+END $$;
+DROP FUNCTION IF EXISTS subscription_api.subscribe(text, text, jsonb, text[]);
+DROP FUNCTION IF EXISTS subscription_registry.render(jsonb, text, text[], int);
+DROP FUNCTION IF EXISTS subscription_registry.literal(jsonb, text, text);
+DROP TABLE IF EXISTS subscription_registry.source_columns;
 
 -- Written by the hub: the revision it actually runs.
 CREATE TABLE IF NOT EXISTS subscription_registry.status (
@@ -68,85 +78,8 @@ CREATE TABLE IF NOT EXISTS subscription_registry.hub_heartbeat (
 );
 
 -- ---------------------------------------------------------------------------------------------------------------------
--- Predicate validation. Returns the SQL rendering; raises a domain error otherwise.
-CREATE OR REPLACE FUNCTION subscription_registry.literal(v jsonb, t text, f text) RETURNS text
-LANGUAGE plpgsql IMMUTABLE AS $$
-BEGIN
-  IF t = 'string' AND jsonb_typeof(v) = 'string' AND length(v #>> '{}') <= 1000 THEN
-    RETURN quote_literal(v #>> '{}');
-  ELSIF t IN ('int', 'long') AND jsonb_typeof(v) = 'number' AND (v #>> '{}') ~ '^-?[0-9]{1,18}$' THEN
-    RETURN v #>> '{}';
-  ELSIF t = 'double' AND jsonb_typeof(v) = 'number' THEN
-    RETURN v #>> '{}';
-  ELSIF t = 'timestamp' AND jsonb_typeof(v) = 'string'
-        AND (v #>> '{}') ~ '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$' THEN
-    PERFORM (v #>> '{}')::timestamptz;  -- rejects impossible dates
-    RETURN 'TIMESTAMP ' || quote_literal(v #>> '{}');
-  END IF;
-  RAISE EXCEPTION 'TYPE_MISMATCH: % is %, got %', f, t, v USING ERRCODE = '22023';
-EXCEPTION WHEN datetime_field_overflow OR invalid_datetime_format THEN
-  RAISE EXCEPTION 'TYPE_MISMATCH: % is %, got %', f, t, v USING ERRCODE = '22023';
-END $$;
-
-CREATE OR REPLACE FUNCTION subscription_registry.render(p jsonb, src text, granted text[], depth int DEFAULT 1)
-RETURNS text LANGUAGE plpgsql STABLE AS $$
-DECLARE
-  keys text[]; f text; op text; t text; v jsonb; parts text[]; child jsonb;
-BEGIN
-  IF depth > 8 THEN RAISE EXCEPTION 'PREDICATE_TOO_COMPLEX: nested deeper than 8' USING ERRCODE = '22023'; END IF;
-  IF jsonb_typeof(p) <> 'object' THEN RAISE EXCEPTION 'PREDICATE_INVALID: expected an object' USING ERRCODE = '22023'; END IF;
-  keys := ARRAY(SELECT jsonb_object_keys(p) ORDER BY 1);
-
-  IF keys = ARRAY['and'] OR keys = ARRAY['or'] THEN
-    IF jsonb_typeof(p -> keys[1]) <> 'array' OR jsonb_array_length(p -> keys[1]) NOT BETWEEN 2 AND 50 THEN
-      RAISE EXCEPTION 'PREDICATE_INVALID: % takes 2 to 50 predicates', keys[1] USING ERRCODE = '22023';
-    END IF;
-    FOR child IN SELECT * FROM jsonb_array_elements(p -> keys[1]) LOOP
-      parts := parts || ('(' || subscription_registry.render(child, src, granted, depth + 1) || ')');
-    END LOOP;
-    RETURN array_to_string(parts, ' ' || upper(keys[1]) || ' ');
-  ELSIF keys = ARRAY['not'] THEN
-    RETURN 'NOT (' || subscription_registry.render(p -> 'not', src, granted, depth + 1) || ')';
-  ELSIF NOT (keys = ARRAY['field', 'op'] OR keys = ARRAY['field', 'op', 'value']) THEN
-    RAISE EXCEPTION 'PREDICATE_INVALID: unknown keys %', keys USING ERRCODE = '22023';
-  END IF;
-
-  f := p ->> 'field'; op := p ->> 'op'; v := p -> 'value';
-  SELECT data_type INTO t FROM subscription_registry.source_columns WHERE source = src AND column_name = f;
-  IF t IS NULL THEN RAISE EXCEPTION 'FIELD_NOT_IN_SOURCE: % is not a column of %', f, src USING ERRCODE = '22023'; END IF;
-  -- Filtering on a column is reading it (matches reveal its value), so it must be granted too.
-  IF NOT f = ANY (granted) THEN RAISE EXCEPTION 'FIELD_DENIED: % is not granted to this app', f USING ERRCODE = '42501'; END IF;
-
-  IF op IN ('is_null', 'is_not_null') THEN
-    IF v IS NOT NULL THEN RAISE EXCEPTION 'PREDICATE_INVALID: % takes no value', op USING ERRCODE = '22023'; END IF;
-    RETURN format('%I IS %sNULL', f, CASE op WHEN 'is_not_null' THEN 'NOT ' ELSE '' END);
-  ELSIF v IS NULL THEN
-    RAISE EXCEPTION 'PREDICATE_INVALID: % needs a value', op USING ERRCODE = '22023';
-  ELSIF op IN ('eq', 'ne') THEN
-    RETURN format('%I %s %s', f, CASE op WHEN 'eq' THEN '=' ELSE '<>' END, subscription_registry.literal(v, t, f));
-  ELSIF op IN ('lt', 'le', 'gt', 'ge') THEN
-    IF t = 'string' THEN RAISE EXCEPTION 'OPERATOR_NOT_ALLOWED: % on string column %', op, f USING ERRCODE = '22023'; END IF;
-    RETURN format('%I %s %s', f, CASE op WHEN 'lt' THEN '<' WHEN 'le' THEN '<=' WHEN 'gt' THEN '>' ELSE '>=' END,
-                  subscription_registry.literal(v, t, f));
-  ELSIF op IN ('in', 'not_in') THEN
-    IF t = 'timestamp' THEN RAISE EXCEPTION 'OPERATOR_NOT_ALLOWED: % on timestamp column %', op, f USING ERRCODE = '22023'; END IF;
-    IF jsonb_typeof(v) <> 'array' OR jsonb_array_length(v) NOT BETWEEN 1 AND 1000 THEN
-      RAISE EXCEPTION 'PREDICATE_INVALID: % takes a list of 1 to 1000 values', op USING ERRCODE = '22023';
-    END IF;
-    RETURN format('%I %sIN (%s)', f, CASE op WHEN 'not_in' THEN 'NOT ' ELSE '' END,
-                  (SELECT string_agg(subscription_registry.literal(e, t, f), ', ') FROM jsonb_array_elements(v) e));
-  ELSIF op IN ('contains', 'starts_with', 'ends_with') THEN
-    IF t <> 'string' THEN RAISE EXCEPTION 'OPERATOR_NOT_ALLOWED: % on % column %', op, t, f USING ERRCODE = '22023'; END IF;
-    IF jsonb_typeof(v) <> 'string' OR length(v #>> '{}') NOT BETWEEN 1 AND 200 THEN
-      RAISE EXCEPTION 'TYPE_MISMATCH: % takes a string of 1 to 200 characters', op USING ERRCODE = '22023';
-    END IF;
-    RETURN format('%s(%I, %s)', replace(op, '_', ''), f, quote_literal(v #>> '{}'));
-  END IF;
-  RAISE EXCEPTION 'OPERATOR_NOT_ALLOWED: %', op USING ERRCODE = '22023';
-END $$;
-
--- Every write to subscriptions goes through here, including direct SQL that skips the API: owner is the authenticated
--- role, the app must be onboarded and granted, the predicate must validate, and revision/generation are server-assigned.
+-- Every write to subscriptions goes through here: the owner is the acting role (the app, never the service), the app
+-- must be onboarded and granted the source and fields, and revision/generation are server-assigned.
 CREATE OR REPLACE FUNCTION subscription_registry.stamp() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE app subscription_registry.apps;
 BEGIN
@@ -165,10 +98,6 @@ BEGIN
         (SELECT coalesce(array_agg(x), '{}') FROM unnest(NEW.fields) x WHERE x <> ALL (app.allowed_fields))
         USING ERRCODE = '42501';
     END IF;
-    IF (SELECT count(*) FROM jsonb_path_query(NEW.predicate, 'lax $.**') n WHERE jsonb_typeof(n) = 'object') > 100 THEN
-      RAISE EXCEPTION 'PREDICATE_TOO_COMPLEX: more than 100 nodes' USING ERRCODE = '22023';
-    END IF;
-    NEW.predicate_sql := subscription_registry.render(NEW.predicate, NEW.source, app.allowed_fields);
   END IF;
   NEW.generation := nextval('subscription_registry.generation');
   NEW.updated_at := now();
@@ -186,6 +115,8 @@ ALTER TABLE subscription_registry.subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE subscription_registry.status ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS own ON subscription_registry.apps;
 CREATE POLICY own ON subscription_registry.apps FOR SELECT TO subscriber USING (app_role = current_user);
+DROP POLICY IF EXISTS service ON subscription_registry.apps;  -- the service maps a verified caller to its app role
+CREATE POLICY service ON subscription_registry.apps FOR SELECT TO subscription_service USING (true);
 DROP POLICY IF EXISTS own ON subscription_registry.subscriptions;
 CREATE POLICY own ON subscription_registry.subscriptions TO subscriber
   USING (owner = current_user) WITH CHECK (owner = current_user);
@@ -194,23 +125,25 @@ CREATE POLICY own ON subscription_registry.status FOR SELECT TO subscriber
   USING (subscription_id IN (SELECT subscription_id FROM subscription_registry.subscriptions));
 
 -- ---------------------------------------------------------------------------------------------------------------------
--- API. SECURITY INVOKER: RLS and the trigger see the caller's own role.
-CREATE OR REPLACE FUNCTION subscription_api.subscribe(p_name text, p_source text, p_predicate jsonb, p_fields text[])
+-- API, called by the Subscription API as the app's role. SECURITY INVOKER: RLS and the trigger see the app.
+CREATE OR REPLACE FUNCTION subscription_api.subscribe(p_name text, p_source text, p_query text, p_where text,
+                                                      p_fields text[])
 RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER AS $$
 DECLARE s subscription_registry.subscriptions; topic text;
 BEGIN
-  INSERT INTO subscription_registry.subscriptions AS t (owner, name, source, predicate, fields)
-    VALUES (current_user, p_name, p_source, p_predicate, p_fields)
+  INSERT INTO subscription_registry.subscriptions AS t (owner, name, source, query, where_sql, fields)
+    VALUES (current_user, p_name, p_source, p_query, p_where, p_fields)
     ON CONFLICT (owner, name) DO UPDATE
-      SET source = excluded.source, predicate = excluded.predicate, fields = excluded.fields, enabled = true
-      WHERE (t.source, t.predicate, t.fields, t.enabled) IS DISTINCT FROM (excluded.source, excluded.predicate, excluded.fields, true)
+      SET source = excluded.source, query = excluded.query, where_sql = excluded.where_sql, fields = excluded.fields,
+          enabled = true
+      WHERE (t.source, t.query, t.fields, t.enabled) IS DISTINCT FROM (excluded.source, excluded.query, excluded.fields, true)
     RETURNING * INTO s;
   IF s.subscription_id IS NULL THEN  -- identical definition: no new revision
     SELECT * INTO s FROM subscription_registry.subscriptions WHERE owner = current_user AND name = p_name;
   END IF;
   SELECT destination_topic INTO topic FROM subscription_registry.apps WHERE app_role = current_user;
   RETURN jsonb_build_object('subscriptionId', s.subscription_id, 'name', s.name, 'revision', s.revision,
-    'state', 'ACCEPTED', 'predicateSql', s.predicate_sql, 'destination', topic);
+    'state', 'ACCEPTED', 'query', s.query, 'destination', topic);
 END $$;
 
 CREATE OR REPLACE FUNCTION subscription_api.unsubscribe(p_name text)
@@ -231,7 +164,7 @@ RETURNS jsonb LANGUAGE sql STABLE SECURITY INVOKER AS $$
   SELECT jsonb_build_object(
     'subscriptions', coalesce((SELECT jsonb_agg(jsonb_build_object(
         'subscriptionId', s.subscription_id, 'name', s.name, 'revision', s.revision, 'enabled', s.enabled,
-        'source', s.source, 'predicateSql', s.predicate_sql, 'fields', s.fields,
+        'source', s.source, 'query', s.query, 'fields', s.fields,
         'state', CASE WHEN st.revision = s.revision THEN st.state ELSE 'PENDING' END,
         'error', CASE WHEN st.revision = s.revision THEN st.error END) ORDER BY s.name)
       FROM subscription_registry.subscriptions s LEFT JOIN subscription_registry.status st USING (subscription_id)), '[]'),
@@ -245,8 +178,8 @@ CREATE SCHEMA IF NOT EXISTS subscription_monitor;
 
 DROP VIEW IF EXISTS subscription_monitor.subscriptions;  -- views only: dropped and recreated, so columns can change
 CREATE VIEW subscription_monitor.subscriptions AS
-SELECT a.app_name, s.owner AS service_principal, s.name AS subscription, s.revision, s.source,
-       s.predicate_sql AS rule, array_to_string(s.fields, ', ') AS fields,
+SELECT a.app_name, a.service_principal, s.name AS subscription, s.revision, s.source,
+       s.query AS rule, array_to_string(s.fields, ', ') AS fields,
        CASE WHEN st.revision = s.revision THEN st.state WHEN s.enabled THEN 'PENDING' ELSE 'CANCELLING' END AS state,
        CASE WHEN st.revision = s.revision THEN st.error END AS error,
        s.updated_at AS registered_at,
@@ -267,15 +200,14 @@ REVOKE ALL ON SCHEMA subscription_monitor FROM PUBLIC;
 REVOKE ALL ON ALL TABLES IN SCHEMA subscription_monitor FROM PUBLIC;
 
 -- ---------------------------------------------------------------------------------------------------------------------
--- Grants. Apps get the API plus the RLS-filtered table access its INVOKER functions need; nothing by default.
+-- Grants. App roles get the API plus the RLS-filtered table access its INVOKER functions need. The service gets no
+-- grants of its own: membership in each app role (infra/registry.py) lets it SET ROLE to its caller, and its policy on
+-- apps lets it map a verified caller to that role. Nothing by default.
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA subscription_api FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA subscription_registry FROM PUBLIC;
 GRANT USAGE ON SCHEMA subscription_api, subscription_registry TO subscriber;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA subscription_api TO subscriber;
-GRANT EXECUTE ON FUNCTION subscription_registry.render(jsonb, text, text[], int),
-                          subscription_registry.literal(jsonb, text, text),
-                          subscription_registry.stamp() TO subscriber;
-GRANT SELECT ON subscription_registry.apps, subscription_registry.status, subscription_registry.source_columns,
-                subscription_registry.hub_heartbeat TO subscriber;
+GRANT EXECUTE ON FUNCTION subscription_registry.stamp() TO subscriber;
+GRANT SELECT ON subscription_registry.apps, subscription_registry.status, subscription_registry.hub_heartbeat TO subscriber;
 GRANT SELECT, INSERT, UPDATE ON subscription_registry.subscriptions TO subscriber;
 GRANT USAGE ON SEQUENCE subscription_registry.generation TO subscriber;

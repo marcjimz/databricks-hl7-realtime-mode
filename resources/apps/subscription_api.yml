@@ -1,0 +1,34 @@
+# The Subscription API: the one way apps register subscriptions (src/subscription_api). A Databricks App with its own
+# service principal; subscriber apps call it with their SP's OAuth token and get CAN_USE from `make registry`.
+# Horizontal scaling: a fixed instance count (load-based autoscaling isn't enabled for this workspace; when it is, set
+# app_min_instances < app_max_instances). The app is stateless, so any instance serves any call.
+resources:
+  apps:
+    subscription_api:
+      name: ${var.subscription_api_app}
+      description: HL7 subscriptions - register SQL rules for the subscription hub
+      source_code_path: ../../src/subscription_api
+      compute_size: MEDIUM
+      compute_min_instances: ${var.app_min_instances}
+      compute_max_instances: ${var.app_max_instances}
+      config:
+        command: ["python", "app.py"]
+        env:
+          - name: HL7_CATALOG
+            value: ${var.catalog}
+          - name: HL7_REGISTRY_ENDPOINT
+            value: ${var.registry_endpoint}
+          - name: HL7_REGISTRY_DATABASE
+            value: ${var.registry_database}
+          - name: DATABRICKS_WAREHOUSE_ID
+            value_from: sql-warehouse
+      resources:
+        - name: sql-warehouse
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: CAN_USE
+        - name: registry
+          postgres:
+            branch: projects/${var.registry_project}/branches/production
+            database: projects/${var.registry_project}/branches/production/databases/databricks-postgres
+            permission: CAN_CONNECT_AND_CREATE

@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn>=0.32
+sqlglot>=30.27
+pg8000>=1.31
+databricks-sdk>=0.159

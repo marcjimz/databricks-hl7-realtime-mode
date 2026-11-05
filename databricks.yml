@@ -92,6 +92,15 @@ variables:
   registry_database:
     description: Postgres database with the registry schemas.
     default: databricks_postgres
+  subscription_api_app:
+    description: Name of the Subscription API app (Databricks App names are at most 30 characters).
+    default: hl7-subscriptions-${bundle.target}
+  app_min_instances:
+    description: Subscription API instances (horizontal scaling). Equal to app_max_instances unless autoscaling is enabled.
+    default: 2
+  app_max_instances:
+    description: Subscription API instances (maximum).
+    default: 2
   registry_catalog:
     description: The registry database in Unity Catalog (registered by make registry), read by the subscriptions dashboard.
     default: ${var.catalog}_registry

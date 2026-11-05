@@ -18,6 +18,7 @@ resources:
         dependencies:
           - pg8000>=1.31        # pure Python; psycopg[binary] aborted the serverless Python process
           - databricks-sdk>=0.159  # Lakebase endpoint + database credential APIs
+          - sqlglot>=30.27         # the hub re-checks each SQL rule (src/subscription_api/rules.py)
       configuration:
         hl7.eh.namespace: ${var.eh_namespace}
         hl7.eh.service_credential: ${var.eh_service_credential}

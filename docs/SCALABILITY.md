@@ -1,9 +1,15 @@
 # Scalability, security, and production-readiness test plan
 
 This plan is for showing that runtime subscriptions hold up with many apps, many subscriptions, and changing load,
-and that apps stay isolated from each other while that happens. Today's evidence: one live app with a handful of
-rules (20/20 end-to-end checks), plus 25 registry tests against real PostgreSQL. Nothing here has been run at scale
-yet. Each section names the test that will prove it, and the pass bar.
+and that apps stay isolated from each other while that happens.
+
+Today's evidence:
+- one live app, with 24/24 end-to-end checks through the Subscription API;
+- registry and API tests against a real PostgreSQL;
+- a first hub measurement at 1, 100, and 1,000 rules (below). It shows the hub's batch time growing with the rule
+  count.
+
+Each section names the test that will prove it, and the pass bar.
 
 ## What has to scale
 
@@ -24,27 +30,53 @@ yet. Each section names the test that will prove it, and the pass bar.
 | Event Hubs partitions | 200 × PU per namespace; 100 per hub | app hubs at 4 partitions: ~190 apps at 4 PU. At 1 partition: ~760 | `partition_count` per app (1 for low-volume apps) |
 | Kafka consumer groups | 1,000 per namespace | one group per app instance set, plus the E2E's throwaway groups | delete stale groups; namespace sharding |
 | Brokered connections | 10,000 × PU | each app consumer ≈ 1 connection per broker it reads | fine to thousands of apps |
-| Lakebase connections | by CU: 105 at 0.5 CU … 1,795 at 8 CU (min(max, 8 × min) rule) | hub: 1 per hub pipeline; Data API pools its own | raise min/max CU; read replica for the hub |
-| Lakebase Data API rate | **unpublished** | app subscribe/list calls; the app polls `list` while activating and every 30 s | measure (test P3); ask Databricks for the limit |
+| Lakebase connections | by CU: 105 at 0.5 CU … 1,795 at 8 CU (min(max, 8 × min) rule) | hub: 1 per hub pipeline; the API: a small pool per instance | raise min/max CU; read replica for the hub |
+| Subscription API | 1–5 fixed instances per app (autoscaling: future private preview); each declare compiles new rules on a SQL warehouse | app declare/wait calls; the app polls status every 30 s | more instances; warehouse sizing; measure (test P3) |
 | UC temporary service credentials | **unpublished** | one call per app per token lifetime (~1 h), cached | measure (test P3) |
 | Azure RBAC role assignments | 4,000 per subscription | 1 per app (Receiver on its hub) | fine to thousands; group-based assignment beyond |
 | Hub compute | serverless autoscaling; one filter per rule per source per batch | batch time grows with rules: **the first bottleneck to measure** | single-pass evaluation, then hub shards (below) |
 
-### The hub is the part most likely to need work
+### The hub is the part that needs work (measured)
 
-Today each micro-batch builds one filter per rule and unions the results. That is simple and correct, but planning
-and execution grow linearly with the number of rules. The steps, in order, each only if the previous measurement
-calls for it:
+The hub evaluates every rule of a source in one projection per micro-batch: the matching rules per record, as an array,
+then explode, in chunks of 200 rules. That's step 2 of the ladder below, built. First measurement (P1, 2026-11-05, demo
+load, every rule matching 0.1% of patients, one source):
 
-1. **Measure** batch time at 10, 100, 1,000, and 10,000 rules per source (test P1).
-2. **Single pass per batch:** compute `array(when(rule_1, 1), when(rule_2, 2), …)` in one projection, drop nulls,
-   explode, and join to the rule's topic and fields. That's one scan and one plan whatever the rule count, and the
-   expressions stay `F.col` and literals.
-3. **Index equality rules:** most clinical rules start with `observation_cd = X` or `msg_type = Y`. Group rules by
-   that leading equality and join on it (broadcast) instead of evaluating every rule against every event.
-4. **Shard the hub:** add `shard` to `subscription_registry.subscriptions` (hash of the subscription ID) and run N
-   hub pipelines, each serving `shard = k`. That adds capacity and isolates failures. Each shard keeps its own
-   checkpoint and heartbeat.
+| Rules | Hub batch interval | Delivery p50 | p99 | Keeps up |
+|---|---|---|---|---|
+| 1 | ~2–3 s | 2.7 s | 4.7 s | yes |
+| 100 | 6.5–8.4 s | 18 s | 24 s | barely |
+| 1,000 | ~67 s | 155 s | 171 s | **no**: the backlog grows |
+
+All 1,000 rules compiled on serverless and went ACTIVE, with none FAILED. The data per batch is small, so batch time
+growing with rule count points at per-batch, per-rule work on the driver, not at data volume. A bigger driver isn't the
+lever, and serverless doesn't size the driver anyway. Suspects, to measure before fixing:
+- each rule re-checked with sqlglot every batch;
+- a 1,000-expression plan rebuilt and analyzed every batch;
+- each 200-rule chunk re-parsing the batch.
+
+The ladder, each step only if the previous measurement calls for it:
+
+1. **Measure each phase** per batch: refresh, check, plan, write. Timings go to a `hub_progress` table.
+2. **Single pass per batch** (built): one projection per chunk of rules.
+3. **Do per change what doesn't change per batch:**
+   - check and compile the rules once per registry generation, not every batch;
+   - parse the batch once, not once per chunk.
+4. **Index rules by their leading equality.** Most clinical rules start with `observation_cd_desc = 'Potassium'` or
+   `observation_cd = '2823-3'`. Group rules by that key and join each record to just the rules for its key (a broadcast
+   join against a small rules table); only the rest of the filter is evaluated. For example, 10,000 rules over
+   200 lab codes is about 50 evaluations per record instead of 10,000.
+5. **Shard the hub:**
+   - **How:** the API assigns each rule a `shard` (hash of its subscription ID, or by app for tenant isolation) when it's
+     registered. N hub pipelines each read the whole gold topic and evaluate only their shard's rules, with their own
+     checkpoint and heartbeat.
+   - **Gains:** capacity grows with N, planning is split across N drivers, and a bad batch on one shard doesn't stall
+     the others.
+   - **Costs:** each shard reads the full gold stream (N× Event Hubs read) and has its own compute.
+
+The Subscription API scales separately. It's stateless, with 2 fixed instances; Databricks Apps allows up to 5, and
+load-based autoscaling is a future private preview. Its load is registration calls and waits, not the data path. Test:
+concurrent `PUT` + `GET ?wait` from many SPs at 2 vs 5 instances, against p99 latency and errors.
 
 ## Test plan
 
@@ -68,16 +100,16 @@ runs for every ordered pair (X attacks Y):
 | S8 | Read Y's hub with X's token | TopicAuthorizationException | live, against a gold topic |
 | S9 | **Write** to its own hub, or Y's (forge notifications) | denied: app connectors have Receiver only | live (own hub) |
 | S10 | Read any gold or hot-path topic | TopicAuthorizationException | live |
-| S11 | Predicate on a column it isn't granted (oracle) | FIELD_DENIED | live |
+| S11 | Filter on a column it isn't granted (oracle) | UNRESOLVED_COLUMN (its view has no such column) | live |
 | S12 | Revocation: remove X from `subscriber_apps`, `make up` | subscribe → APP_NOT_ONBOARDED; hub stops X's rules within 1 batch; token mint denied; record time to effect | not yet |
-| S13 | Expired or other-workspace token on the Data API | 401 | not yet |
+| S13 | Expired or other-workspace token on the Subscription API | 401 | not yet (anonymous → 401 verified) |
 | S14 | A user (not an SP) token | registry refuses (no role); the app exits 5 | live (exit 5 path) |
 
 Plus two fuzz tests:
-- **Predicate fuzzing:** property-based, random trees, unicode, huge literals, deep or wide nesting, wrong types, and
-  extra keys. Every input must give ACCEPTED or a domain error, never a 5xx.
-- **Differential check:** every ACCEPTED predicate compiles in `hl7rt.subscriptions` and renders the same semantics.
-  Run it in CI against a local PostgreSQL, the way `tests/test_registry.py` runs.
+- **Rule fuzzing:** property-based SQL: random filters, unicode, huge literals, deep or wide nesting, wrong types, and
+  odd syntax. Every input must give ACCEPTED, Databricks' error, or `SQL_NOT_ALLOWED`, never a 5xx.
+- **Differential check (built for each operator):** `tests/test_subscriptions.py` compares the hub with `spark.sql` for
+  the same rule over the same records. Extend it to generated rules.
 
 **Concurrency:** two instances of the same app revise one subscription at once (100 rounds). Revisions must be
 strictly increasing with no lost update (the final row equals one of the writes), and the hub ends on the latest
@@ -101,7 +133,7 @@ can't reach. Real service principals are only needed for the paths that authenti
 |---|---|---|---|---|
 | P1 | Hub rule scaling | rules per source 10 → 10,000; match ratio 0.1% / 1% / 10% | batch duration, gold → app latency (`gold_ts` vs the app hub's broker time) | p99 delivery < 5 s at 1,000 rules |
 | P2 | Event rate | gold 200 → 1,000 → 5,000 msg/s at 1,000 rules | same, plus hub input rows per batch | keeps up (no growing lag) |
-| P3 | Many real apps | 1 → 10 → 50 SPs running the Java app at once | Data API p99, UC token calls, activation time (subscribe → ACTIVE), Event Hubs connections | activation p99 < 15 s; no 429s |
+| P3 | Many real apps | 1 → 10 → 50 SPs running the Java app at once | Subscription API p99, UC token calls, activation time (subscribe → ACTIVE), Event Hubs connections | activation p99 < 15 s; no 429s |
 | P4 | Rule churn | 1 → 100 changes per minute across apps | reload time, activation p99, hub batch time | activation p99 < 15 s |
 | P5 | Fan-out | one event matching 1 → 500 apps | hub output rate, Event Hubs ingress, namespace CPU | namespace CPU < 70% |
 | P6 | Registry | 10,000 → 1,000,000 subscription rows | `max(generation)` and reload time; Lakebase CPU | poll < 50 ms p99 |
@@ -126,7 +158,7 @@ sets must be equal: no missing match, no extra one, nothing for a cancelled or s
 | E6 | Database token expiry (hourly) during a long run | hub reconnects; no gap in heartbeat > 2 min |
 | E7 | App crash between poll and commit | replays its uncommitted records; app dedupes |
 | E8 | Event Hubs throttling (exceed PU) | hub backs off; the heartbeat keeps advancing; app warns if not |
-| E9 | Rebuild (`make up` after a wipe) | E2E 20/20 PASS on the new environment |
+| E9 | Rebuild (`make up` after a wipe) | E2E 24/24 PASS on the new environment |
 
 ## How elastic scaling works, per component
 
@@ -145,7 +177,7 @@ sets must be equal: no missing match, no extra one, nothing for a cancelled or s
 4. **P2–P5 and E1–E9**, then the 12-hour soak (P7).
 5. **Results** in `docs/latency.md`, with p50/p99/max and what wasn't verified.
 
-## Implementation plan (agreed, not built yet)
+## Implementation plan (agreed, not built yet; the hub items above come first)
 
 **Where it runs:** on the dev environment, not a separate stack, with dedicated perf hubs. Don't run scale tests during
 RTM latency soaks.
