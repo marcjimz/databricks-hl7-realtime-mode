@@ -24,10 +24,8 @@ variables:
     description: The app's service principal (application ID); the job runs as it.
   credential:
     description: The app's UC service credential (sub_<app>_eventhubs).
-  registry_url:
-    description: The registry's Data API URL.
-  registry_endpoint:
-    description: The registry's Lakebase endpoint.
+  api_url:
+    description: The Subscription API's URL.
   eh_namespace:
     description: Event Hubs namespace.
   forbidden_credential:
@@ -36,6 +34,10 @@ variables:
     description: A topic the app must not read (a gold topic).
   own_topic:
     description: The app's own hub, which it must not write to.
+  base_schema:
+    description: The platform's gold schema; rules must use the app's own views instead.
+  data_api_url:
+    description: The Lakebase Data API URL apps used before the Subscription API; it must be gone.
 
 resources:
   jobs:
@@ -50,14 +52,15 @@ resources:
             main_class_name: com.databricks.hl7.subscriber.App
             parameters:
               - --e2e
-              - registry.url=${var.registry_url}
-              - registry.endpoint=${var.registry_endpoint}
+              - api.url=${var.api_url}
               - eventhubs.namespace=${var.eh_namespace}
               - eventhubs.credential=${var.credential}
               - consumer.group=${var.app}
               - e2e.forbidden_credential=${var.forbidden_credential}
               - e2e.forbidden_topic=${var.forbidden_topic}
               - e2e.own_topic=${var.own_topic}
+              - e2e.base_schema=${var.base_schema}
+              - e2e.data_api_url=${var.data_api_url}
       environments:
         - environment_key: java
           spec:

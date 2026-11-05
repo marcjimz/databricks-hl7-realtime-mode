@@ -1,25 +1,25 @@
 package com.databricks.hl7.subscriber;
 
-import static com.databricks.hl7.subscriber.subscriptions.Predicate.field;
-
-import com.databricks.hl7.subscriber.subscriptions.Subscription;
-import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
- * Edit this file to change what this app receives, rebuild, and run it again. On start the app registers exactly these
- * subscriptions (and cancels any you deleted). The registry accepts or refuses each one on the spot, and the hub applies
- * it at its next micro-batch, with no redeploy.
+ * What this app receives: subscription name -> Databricks SQL. Edit, rebuild, run. On start the app declares exactly
+ * these (and cancels any you deleted); Databricks compiles each one on the spot, and the hub applies it at its next
+ * micro-batch, with no redeploy.
  *
- * <p>source: a gold table this app is granted (gold_encounters, gold_observations, gold_orders). where: which records,
- * over that table's columns. fields: what to deliver. Both are limited to the columns this app is granted.
+ * <p>A rule is SELECT &lt;columns&gt; FROM &lt;gold source&gt; WHERE &lt;filter&gt;, with any Databricks SQL built-in in
+ * the filter. Try it first in the SQL editor against your own view, e.g. hl7_rtm_demo.sub_sp_hl7_realtime_demo.gold_observations:
+ * it returns the records the hub will deliver.
  */
 public final class MySubscriptions {
     private MySubscriptions() { }
 
-    public static List<Subscription> all() {
-        return List.of(
-                new Subscription("critical-potassium", "gold_observations",
-                        field("observation_cd_desc").eq("Potassium").and(field("value_num").ge(6.5)),
-                        List.of("patient_id", "value_num", "units")));
+    public static Map<String, String> all() {
+        var rules = new LinkedHashMap<String, String>();
+        rules.put("critical-potassium", """
+                SELECT patient_id, value_num, units FROM gold_observations
+                WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5""");
+        return rules;
     }
 }

@@ -19,7 +19,7 @@ REAL-TIME MODE (ms), an Event Hubs topic between every layer
 STREAMING TABLES (seconds)
   every topic ─► the Delta table of the same name: <catalog>.<schema>.<table>
 SUBSCRIPTIONS (seconds)
-  gold_* ─► subscription hub (rules registered at runtime in Lakebase) ─► each app's own topic
+  gold_* ─► subscription hub (SQL rules registered at runtime via the Subscription API) ─► each app's own topic
 ```
 
 - **Silver** parses HL7 with plain Spark into the 34-column Epic silver contract. Bad messages go to quarantine.
@@ -83,19 +83,22 @@ make help              # everything else
 
 ## Subscriptions demo
 
-A Java app subscribes at runtime, as its own service principal, to the gold records it needs. Change the code, run it
-again, and the new rule takes effect at the hub's next micro-batch, with no redeploy. How it works and its security
-model: [docs/subscriptions.md](docs/subscriptions.md). Diagrams and a three-slide overview: [docs/diagrams](docs/diagrams/).
+A Java app subscribes at runtime, as its own service principal, to the gold records it needs. A rule is plain
+**Databricks SQL**. The app sends it to the **Subscription API** (a Databricks App), Databricks compiles it on the spot,
+and the hub applies it at its next micro-batch, with no redeploy. Test a rule in the SQL editor first: the same query
+returns the records the hub delivers. How it works and its security model: [docs/subscriptions.md](docs/subscriptions.md).
+Diagrams and a three-slide overview: [docs/diagrams](docs/diagrams/).
 
 ### Before you start
 
 1. **Tools:** Java 17+ and Maven 3.9+ (`java -version`, `mvn -v`). If your network blocks Maven Central, point Maven
    at a mirror in `~/.m2/settings.xml`.
 2. **An onboarded app:** a service principal in `subscriber_apps` (`infra/azure/terraform.tfvars`), then `make up`.
-   That writes the app's settings (no secrets) to `src/subscriber/apps/<app>.properties`. One-time setup:
+   That creates its views, its hub, and its credential, and writes its settings (no secrets) to
+   `src/subscriber/apps/<app>.properties`. One-time setup:
    [docs/subscriptions.md](docs/subscriptions.md#set-up-bring-your-own-service-principal).
 3. **Its profile:** `[<app>]` in `~/.databrickscfg` with the SP's `client_id` and `client_secret`.
-4. **The pipelines running:** `make demo dev`, which includes the subscription hub.
+4. **Everything running:** `make demo dev`, which includes the subscription hub and the Subscription API.
 
 Run every command below from the repo root.
 
@@ -105,114 +108,122 @@ Run every command below from the repo root.
 $ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar --e2e
 …
 | 1 | Sign in | profile sp-hl7-realtime-demo | a service principal | 38fafc55-… | PASS |
-| 2 | Own Event Hubs credential | sub_sp_hl7_realtime_demo_eventhubs | token issued | token, expires … | PASS |
-| 3 | Another credential | hl7_rtm_demo_eventhubs | denied (no ACCESS) | PermissionDenied: … | PASS |
+| 6 | Skip the API (the registry's Data API) | list_subscriptions via https://… | not available | refused 503 | PASS |
+| 7 | Column not granted | SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
+| 11 | Subquery | SELECT patient_id FROM gold_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
 …
-| 19 | Cancel | unsubscribe e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
-| 20 | Hub heartbeat | gold_observations | a batch within 2 minutes | last batch … | PASS |
+| 23 | Cancel | DELETE e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
+| 24 | Hub heartbeat | gold_observations | a batch within 2 minutes | 2026-11-05T04:40:05… | PASS |
 
-20 checks, 0 failed
+24 checks, 0 failed
 ```
 
-The 20 checks cover sign-in, credential and topic isolation, every refusal, and register → active → notified →
-changed → cancelled ([the list](docs/subscriptions.md#end-to-end-checks)). The run takes about 2 minutes and exits 1
-if any check fails. Run it first: if it passes, the steps below will work.
+The 24 checks cover:
+- sign-in, and credential and topic isolation;
+- no way around the API;
+- Databricks' own compile errors, and the shapes the hub won't run;
+- one refusal applying nothing;
+- register → active → notified → changed → cancelled.
+
+[The list](docs/subscriptions.md#end-to-end-checks). The run takes about 2 minutes and exits 1 if any check fails. Run
+it first: if it passes, the steps below will work.
 
 ### 1. Run the app
 
-It registers what `src/subscriber/src/main/java/com/databricks/hl7/subscriber/MySubscriptions.java` declares, waits
-for the hub to confirm, and prints matches as they arrive:
+It declares what `src/subscriber/src/main/java/com/databricks/hl7/subscriber/MySubscriptions.java` holds, waits for the
+hub to confirm, and prints matches as they arrive:
 
 ```java
-new Subscription("critical-potassium", "gold_observations",
-        field("observation_cd_desc").eq("Potassium").and(field("value_num").ge(6.5)),
-        List.of("patient_id", "value_num", "units"))
+rules.put("critical-potassium", """
+        SELECT patient_id, value_num, units FROM gold_observations
+        WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5""");
 ```
 
 ```
 $ java -jar src/subscriber/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 1 ACCEPTED
-            (observation_cd_desc = 'Potassium') AND (value_num >= 6.5)
+            SELECT patient_id, value_num, units FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5
 hub         critical-potassium     revision 1 ACTIVE
 listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group sp-hl7-realtime-demo (Ctrl-C to stop)
-2026-11-04T18:42:49.611Z  critical-potassium     rev 1  {"patient_id":"MRN029394","value_num":6.6,"units":"mmol/L"}
-2026-11-04T18:42:50.115Z  critical-potassium     rev 1  {"patient_id":"MRN048702","value_num":6.8,"units":"mmol/L"}
+2026-11-05T05:02:15.775Z  critical-potassium     rev 1  {"patient_id":"MRN021417","units":"mmol/L","value_num":6.7}
+2026-11-05T05:02:15.838Z  critical-potassium     rev 1  {"patient_id":"MRN037740","units":"mmol/L","value_num":7.1}
 …
 ```
 
-- **`ACCEPTED`** means the registry validated the rule in that call. **`ACTIVE`** means the hub is running exactly
-  that revision. The timestamp is when the gold record was produced.
-- **Revision numbers count every change** to that subscription, so on a second walkthrough expect higher numbers.
-  Running an identical rule again keeps its revision and says `(unchanged)`.
+- **`ACCEPTED`** means Databricks compiled the rule against this app's own views in that call. **`ACTIVE`** means the
+  hub is running exactly that revision. The query shown is the canonical form that's stored. The timestamp is when the
+  gold record was produced.
+- **Test it in the SQL editor:** `SELECT patient_id, value_num, units FROM hl7_rtm_demo.sub_sp_hl7_realtime_demo.gold_observations
+  WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5`. Those are the records the hub delivers (live, not
+  historical).
+- **Revision numbers count every change** to that subscription. Running an identical rule again keeps its revision and
+  says `(unchanged)`.
 - **After time away, the app catches up first.** Its consumer group resumes where it last stopped and never skips, so
-  the backlog is reported as a count and only live matches are printed:
-  ```
-  catching up from 2026-11-04T18:42:01.468Z, where consumer group sp-hl7-realtime-demo last stopped
-  caught up   163 backlog notifications (2026-11-04T18:42:01.468Z to 2026-11-04T18:43:05.839Z); live from here
-  ```
+  the backlog is reported as a count (`catching up` … `caught up`). Matches for other subscriptions or earlier revisions
+  are counted as `skipped`.
 
 ### 2. Change the code and run it again
 
-Stop the app with Ctrl-C first: rebuilding replaces the jar a running app loads its classes from, and it would crash. Raise the threshold, drop `units`, and add a second subscription:
+Stop the app with Ctrl-C first: rebuilding replaces the jar a running app loads its classes from, and it would crash.
+Raise the threshold, drop `units`, and add a second subscription:
 
 ```java
-new Subscription("critical-potassium", "gold_observations",
-        field("observation_cd_desc").eq("Potassium").and(field("value_num").ge(7.0)),
-        List.of("patient_id", "value_num")),
-new Subscription("low-hemoglobin", "gold_observations",
-        field("observation_cd_desc").eq("Hemoglobin").and(field("value_num").lt(8)),
-        List.of("patient_id", "value_num", "abnormal_flag"))
+rules.put("critical-potassium", """
+        SELECT patient_id, value_num FROM gold_observations
+        WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0""");
+rules.put("low-hemoglobin", """
+        SELECT patient_id, value_num, abnormal_flag FROM gold_observations
+        WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8""");
 ```
 
 ```
 $ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 2 ACCEPTED
-            (observation_cd_desc = 'Potassium') AND (value_num >= 7.0)
+            SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0
 subscribed  low-hemoglobin         revision 1 ACCEPTED
-            (observation_cd_desc = 'Hemoglobin') AND (value_num < 8)
+            SELECT patient_id, value_num, abnormal_flag FROM gold_observations WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8
 hub         critical-potassium     revision 2 ACTIVE
 hub         low-hemoglobin         revision 1 ACTIVE
-listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo …
-2026-11-04T18:46:31.732Z  low-hemoglobin         rev 1  {"patient_id":"MRN009013","value_num":7.9,"abnormal_flag":"LL"}
-2026-11-04T18:46:31.545Z  critical-potassium     rev 2  {"patient_id":"MRN044207","value_num":7.1}
+listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group sp-hl7-realtime-demo (Ctrl-C to stop)
+2026-11-05T05:07:07.691Z  critical-potassium     rev 2  {"patient_id":"MRN037433","value_num":7.1}
+2026-11-05T05:07:07.770Z  low-hemoglobin         rev 1  {"abnormal_flag":"LL","patient_id":"MRN018101","value_num":7.9}
 …
-skipped     330 notifications for other subscriptions or earlier revisions
 ```
 
-- **The change shows up in the output:** potassium now arrives without `units` and only at 7.0 or above.
-- **`skipped`** counts matches still on the hub for revision 1 (or for the E2E run's subscriptions). They aren't
-  printed.
-- **Deleting a subscription from the code cancels it** on the next run (`cancelled  low-hemoglobin`).
+Potassium now arrives without `units`, and only at 7.0 or above. Deleting a subscription from the code cancels it on
+the next run (`cancelled  low-hemoglobin`).
 
 ### 3. Ask for something you aren't allowed
 
-Add a misspelled column and a column this app isn't granted. Both are refused in the same call, and the app exits
-with code 2 without listening:
+Add a misspelled column, a column this app isn't granted, and a subquery. Databricks' own errors come back in the same
+call, nothing is applied, and the app exits with code 2:
 
 ```java
-new Subscription("typo", "gold_observations", field("value_numm").gt(6), List.of("patient_id")),
-new Subscription("by-facility", "gold_observations", field("msg_sending_facility").eq("NORTH"), List.of("patient_id"))
+rules.put("typo", "SELECT patient_id FROM gold_observations WHERE value_numm > 6");
+rules.put("by-facility", "SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH'");
+rules.put("with-labs", "SELECT patient_id FROM gold_observations WHERE patient_id IN (SELECT patient_id FROM gold_encounters)");
 ```
 
 ```
 $ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
-subscribed  critical-potassium     revision 2 ACCEPTED (unchanged)
-            (observation_cd_desc = 'Potassium') AND (value_num >= 7.0)
-subscribed  low-hemoglobin         revision 1 ACCEPTED (unchanged)
-            (observation_cd_desc = 'Hemoglobin') AND (value_num < 8)
-refused     typo                   FIELD_NOT_IN_SOURCE: value_numm is not a column of gold_observations
-refused     by-facility            FIELD_DENIED: msg_sending_facility is not granted to this app
-ERROR       2 subscription(s) refused; fix MySubscriptions.java
+refused     typo                   UNRESOLVED_COLUMN.WITH_SUGGESTION: [UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `value_numm` cannot be resolved. Did you mean one of the following? [`value_num`, `value`, `units`, `visit_id`, `patient_id`]. …
+refused     by-facility            UNRESOLVED_COLUMN.WITH_SUGGESTION: … with name `msg_sending_facility` cannot be resolved. …
+refused     with-labs              SQL_NOT_ALLOWED: a subquery isn't allowed: a rule is SELECT <columns> FROM <source> WHERE <filter>
+ERROR       3 subscription(s) refused; fix MySubscriptions.java
 ```
 
-Remove the two lines again before the next step.
+- **Databricks only offers granted columns.** Its suggestions list only what this app may see, because it compiled
+  against the app's own view.
+- **Why a subquery is refused:** the hub runs the rule with its own permissions, so a rule is one filter over one
+  record. Joins, subqueries, and functions that reach outside the record are refused. Remove the three lines before the
+  next step.
 
 ### 4. Stop the hub
 
-The app doesn't listen silently to a stopped hub. From the repo root, stop the hub pipeline:
+The app doesn't listen silently to a stopped hub. Stop the hub pipeline:
 
 ```bash
 (export DATABRICKS_HOST=$(terraform -chdir=infra/azure output -raw workspace_url) DATABRICKS_AUTH_TYPE=azure-cli
@@ -220,23 +231,21 @@ The app doesn't listen silently to a stopped hub. From the repo root, stop the h
    -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["pipeline_id"])'))
 ```
 
-Wait two minutes, then run the app. It waits up to two more minutes for the hub, then exits with code 4:
+Wait two minutes, then run the app. The API waits up to two more minutes for the hub, then the app exits with code 4:
 
 ```
 $ java -jar src/subscriber/target/hl7-subscriber.jar
 …
 hub         critical-potassium     revision 2 ACTIVE
 hub         low-hemoglobin         revision 1 ACTIVE
-waiting     the hub hasn't finished a batch of [gold_observations] in 2 minutes; waiting up to 2 minutes
-ERROR       the hub isn't processing [gold_observations]: start the subscription_hub pipeline (make demo dev)
+ERROR       HUB_STALE: ["the hub hasn't processed gold_observations for 120 s"] (is the subscription_hub pipeline running? make demo dev)
 ```
 
-Start the hub again with `make demo dev`. It resumes from its checkpoint, so no gold record is skipped. Its first batch
-covers the time it was stopped, so the app's next run starts with "catching up".
+Start the hub again with `make demo dev`. It resumes from its checkpoint, so no gold record is skipped.
 
 ### Watch it on the dashboard
 
-The **HL7 subscriptions** dashboard (`make demo dev` prints its URL) shows each app's subscriptions, rules, and the
+The **HL7 subscriptions** dashboard (`make demo dev` prints its URL) shows each app's subscriptions, their SQL, and the
 hub's state, read live from the registry. Refresh it after each step above to see revisions, cancellations, and the
 hub's heartbeat change ([details](docs/subscriptions.md#monitoring)).
 
@@ -244,7 +253,7 @@ hub's heartbeat change ([details](docs/subscriptions.md#monitoring)).
 
 - `git checkout src/subscriber/src/main/java/com/databricks/hl7/subscriber/MySubscriptions.java` restores the
   original rule. The next run cancels `low-hemoglobin`.
-- `make stop dev` stops the pipelines and feeds.
+- `make stop dev` stops the pipelines, the feeds, and the Subscription API.
 
 ### In the workspace
 
@@ -275,8 +284,9 @@ infra/registry.py  Lakebase subscription registry bootstrap (make registry)
 databricks.yml   bundle variables and targets; resources/ has the pipelines, jobs, and dashboard
 src/hl7rt/       the logic: HL7 parsing, gold, Event Hubs wiring, generators
 src/pipelines/   thin pipeline definitions (including the subscription hub)
-src/registry/    the subscription registry's schema, validation, and API (Lakebase Postgres)
-src/subscriber/  the Java subscriber app
+src/registry/    the subscription registry's schema, owner trigger, RLS, and API (Lakebase Postgres)
+src/subscription_api/  the Subscription API (Databricks App): register SQL rules; Databricks compiles them
+src/subscriber/  the Java subscriber app (reference client)
 tests/           unit tests (local Spark)
 docs/            latency results, subscriptions, scalability plan, Epic JSON notes; diagrams/ (draw.io + slides)
 examples/        not deployed: the earlier SQL-file subscriptions, the earlier AWS cross-cloud setup

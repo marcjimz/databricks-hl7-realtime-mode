@@ -1,4 +1,4 @@
-package com.databricks.hl7.subscriber.hub;
+package com.databricks.hl7.subscriber;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;

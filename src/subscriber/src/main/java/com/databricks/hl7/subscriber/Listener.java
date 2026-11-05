@@ -1,4 +1,4 @@
-package com.databricks.hl7.subscriber.hub;
+package com.databricks.hl7.subscriber;
 
 import java.io.PrintStream;
 import java.time.Duration;

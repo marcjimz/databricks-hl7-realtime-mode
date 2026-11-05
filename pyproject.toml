@@ -20,6 +20,10 @@ dev = [
   "pyyaml>=6.0",
   "pg8000>=1.31",
   "databricks-sdk>=0.159",
+  "sqlglot>=30.27",
+  "fastapi>=0.115",
+  "uvicorn>=0.32",
+  "httpx>=0.27",
 ]
 
 [build-system]

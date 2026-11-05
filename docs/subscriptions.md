@@ -1,51 +1,73 @@
 # Subscriptions
 
-Apps subscribe at runtime to the gold records they need. Each app's matches arrive on its own Event Hub. Adding,
-changing, or cancelling a subscription is a single API call: no pipeline, hub, or deployment per subscription.
+Apps subscribe at runtime to the gold records they need, with a rule written in **Databricks SQL**. Each app's matches
+arrive on its own Event Hub. Adding, changing, or cancelling a subscription is a single API call: no pipeline, hub, or
+deployment per subscription.
 
 ```
-                                   Lakebase registry (Data API)
-   Java app (as its own SP) ──subscribe──►  subscription_api.subscribe(...)  ── ACCEPTED or refused, same call
-          ▲                                       │ rules + grants
-          │                                       ▼
-          │      gold_* topics ──► subscription hub pipeline (micro-batch) ──► <catalog>.subscribers.<app>
-          └──────────────────────────────── consume with a UC-minted Event Hubs token ◄──────┘
+Java app (as its own SP) ──PUT [{name, sql}]──► Subscription API (Databricks App, 2 instances, stateless)
+        │  GET ?wait=120 ─────────────────────►   caller = the SP the Apps proxy verified
+        │                                          shape check, then Databricks compiles the SQL (DESCRIBE QUERY)
+        │                                          against the app's own views: its errors pass through unchanged
+        │                                          store it as the app's own registry role (Lakebase)
+        │                                                       │ rules
+        │      gold_* topics ──► subscription hub (micro-batch, all rules in one pass) ──► <catalog>.subscribers.<app>
+        └──────────────────────── consume with a UC-minted Event Hubs token ◄────────────────────────────┘
 ```
 
-- **Registry** (`src/registry/registry.sql`, Lakebase Postgres): the apps' subscriptions and the platform's grants.
-  Apps reach it only through the functions in schema `subscription_api`, via the Lakebase Data API (REST).
+- **Subscription API** (`src/subscription_api`, `resources/apps/subscription_api.yml`) is the only way to register
+  subscriptions, and a thin facade:
+  - it identifies the caller;
+  - it checks the rule's shape (`rules.py`, the only rule logic of our own);
+  - Databricks compiles the rule;
+  - it stores the rule;
+  - it waits for the hub.
+- **Registry** (`src/registry/registry.sql`, Lakebase Postgres): the apps' subscriptions and the platform's grants. Only
+  the API writes to it, and always as the calling app's own role.
 - **Hub** (`resources/pipelines/subscription_hub.yml`, `src/pipelines/subscription_hub`, `src/hl7rt/subscriptions.py`):
-  one serverless pipeline with one flow per gold source. Each micro-batch it reloads the rules if they changed (one
-  indexed query), applies every rule, and writes matches to each app's hub.
-- **App** (`src/subscriber`, Java 17): declares its subscriptions in code, registers them on start, and consumes its hub.
+  one serverless pipeline with one flow per gold source.
+  - Each micro-batch it reloads the rules if they changed (one indexed query), re-checks them, and evaluates all of a
+    source's rules in one projection.
+  - It writes the matches to each app's hub.
+  - A rule that fails on the data is reported FAILED on its own; the other rules keep running.
+- **App** (`src/subscriber`, Java 17): declares its subscriptions in code, sends them to the API, and consumes its hub.
 
-The hub runs micro-batches (seconds, not milliseconds): it needs `foreachBatch` to apply a rule set that changes at
-runtime, and Real-Time Mode doesn't support `foreachBatch`. `foreach_batch_sink` is Public Preview, so the hub runs
-on the PREVIEW channel. The RTM hot path is unchanged.
+The hub runs micro-batches (seconds, not milliseconds). It needs `foreachBatch` to apply a rule set that changes at
+runtime, and Real-Time Mode doesn't support `foreachBatch`. `foreach_batch_sink` is Public Preview, so the hub runs on
+the PREVIEW channel. The RTM hot path is unchanged.
 
-**Measured (2026-11-05, one app, 1 rule, demo load, steady state):** the notification's broker time on the app's hub
-minus the gold record's broker time was p50 2.7 s, p99 4.7 s, max 5.2 s over 8,803 notifications in 15 minutes. From
-the raw HL7 topic to the app's hub it was p50 2.8 s and p99 4.8 s: the hot path adds well under 100 ms of that. Not
-included: the app's own poll after the record lands. Scale is untested: see [SCALABILITY.md](SCALABILITY.md).
+**Measured** (2026-11-05, demo load, every rule matching 0.1% of patients). Delivery is the app-hub broker time minus
+the gold record's broker time:
+
+| Rules on one source | Hub batch interval | Delivery p50 | p99 | Keeps up |
+|---|---|---|---|---|
+| 1 | ~2–3 s | 2.7 s | 4.7 s | yes |
+| 100 | 6.5–8.4 s | 18 s | 24 s | barely |
+| 1,000 | ~67 s | 155 s | 171 s | **no**: the backlog grows |
+
+At 1,000 rules every rule compiled and went ACTIVE, with none FAILED, but batch time grows about linearly with the rule
+count. The plan for that is in [SCALABILITY.md](SCALABILITY.md): measure each phase, move per-batch work to per-change
+work, index rules by their leading equality, then shard the hub. From the raw HL7 topic to the app's hub, one rule
+measured p99 4.8 s, of which the hot path takes under 100 ms. These numbers don't include the app's own poll.
 
 ## Security model
 
 | Layer | What enforces it |
 |---|---|
-| Who is calling | The app signs in as its own Databricks service principal (OAuth M2M). The Data API runs every call as that SP's Postgres role, so the registry knows the caller without trusting the request. |
-| Whose subscription | Row-level security plus a trigger: the owner is always `current_user`. An app can't read, change, or cancel another app's subscriptions, even with direct SQL that skips the API. |
-| What it may read | Platform grants per app (`subscriber_apps` in Terraform): sources and columns. Filtering on a column counts as reading it, so predicates may only use granted columns. Output fields are capped the same way. |
-| What a rule may do | Rules are a structured predicate (JSON), never SQL text. The registry validates every field, operator, and value type against the source's registered columns when the rule is written. The hub builds its Spark filter from `F.col` and literals only, so an app can't inject SQL, use a subquery, or reach another table. |
+| Who is calling | The app calls the Subscription API with its own service principal's OAuth token. The Databricks Apps proxy authenticates it, sets `X-Forwarded-Email` to the SP's application ID, and overwrites any forged copy (tested). Anonymous calls get 401. |
+| No way around the API | App roles in the registry are NOLOGIN, granted only to the API's service principal. Apps have no login role and no Data API: the Lakebase Data API is off, and a direct connection as the SP is refused (tested). |
+| Whose subscription | The API writes as the app's own role (`SET LOCAL ROLE`). Row-level security plus a trigger make the owner `current_user`, so an app can't read, change, or cancel another app's subscriptions, and the API can't write as itself. |
+| What it may read | Unity Catalog views per app (`<catalog>.sub_<app>.<source>`) expose only its granted fields (`subscriber_apps` in Terraform). Databricks compiles each rule against them, so an ungranted column or source is Databricks' own `UNRESOLVED_COLUMN` or `TABLE_OR_VIEW_NOT_FOUND`. Filtering on a column counts as reading it. The registry trigger re-checks the source and fields. |
+| What a rule may do | One SELECT of columns, from one source, with a WHERE filter: any Databricks built-in except functions that reach outside the record (network, secrets, JVM, AI, UDFs). No joins, subqueries, CTEs, set operations, aggregates, parameters, or multiple statements (`SQL_NOT_ALLOWED`). The hub re-checks each rule before evaluating it, granted columns included. |
 | Where results go | The registry assigns the destination (the app's own hub); a request can't name one. |
 | Who can read results | Each app's hub is readable only by that app's own access connector (Data Receiver on that one hub). Its UC service credential `sub_<app>_eventhubs` grants ACCESS only to the app's SP. The app holds no Azure secret: Unity Catalog mints a short-lived Event Hubs token. |
-| Secrets | The SP's OAuth secret lives in the Databricks CLI profile (`~/.databrickscfg`). `subscriber.properties` holds no secrets, and the app refuses to start if it finds one there. |
+| Secrets | The SP's OAuth secret lives in the Databricks CLI profile (`~/.databrickscfg`). The settings file holds none, and the app refuses to start if it finds one there. |
 
 **Not covered yet:**
 - **Hub identity.** The hub runs as whoever deploys the bundle, which is the registry owner and bypasses RLS. In
   production, give it a dedicated service principal with read access to the registry and write access to `status` and
   `hub_heartbeat` only.
-- **Cancellation is a soft stop.** Re-subscribing a cancelled name re-enables it under a new revision. The spec treats
-  cancellation as terminal.
+- **Cancellation is a soft stop.** Re-declaring a cancelled name re-enables it under a new revision.
 
 ## No silent failures
 
@@ -53,34 +75,61 @@ The app stops with a reason instead of listening quietly:
 
 | Exit | When |
 |---|---|
-| 2 | The registry refused a subscription (unknown or ungranted field, wrong type, unsupported operator, ...) |
-| 3 | The hub couldn't run an accepted revision (FAILED, with the reason) |
-| 4 | The hub didn't confirm the revisions within 2 minutes, or isn't processing their source (stopped pipeline) |
+| 2 | A rule was refused, with Databricks' own error or `SQL_NOT_ALLOWED`. Nothing was applied. |
+| 3 | The hub can't run an accepted revision (FAILED, with Spark's error) |
+| 4 | The hub didn't confirm within 2 minutes, or isn't processing their sources (`HUB_STALE`: stopped pipeline) |
 | 5 | It signed in as something other than a service principal |
-| 6 | The registry refused the identity (app not onboarded) |
+| 6 | Its service principal isn't an onboarded subscriber app (`APP_NOT_ONBOARDED`) |
 
-While listening, it prints only notifications for the exact subscription revisions it just registered. Matches for
-earlier revisions or other subscriptions still on the hub are counted as "skipped". Its consumer group resumes where it
-last committed, so after time away it first works through the backlog. It reports that backlog as a count ("catching
-up", then "caught up") rather than line by line, then prints live matches. Every 30 seconds it checks the hub's heartbeat and
-warns if a source hasn't been processed for 2 minutes. Notifications carry a stable `notificationId`, so redeliveries
-(the Kafka sink is at-least-once) are deduplicated.
+While listening, it prints only notifications for the subscription revisions it just registered.
+- **Skipped:** matches for earlier revisions or other subscriptions still on the hub are counted as "skipped".
+- **Catching up:** its consumer group resumes where it last committed, so after time away it first works through the
+  backlog, reported as a count ("catching up", then "caught up").
+- **Hub warnings:** every 30 seconds it checks that the hub is processing.
+- **Dedupe:** notifications carry a stable `notificationId`, so redeliveries are deduplicated (the Kafka sink is
+  at-least-once).
+
+## The Subscription API
+
+Every call carries the app's own SP token (`Authorization: Bearer …`). Every answer is JSON.
+
+| Call | Does |
+|---|---|
+| `PUT /api/v1/subscriptions` `{"subscriptions": [{"name", "sql"}]}` | Declares the app's full set. Atomic: if any rule is refused, nothing is applied (422, with Databricks' error per rule). Cancels what's no longer declared. Returns each revision, `unchanged`, the canonical query, and the destination. |
+| `PUT /api/v1/subscriptions/{name}` `{"sql"}` | One subscription |
+| `DELETE /api/v1/subscriptions/{name}` | Cancel one (404 `NOT_FOUND_OR_INACCESSIBLE` if it isn't yours) |
+| `GET /api/v1/subscriptions?wait=N` | This app's subscriptions and the hub's state. With `wait`, holds until `READY` (the hub runs exactly these revisions and is processing), `FAILED`, or the wait ends (`PENDING` / `HUB_STALE`). |
+| `POST /api/v1/validate` | The same checks as `PUT`, applying nothing (for CI) |
+
+Any language can be a client: an HTTP call, then a Kafka consumer that dedupes by `notificationId` and keeps only the
+revisions it registered (`Listener.java` is the reference).
+
+The App runs 2 instances behind one URL. Databricks Apps calls this horizontal scaling: a fixed instance count, 1–5 per
+app. Load-based autoscaling (min < max) isn't enabled for this workspace: the Apps team plans it as a private preview,
+and it adds instances in 2–3 minutes. When it is enabled, set `app_min_instances` < `app_max_instances` in
+`databricks.yml`. The API is stateless (the registry is the only state), so any instance serves any call.
 
 ## Rules
 
-```java
-field("observation_cd_desc").eq("Hemoglobin").and(field("value_num").lt(8))
+```sql
+SELECT patient_id, value_num FROM gold_observations
+WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8
 ```
 
-| Column type | Operators |
-|---|---|
-| string | `eq` `ne` `in` `notIn` `isNull` `isNotNull` `contains` `startsWith` `endsWith` (literal text, no wildcards) |
-| int / long / double | `eq` `ne` `lt` `le` `gt` `ge` `in` `notIn` `isNull` `isNotNull` |
-| timestamp | `eq` `ne` `lt` `le` `gt` `ge` `isNull` `isNotNull` (an `Instant`) |
-
-- Combine with `and`, `or`, `not`. Limits: 8 levels deep, 100 nodes, 1000 values per `in`.
-- Comparisons follow SQL: a NULL never matches, so use `isNull()` to select missing values.
-- The registry stores a SQL rendering of each rule for people to read (`predicateSql`). It is never executed.
+- **Allowed:**
+  - `SELECT` lists the fields to deliver: columns only.
+  - `FROM` names one gold source: `gold_encounters`, `gold_observations`, or `gold_orders`. Unqualified, or the app's own
+    view in full, as tested in the editor.
+  - `WHERE` is any Databricks SQL filter over that record: comparisons, `IN`, `BETWEEN`, `LIKE`, `IS NULL`, `AND`/`OR`/
+    `NOT`, and built-ins such as `lower`, `startswith`, `contains`, `abs`, `coalesce`.
+- **Refused:** functions that reach outside the record (`http_request`, `secret`, `reflect`/`java_method`, `ai_*`,
+  `read_*`, UC UDFs, `current_user`), and joins, subqueries, CTEs, set operations, aggregates, sorting, `LIMIT`,
+  parameters, and multiple statements. All are `SQL_NOT_ALLOWED`.
+- **The same semantics as the SQL editor:** the hub evaluates the stored WHERE with Spark, so the rule selects in the
+  hub what it selects in the editor (`tests/test_subscriptions.py` checks this for each operator, NULLs included).
+- **A rule can compile and still fail on data.** `value_num > 'high'` compiles, then fails when it meets a row (ANSI
+  cast), in the editor as in the hub. The hub reports that rule FAILED with Spark's error (exit 3), and the other rules
+  keep running.
 
 **Anything that needs a join, subquery, aggregate, or memory across events is out of scope for an app's rule.** The
 platform builds it once, as a new governed source (a gold topic/table), and grants it to the apps that need it:
@@ -88,7 +137,7 @@ platform builds it once, as a new governed source (a gold topic/table), and gran
 | Need | Pattern |
 |---|---|
 | Labs for patients currently in the ICU | A platform source that adds the patient's location to each lab (stream-static or stateful join at gold) |
-| A large cohort list | A platform-registered lookup source; a small list fits in `in(...)` |
+| A large cohort list | A platform-registered lookup source; a small list fits in `IN (...)` |
 | "Second abnormal result within 24 h" | Temporal correlation: a separate, stateful capability |
 | Current census by unit changed | Query-result changes: a materialized view plus a diff, platform-built |
 
@@ -97,8 +146,9 @@ platform builds it once, as a new governed source (a gold topic/table), and gran
 Each subscriber app is an onboarding step, done once per app. For the FE sandbox it's scripted, so it survives the
 Sunday wipe.
 
-1. **Create the app's service principal** in the workspace: Settings → Identity and access → Service principals →
-   Add, then Secrets → Generate. Keep the secret; you'll paste it into step 3.
+1. **Create the app's service principal and its secret.** In the UI: Settings → Identity and access → Service
+   principals → Add, then Secrets → Generate. Or from the CLI: `databricks service-principals create`, then
+   `databricks service-principal-secrets-proxy create <id>`, writing the secret straight into the profile in step 3.
 2. **Declare the app** in `infra/azure/terraform.tfvars`:
    ```hcl
    subscriber_apps = {
@@ -109,11 +159,15 @@ Sunday wipe.
      }
    }
    ```
-   Then `make up` creates or updates everything below. It's idempotent:
+   Then `make up`, and `make demo dev`. Both are idempotent:
    - **Terraform:** the app's hub `<catalog>.subscribers.my-app`, its access connector, and Data Receiver on that hub.
    - **`make uc`:** the UC service credential `sub_my_app_eventhubs`, with ACCESS granted to the SP.
-   - **`make registry`:** the Lakebase project and registry if missing, the SP's Postgres role, and its binding
-     (hub, sources, fields). It prints `registry.url` and `registry.endpoint` for step 4.
+   - **`make registry`** (also run by `make demo`):
+     - the app's NOLOGIN registry role and its binding;
+     - its views `<catalog>.sub_my_app.<source>`;
+     - CAN_USE on the Subscription API, and the API's read on those views.
+     - It also writes the app's settings to `src/subscriber/apps/my-app.properties` (gitignored, no secrets),
+       rewritten every run because URLs change when the workspace is rebuilt.
 3. **Add the SP's profile** to `~/.databrickscfg`, named after the app, then `chmod 600 ~/.databrickscfg`:
    ```ini
    [my-app]
@@ -124,46 +178,50 @@ Sunday wipe.
 4. **Check it end to end:**
    ```bash
    mvn -q -f src/subscriber package
-   java -jar src/subscriber/target/hl7-subscriber.jar --e2e      # 20 checks, PASS/FAIL table, exit 1 on any failure
+   java -jar src/subscriber/target/hl7-subscriber.jar --e2e      # 24 checks, PASS/FAIL table, exit 1 on any failure
    ```
-   `make registry` wrote the app's settings to `src/subscriber/apps/<app>.properties` (gitignored, no secrets). It
-   rewrites them on every run, because the registry URL changes when the workspace is rebuilt. With a different
-   profile name, set `databricks.profile` in a `subscriber.properties` of your own (see the `.example`).
 
 ## End-to-end checks
 
-`--e2e` runs every check below against the live system, as the app's service principal. It uses its own `e2e-*`
-subscriptions and consumer group, cleans up after itself, and exits 1 if any check fails. The same jar runs it in
-the workspace as a serverless job, as the same service principal, with no secret:
-`DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle deploy`, then the same with `bundle run e2e`. The deployer needs the **Service Principal: User** role on that SP to
-bind the job's `run_as`.
+`--e2e` runs every check below against the live system, as the app's service principal.
+- **It leaves the app's own subscriptions alone.** It uses only `e2e-*` names, one at a time, and its own consumer
+  group, and it cleans up after itself.
+- **Exit code:** it exits 1 if any check fails.
+- **In the workspace:** the same jar runs as a serverless job, as the same service principal, with no secret. Run
+  `DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle deploy`, then the same with `bundle run e2e`. The deployer
+  needs the **Service Principal: User** role on that SP to bind the job's `run_as`.
 
 | # | Check | Input | Expected |
 |---|---|---|---|
 | 1 | Sign in | the profile (or the job's identity) | a service principal |
 | 2 | Own Event Hubs credential | `sub_<app>_eventhubs` | token issued |
 | 3 | Another credential | `<catalog>_eventhubs` (the hub's) | denied (no ACCESS) |
-| 4 | Read a hub that isn't this app's | a gold topic | TopicAuthorizationException |
-| 5 | Write to its own hub (forge a notification) | `<catalog>.subscribers.<app>` | TopicAuthorizationException |
-| 6 | Output field not granted | fields include `msg_sending_facility` | FIELDS_DENIED |
-| 7 | Filter on a field not granted | `msg_sending_facility = 'NORTH'` | FIELD_DENIED |
-| 8 | Source not granted | `gold_encounters` | SOURCE_DENIED |
-| 9 | Unknown field | `value_numm > 6` | FIELD_NOT_IN_SOURCE |
-| 10 | Wrong value type | `value_num = "high"` | TYPE_MISMATCH |
-| 11 | SQL text instead of a predicate | `value_num > (SELECT max(...) FROM <gold topic>)` | PREDICATE_INVALID |
-| 12 | Cancel a subscription it doesn't have | `e2e-does-not-exist` | NOT_FOUND_OR_INACCESSIBLE |
-| 13 | Register | potassium ≥ 6.5, fields `patient_id, value_num` | ACCEPTED, with the SQL rendering |
-| 14 | Hub runs it | that revision | ACTIVE |
-| 15 | Notification on its own hub | | exactly those fields, value ≥ 6.5 |
-| 16 | Same rule again | identical definition | same revision |
-| 17 | Change the rule | ≥ 7.0, add `units` | next revision ACCEPTED, then ACTIVE |
-| 18 | Notification reflects the change | | new revision, new fields, value ≥ 7.0 |
-| 19 | Cancel | `unsubscribe` | CANCELLED by the hub |
-| 20 | Hub heartbeat | `gold_observations` | a batch within 2 minutes |
+| 4 | Read a hub that isn't this app's | a gold topic | not authorized |
+| 5 | Write to its own hub (forge a notification) | `<catalog>.subscribers.<app>` | not authorized (Receiver only) |
+| 6 | Skip the API | the registry's old Data API URL | not available |
+| 7 | Column not granted | `WHERE msg_sending_facility = 'NORTH'` | `UNRESOLVED_COLUMN` (Databricks) |
+| 8 | Source not granted | `FROM gold_encounters` | `TABLE_OR_VIEW_NOT_FOUND` (Databricks) |
+| 9 | Misspelled column | `WHERE value_numm > 6` | `UNRESOLVED_COLUMN` (Databricks) |
+| 10 | Syntax error | `WHER value_num > 6` | `PARSE_SYNTAX_ERROR` (Databricks) |
+| 11 | Subquery | `WHERE value_num > (SELECT max(...) ...)` | `SQL_NOT_ALLOWED` |
+| 12 | Join | `... JOIN gold_encounters ...` | `SQL_NOT_ALLOWED` |
+| 13 | Function that reaches outside the record | `http_request(...)` | `SQL_NOT_ALLOWED` |
+| 14 | Table outside this app's views | `FROM <catalog>.<schema>.gold_observations` | `SQL_NOT_ALLOWED` |
+| 15 | One refusal applies nothing | a valid and a misspelled rule together | 422, the valid one not registered |
+| 16 | Validate applies nothing | `POST /validate` | valid, not registered |
+| 17 | Register | potassium ≥ 6.5, fields `patient_id, value_num` | ACCEPTED, with the canonical SQL |
+| 18 | Hub runs it | that revision | ACTIVE |
+| 19 | Notification on its own hub | | exactly those fields, value ≥ 6.5 |
+| 20 | Same SQL again | identical rule | same revision, unchanged |
+| 21 | Change the rule | ≥ 7.0, add `units` | next revision, then ACTIVE |
+| 22 | Notification reflects the change | | new revision, new fields, value ≥ 7.0 |
+| 23 | Cancel | `DELETE` | CANCELLED by the hub |
+| 24 | Hub heartbeat | `gold_observations` | a batch within 2 minutes |
 
-Cross-app cases (another app reading, cancelling, or spoofing your rows) need a second service principal live. Today
-they run against a real PostgreSQL in `tests/test_registry.py`; [SCALABILITY.md](SCALABILITY.md) plans the
-multi-SP suite.
+Cross-app cases need a second service principal live:
+- **Today:** they run against a real PostgreSQL in `tests/test_registry.py` (an app can't read, cancel, or claim another
+  app's rows; the API can act only as its caller) and in `tests/test_subscription_api.py`.
+- **Planned:** [SCALABILITY.md](SCALABILITY.md) plans the multi-SP suite.
 
 ## Monitoring
 
@@ -171,19 +229,19 @@ The **HL7 subscriptions** dashboard (`make demo dev` prints its URL) reads the r
 - **Counts:** active subscriptions, failed ones, and apps subscribed.
 - **Hub heartbeat:** per gold source, seconds since the last batch and the rules running. A source is STALE after 2
   minutes.
-- **Current subscriptions:** per app and service principal, the registered revision, its rule (the readable rendering),
-  fields, the hub's state (PENDING, ACTIVE, FAILED with the error, or CANCELLING), and how long the hub took to confirm
-  it.
+- **Current subscriptions:** per app and service principal, the registered revision, its SQL, fields, the hub's state
+  (PENDING, ACTIVE, FAILED with the error, or CANCELLING), and how long the hub took to confirm it.
 - **Cancelled subscriptions**, below.
 
 How it reads the registry:
 - `make registry` registers the registry database in Unity Catalog as `<catalog>_registry`. The dashboard queries the
   views in its `subscription_monitor` schema from the SQL warehouse.
-- Those views show every app's rules, so they're for the platform team only. Nothing in them is granted to apps.
+- Those views show every app's rules, so they're for the platform team only. Nothing in them is granted to apps or the
+  API.
 - Dashboard viewers query as themselves, so they need access to that catalog.
 
-To revoke an app, remove it from `subscriber_apps` and run `make up`. `make registry` deletes its binding, so it
-can't subscribe, and the hub drops its rules at the next batch. Terraform deletes its hub and connector.
+To revoke an app, remove it from `subscriber_apps` and run `make up`. `make registry` deletes its binding, so the API
+refuses it (`APP_NOT_ONBOARDED`), and the hub drops its rules at the next batch. Terraform deletes its hub and connector.
 
 The service credential is used directly. A UC **Kafka connection** wrapping it (Catalog → Create → Connection → Kafka →
 Service Credential) is a governance object for Lakeflow Connect ingestion. It doesn't give an outside app a token.

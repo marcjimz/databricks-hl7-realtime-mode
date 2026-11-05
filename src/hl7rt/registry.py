@@ -10,19 +10,18 @@ Authenticates as the pipeline's identity with a short-lived Lakebase database cr
 Python; psycopg[binary] aborted the serverless pipeline process (native library clash).
 """
 
-import ssl
 import threading
 import time
 from functools import wraps
 
 from hl7rt.subscriptions import Rule
+from subscription_api.db import TOKEN_SECONDS, connect
 
 _RULES = (
-    "SELECT s.subscription_id::text, s.name, s.revision, s.enabled, s.source, s.predicate, s.fields, "
-    "a.destination_topic "
+    "SELECT s.subscription_id::text, s.name, s.revision, s.enabled, s.source, s.where_sql, s.fields, "
+    "a.destination_topic, a.allowed_fields "
     "FROM subscription_registry.subscriptions s JOIN subscription_registry.apps a ON a.app_role = s.owner"
 )
-_TOKEN_SECONDS = 2700  # database credentials last an hour; reconnect well before
 
 
 def _locked(method):
@@ -44,19 +43,10 @@ class Registry:
         self._lock = threading.RLock()
 
     def _db(self):
-        if self._conn is None or time.time() - self._opened > _TOKEN_SECONDS:
-            import pg8000.native
-            from databricks.sdk import WorkspaceClient
-
-            w = WorkspaceClient()
-            host = w.postgres.get_endpoint(name=self._endpoint).status.hosts.host
-            token = w.postgres.generate_database_credential(endpoint=self._endpoint).token
+        if self._conn is None or time.time() - self._opened > TOKEN_SECONDS:
             if self._conn is not None:
                 self._conn.close()
-            self._conn = pg8000.native.Connection(
-                w.current_user.me().user_name, host=host, database=self._database, password=token,
-                ssl_context=ssl.create_default_context(),
-            )  # fmt: skip
+            self._conn = connect(self._endpoint, self._database)
             self._opened = time.time()
         return self._conn
 
@@ -75,10 +65,12 @@ class Registry:
 
     @_locked
     def rules(self, source: str) -> list[Rule]:
+        """The enabled rules of `source`, except revisions the hub already found failing (until a new revision)."""
         return [
-            Rule(subscription_id=r[0], name=r[1], revision=r[2], source=r[4], predicate=r[5], fields=list(r[6]),
-                 topic=r[7])
-            for r in self._enabled if r[4] == source
+            Rule(subscription_id=r[0], name=r[1], revision=r[2], source=r[4], where=r[5], fields=list(r[6]),
+                 topic=r[7], granted=frozenset(r[8]))
+            for r in self._enabled
+            if r[4] == source and self._reported.get(r[0]) != (r[2], "FAILED")
         ]  # fmt: skip
 
     @_locked
