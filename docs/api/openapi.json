@@ -1,0 +1,854 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "HL7 Subscription API",
+    "description": "\nThe contract any application uses to receive gold HL7 records it chooses with Databricks SQL. The full guide, with\nexamples: docs/integration.md in the repo.\n\n**Authentication.** Call with `Authorization: Bearer <token>`. The token is your app's Databricks service principal's\nOAuth token (machine-to-machine, from `https://<workspace>/oidc/v1/token`). The Databricks Apps proxy verifies it and\ntells the API who is calling. The service principal must be an onboarded subscriber app.\n\n**The handshake.**\n1. `PUT /api/v1/subscriptions` with the app's whole set of `{name, sql}`. Databricks compiles every rule in that call.\n   Either all are accepted (each with a `revision` and your `destination` topic), or nothing is applied and each refusal\n   carries Databricks' own error.\n2. `GET /api/v1/subscriptions?wait=25`, repeated until `state` is `READY`: the hub is running exactly those revisions.\n   `FAILED` and `HUB_STALE` are final answers too. Keep each call short (\u2264 25 s): a proxy in between may cut long\n   requests.\n3. Read your `destination` topic (Kafka protocol on Azure Event Hubs, OAUTHBEARER with a token from Unity Catalog).\n   Deduplicate on `notificationId`, and act only on the `(subscriptionId, revision)` pairs you registered.\n\nA rule is `SELECT <columns> FROM <gold source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The same\nSQL against your views in the SQL editor returns the records you'll receive.\n",
+    "version": "1"
+  },
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "service"
+        ],
+        "summary": "Liveness",
+        "operationId": "health_api_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/validate": {
+      "post": {
+        "tags": [
+          "subscriptions"
+        ],
+        "summary": "Check rules without applying anything",
+        "operationId": "validate_api_v1_validate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Declared"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidateResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an onboarded subscriber app (APP_NOT_ONBOARDED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/subscriptions": {
+      "put": {
+        "tags": [
+          "subscriptions"
+        ],
+        "summary": "Declare your whole set (atomic; cancels what you no longer declare)",
+        "operationId": "declare_api_v1_subscriptions_put",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Declared"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeclareResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an onboarded subscriber app (APP_NOT_ONBOARDED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Refused: nothing applied; Databricks' error per rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusedResult"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "subscriptions"
+        ],
+        "summary": "Your subscriptions and whether the hub runs them (optionally wait)",
+        "operationId": "status_api_v1_subscriptions_get",
+        "parameters": [
+          {
+            "name": "wait",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "description": "Seconds to wait for READY or FAILED (capped at 60; use <= 25)",
+              "default": 0,
+              "title": "Wait"
+            },
+            "description": "Seconds to wait for READY or FAILED (capped at 60; use <= 25)"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Status"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an onboarded subscriber app (APP_NOT_ONBOARDED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/subscriptions/{name}": {
+      "put": {
+        "tags": [
+          "subscriptions"
+        ],
+        "summary": "Create or change one subscription",
+        "operationId": "put_one_api_v1_subscriptions__name__put",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/One"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an onboarded subscriber app (APP_NOT_ONBOARDED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Refused: nothing applied; Databricks' error per rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefusedResult"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "subscriptions"
+        ],
+        "summary": "Cancel one subscription",
+        "operationId": "cancel_api_v1_subscriptions__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Cancelled"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No verified caller",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an onboarded subscriber app (APP_NOT_ONBOARDED)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No active subscription with that name",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Accepted": {
+        "properties": {
+          "subscriptionId": {
+            "type": "string",
+            "title": "Subscriptionid",
+            "description": "Stable for the subscription's life; notifications carry it"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision",
+            "description": "Counts every change; an identical rule keeps its revision"
+          },
+          "state": {
+            "type": "string",
+            "const": "ACCEPTED",
+            "title": "State"
+          },
+          "query": {
+            "type": "string",
+            "title": "Query",
+            "description": "The canonical SQL that's stored and run"
+          },
+          "destination": {
+            "type": "string",
+            "title": "Destination",
+            "description": "Your topic: where notifications arrive"
+          },
+          "unchanged": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unchanged",
+            "description": "True when the rule was already active as is"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "subscriptionId",
+          "name",
+          "revision",
+          "state",
+          "query",
+          "destination"
+        ],
+        "title": "Accepted"
+      },
+      "Cancelled": {
+        "properties": {
+          "subscriptionId": {
+            "type": "string",
+            "title": "Subscriptionid"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
+          },
+          "state": {
+            "type": "string",
+            "const": "CANCELLING",
+            "title": "State",
+            "description": "The hub stops it at its next batch (then CANCELLED)"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "subscriptionId",
+          "name",
+          "revision",
+          "state"
+        ],
+        "title": "Cancelled"
+      },
+      "Checked": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "query": {
+            "type": "string",
+            "title": "Query"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "name",
+          "query"
+        ],
+        "title": "Checked"
+      },
+      "DeclareResult": {
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "const": true,
+            "title": "Applied"
+          },
+          "accepted": {
+            "items": {
+              "$ref": "#/components/schemas/Accepted"
+            },
+            "type": "array",
+            "title": "Accepted"
+          },
+          "cancelled": {
+            "items": {
+              "$ref": "#/components/schemas/Cancelled"
+            },
+            "type": "array",
+            "title": "Cancelled",
+            "description": "Subscriptions you no longer declare"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "applied",
+          "accepted",
+          "cancelled"
+        ],
+        "title": "DeclareResult"
+      },
+      "Declared": {
+        "properties": {
+          "subscriptions": {
+            "items": {
+              "$ref": "#/components/schemas/Item"
+            },
+            "type": "array",
+            "title": "Subscriptions",
+            "description": "Your app's whole set: anything not listed is cancelled"
+          }
+        },
+        "type": "object",
+        "required": [
+          "subscriptions"
+        ],
+        "title": "Declared"
+      },
+      "Error": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "UNAUTHENTICATED, APP_NOT_ONBOARDED, DUPLICATE_NAME, NOT_FOUND_OR_INACCESSIBLE"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "Error"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "Health": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "title": "Health"
+      },
+      "Item": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "1-63 lowercase letters, digits, or '-'; unique within your app",
+            "examples": [
+              "critical-potassium"
+            ]
+          },
+          "sql": {
+            "type": "string",
+            "title": "Sql",
+            "description": "SELECT <columns> FROM <gold source> WHERE <filter>, in Databricks SQL",
+            "examples": [
+              "SELECT patient_id, value_num, units FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "sql"
+        ],
+        "title": "Item"
+      },
+      "One": {
+        "properties": {
+          "sql": {
+            "type": "string",
+            "title": "Sql",
+            "description": "SELECT <columns> FROM <gold source> WHERE <filter>, in Databricks SQL"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sql"
+        ],
+        "title": "One"
+      },
+      "Refusal": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "description": "Databricks' error class (UNRESOLVED_COLUMN, PARSE_SYNTAX_ERROR, ...) or ours (SQL_NOT_ALLOWED, INVALID_NAME, RULE_LIMIT_REACHED)"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "Refusal"
+      },
+      "RefusedResult": {
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "const": false,
+            "title": "Applied"
+          },
+          "refused": {
+            "items": {
+              "$ref": "#/components/schemas/Refusal"
+            },
+            "type": "array",
+            "title": "Refused"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "applied",
+          "refused"
+        ],
+        "title": "RefusedResult"
+      },
+      "Status": {
+        "properties": {
+          "app": {
+            "type": "string",
+            "title": "App"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "READY",
+              "PENDING",
+              "FAILED",
+              "HUB_STALE"
+            ],
+            "title": "State",
+            "description": "READY: the hub runs exactly your current revisions. PENDING: not yet. FAILED: it can't run one (see problems). HUB_STALE: the hub hasn't processed one of your sources recently."
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Problems"
+          },
+          "subscriptions": {
+            "items": {
+              "$ref": "#/components/schemas/Subscription"
+            },
+            "type": "array",
+            "title": "Subscriptions"
+          },
+          "hub": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Hub",
+            "description": "Source -> the hub's last batch time (ISO 8601)"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "app",
+          "state",
+          "problems",
+          "subscriptions",
+          "hub"
+        ],
+        "title": "Status"
+      },
+      "Subscription": {
+        "properties": {
+          "subscriptionId": {
+            "type": "string",
+            "title": "Subscriptionid"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "revision": {
+            "type": "integer",
+            "title": "Revision"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "query": {
+            "type": "string",
+            "title": "Query"
+          },
+          "fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Fields"
+          },
+          "state": {
+            "type": "string",
+            "title": "State",
+            "description": "The hub's verdict for this revision: PENDING, ACTIVE, FAILED, or CANCELLED"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error",
+            "description": "Spark's error when FAILED"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "subscriptionId",
+          "name",
+          "revision",
+          "enabled",
+          "source",
+          "query",
+          "fields",
+          "state"
+        ],
+        "title": "Subscription"
+      },
+      "ValidateResult": {
+        "properties": {
+          "valid": {
+            "type": "boolean",
+            "title": "Valid"
+          },
+          "refused": {
+            "items": {
+              "$ref": "#/components/schemas/Refusal"
+            },
+            "type": "array",
+            "title": "Refused"
+          },
+          "accepted": {
+            "items": {
+              "$ref": "#/components/schemas/Checked"
+            },
+            "type": "array",
+            "title": "Accepted"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "valid",
+          "refused",
+          "accepted"
+        ],
+        "title": "ValidateResult"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "subscriptions",
+      "description": "Declare, change, cancel, and watch your subscriptions"
+    },
+    {
+      "name": "service",
+      "description": "Health"
+    }
+  ]
+}

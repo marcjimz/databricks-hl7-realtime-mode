@@ -64,7 +64,8 @@ infra/azure/          Terraform for everything Azure: workspace (+ metastore ass
 infra/uc.sh           idempotent Unity Catalog bootstrap (`make uc`): credentials, external location, catalog
 infra/registry.py     idempotent registry bootstrap (`make registry`): Lakebase project, schema, app roles, UC views, API grants
 src/registry/         the subscription registry: schema, owner trigger, RLS, API functions, grants (registry.sql)
-src/subscription_api/ the Subscription API (Databricks App, FastAPI): caller, shape check, Databricks compiles, store, wait
+src/subscription_api/ the Subscription API (Databricks App, FastAPI): the integration contract (OpenAPI), caller, shape
+                      check, Databricks compiles, store, wait
 src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), 7 classes in role packages, JUnit tests. Not in the
                       wheel or bundle sync.
 examples/             not deployed, linted, or tested: subscriptions/ (earlier SQL-file design), aws-cross-cloud/
@@ -204,6 +205,11 @@ docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON, 
     (only `e2e-*` names) or another app for checks while someone is using that SP. Don't rebuild a jar someone is
     running: it crashes with `NoClassDefFoundError`.
   - **Library logs are at WARN** (`simplelogger.properties`), so the demo output stays readable.
+- **The platform's integration point is the API contract, not the Java app.** `docs/api/openapi.json` is generated from
+  the API, and `tests/test_openapi.py` fails if they differ: regenerate it with `uv run python tests/test_openapi.py`
+  after any API change. Every response has a typed model (extra fields allowed, so the contract can grow). The proxy-set
+  identity header isn't a client parameter. docs/integration.md is the language-neutral guide: handshake, Event Hubs
+  token, Kafka settings, notification envelope, and errors. Keep it in step with the API.
 - **The Java client is deliberately small**, with packages by role so a reader starts at the top:
   - `App` (entry point) and `MySubscriptions` (name → SQL, the file developers edit) at the root;
   - `api/SubscriptionApi` (HTTP);

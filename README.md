@@ -28,6 +28,13 @@ SUBSCRIPTIONS (seconds)
 - **Subscriptions** let apps choose gold records at runtime, each delivered to the app's own hub
   ([docs/subscriptions.md](docs/subscriptions.md)).
 
+**Everything runs on Databricks.** Applications integrate at two points, in any language:
+- the **Subscription API**, with an OpenAPI contract (`docs/api/openapi.json`, browsable at `<api>/docs`);
+- **their own Event Hubs topic**, read with any Kafka client using a token from Unity Catalog.
+
+The handshake, the notification format, and the errors: [docs/integration.md](docs/integration.md). The Java app in
+`src/subscriber` is one reference client, not part of the platform.
+
 ## Results
 
 Measured at 200 msg/s at full demo load on serverless Real-Time Mode (GA), with workspace and Event Hubs in one region:
@@ -83,11 +90,16 @@ make help              # everything else
 
 ## Subscriptions demo
 
-A Java app subscribes at runtime, as its own service principal, to the gold records it needs. A rule is plain
+An application subscribes at runtime, as its own service principal, to the gold records it needs. A rule is plain
 **Databricks SQL**. The app sends it to the **Subscription API** (a Databricks App), Databricks compiles it on the spot,
 and the hub applies it at its next micro-batch, with no redeploy. Test a rule in the SQL editor first: the same query
-returns the records the hub delivers. How it works and its security model: [docs/subscriptions.md](docs/subscriptions.md).
-Diagrams and a three-slide overview: [docs/diagrams](docs/diagrams/).
+returns the records the hub delivers.
+
+- **The integration contract,** for any language: [docs/integration.md](docs/integration.md), with Swagger at `<api>/docs`.
+- **How it works and its security model:** [docs/subscriptions.md](docs/subscriptions.md).
+- **The story as an interactive deck:** [docs/story.html](docs/story.html).
+
+This walkthrough uses the **Java reference client** (`src/subscriber`) to drive that contract.
 
 ### Before you start
 
@@ -305,10 +317,11 @@ databricks.yml   bundle variables and targets; resources/ has the pipelines, job
 src/hl7rt/       the logic: HL7 parsing, gold, Event Hubs wiring, generators
 src/pipelines/   thin pipeline definitions (including the subscription hub)
 src/registry/    the subscription registry's schema, owner trigger, RLS, and API (Lakebase Postgres)
-src/subscription_api/  the Subscription API (Databricks App): register SQL rules; Databricks compiles them
-src/subscriber/  the Java subscriber app (reference client)
+src/subscription_api/  the Subscription API (Databricks App): the integration contract; Swagger at <api>/docs
+src/subscriber/  a reference client in Java (any language can integrate: docs/integration.md)
 tests/           unit tests (local Spark)
-docs/            latency results, subscriptions, scalability plan, Epic JSON notes; diagrams/ (draw.io + slides)
+docs/            integration guide + api/openapi.json (the contract), latency, subscriptions, scalability plan,
+                 Epic JSON notes, story.html (deck), SPIKE docs; diagrams/ (draw.io + slides)
 examples/        not deployed: the earlier SQL-file subscriptions, the earlier AWS cross-cloud setup
 ```
 

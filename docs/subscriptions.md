@@ -111,7 +111,10 @@ Every call carries the app's own SP token (`Authorization: Bearer …`). Every a
 | `POST /api/v1/validate` | The same checks as `PUT`, applying nothing (for CI) |
 
 Any language can be a client: an HTTP call, then a Kafka consumer that dedupes by `notificationId` and keeps only the
-revisions it registered (`Listener.java` is the reference).
+revisions it registered. The full contract:
+- **OpenAPI:** [`docs/api/openapi.json`](api/openapi.json), and Swagger UI at `<api>/docs`.
+- **The guide:** [docs/integration.md](integration.md), covering the handshake with curl, the Event Hubs token, Kafka
+  settings, the notification format, and the errors.
 
 The App runs 2 instances behind one URL. Databricks Apps calls this horizontal scaling: a fixed instance count, 1–5 per
 app. Load-based autoscaling (min < max) isn't enabled for this workspace: the Apps team plans it as a private preview,
