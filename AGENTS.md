@@ -69,7 +69,8 @@ src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), 7 classes
                       wheel or bundle sync.
 examples/             not deployed, linted, or tested: subscriptions/ (earlier SQL-file design), aws-cross-cloud/
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
-docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; diagrams/ (.drawio + PNG + slides)
+docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON, story.html (interactive deck);
+                      diagrams/ (.drawio + PNG + slides)
 ```
 
 - Put logic in `src/hl7rt` as functions of DataFrames, so it's testable without a cluster. Keep
