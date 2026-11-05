@@ -5,7 +5,7 @@
     <mxCell id="title_101" value="HL7 v2 on Real-Time Mode, with runtime subscriptions" style="text;html=1;align=left;verticalAlign=bottom;resizable=0;points=[];autosize=0;strokeColor=none;fillColor=none;fontFamily=Inter,Helvetica,Arial;fontSize=18;fontColor=#1A237E;fontStyle=1;" vertex="1" parent="1">
       <mxGeometry x="30" y="10" width="1700" height="28" as="geometry"/>
     </mxCell>
-    <mxCell id="sub_102" value="Hot path: ms topic-to-topic (RTM)  ·  Lakehouse: seconds topic-to-Delta  ·  Subscriptions: seconds gold-to-app, rules registered at runtime in Lakebase" style="text;html=1;align=left;verticalAlign=top;resizable=0;points=[];autosize=0;strokeColor=none;fillColor=none;fontFamily=Inter,Helvetica,Arial;fontSize=11;fontColor=#78909C;fontStyle=2;" vertex="1" parent="1">
+    <mxCell id="sub_102" value="Hot path: ms topic-to-topic (RTM)  ·  Lakehouse: seconds topic-to-Delta  ·  Subscriptions: micro-batch, gold-to-app p99 4.7 s, rules registered at runtime in Lakebase" style="text;html=1;align=left;verticalAlign=top;resizable=0;points=[];autosize=0;strokeColor=none;fillColor=none;fontFamily=Inter,Helvetica,Arial;fontSize=11;fontColor=#78909C;fontStyle=2;" vertex="1" parent="1">
       <mxGeometry x="30" y="40" width="1700" height="18" as="geometry"/>
     </mxCell>
     <mxCell id="c_103" value="Hospital integration" style="swimlane;html=1;startSize=32;fillColor=#FAFAFA;strokeColor=#90A4AE;strokeWidth=2;fontStyle=1;fontSize=14;fontFamily=Inter,Helvetica,Arial;fontColor=#37474F;rounded=1;arcSize=8;swimlaneLine=0;shadow=0;" vertex="1" parent="1">
@@ -86,8 +86,8 @@
     <mxCell id="c_128" value="Subscription hub · micro-batch" style="swimlane;html=1;startSize=32;fillColor=#FFF8F0;strokeColor=#EF6C00;strokeWidth=2;fontStyle=1;fontSize=14;fontFamily=Inter,Helvetica,Arial;fontColor=#BF360C;rounded=1;arcSize=8;swimlaneLine=0;shadow=0;" vertex="1" parent="1">
       <mxGeometry x="1360" y="85" width="230" height="135" as="geometry"/>
     </mxCell>
-    <mxCell id="129" value="Each batch: reload rules if changed,&lt;br&gt;filter from structured predicates,&lt;br&gt;route to each app's hub,&lt;br&gt;record ACTIVE + heartbeat" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;strokeWidth=1.5;fontFamily=Inter,Helvetica,Arial;fontSize=11;fontColor=#212121;shadow=0;verticalAlign=middle;" vertex="1" parent="c_128">
-      <mxGeometry x="15" y="42" width="200" height="80" as="geometry"/>
+    <mxCell id="129" value="SDP, PREVIEW · gold→app p99 4.7 s&lt;br&gt;Each batch: reload rules if changed,&lt;br&gt;filter from structured predicates,&lt;br&gt;route to each app's hub,&lt;br&gt;record ACTIVE + heartbeat" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF3E0;strokeColor=#E65100;strokeWidth=1.5;fontFamily=Inter,Helvetica,Arial;fontSize=11;fontColor=#212121;shadow=0;verticalAlign=middle;" vertex="1" parent="c_128">
+      <mxGeometry x="15" y="36" width="200" height="94" as="geometry"/>
     </mxCell>
     <mxCell id="c_130" value="Databricks · Lakehouse mirror (SDP micro-batch) · seconds" style="swimlane;html=1;startSize=32;fillColor=#FFFCF0;strokeColor=#F9A825;strokeWidth=2;fontStyle=1;fontSize=14;fontFamily=Inter,Helvetica,Arial;fontColor=#E65100;rounded=1;arcSize=8;swimlaneLine=0;shadow=0;" vertex="1" parent="1">
       <mxGeometry x="260" y="440" width="1080" height="150" as="geometry"/>
@@ -170,7 +170,7 @@
     <mxCell id="e_156" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jettySize=auto;orthogonalLoop=1;strokeColor=#78909C;fontFamily=Inter,Helvetica,Arial;fontSize=10;fontColor=#546E7A;strokeWidth=2.2;endArrow=classic;endFill=1;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="106" target="118">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
-    <mxCell id="e_157" value="gold batches" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jettySize=auto;orthogonalLoop=1;strokeColor=#EF6C00;fontFamily=Inter,Helvetica,Arial;fontSize=10;fontColor=#EF6C00;strokeWidth=2.2;endArrow=classic;endFill=1;labelBackgroundColor=#FFFFFF;fontStyle=1;exitX=0.85;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="1" source="124" target="129">
+    <mxCell id="e_157" value="micro-batches" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jettySize=auto;orthogonalLoop=1;strokeColor=#EF6C00;fontFamily=Inter,Helvetica,Arial;fontSize=10;fontColor=#EF6C00;strokeWidth=2.2;endArrow=classic;endFill=1;labelBackgroundColor=#FFFFFF;fontStyle=1;exitX=0.85;exitY=0;exitDx=0;exitDy=0;entryX=0;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="1" source="124" target="129">
       <mxGeometry relative="1" as="geometry"/>
     </mxCell>
     <mxCell id="e_158" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jettySize=auto;orthogonalLoop=1;strokeColor=#EF6C00;fontFamily=Inter,Helvetica,Arial;fontSize=10;fontColor=#546E7A;strokeWidth=2.2;endArrow=classic;endFill=1;exitX=0.55;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="129" target="126">
