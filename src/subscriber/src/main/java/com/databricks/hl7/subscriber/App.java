@@ -1,5 +1,9 @@
 package com.databricks.hl7.subscriber;
 
+import com.databricks.hl7.subscriber.api.SubscriptionApi;
+import com.databricks.hl7.subscriber.e2e.E2E;
+import com.databricks.hl7.subscriber.notifications.Listener;
+import com.databricks.hl7.subscriber.platform.EventHubs;
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.core.DatabricksConfig;
 import com.databricks.sdk.service.iam.MeRequest;
@@ -118,7 +122,7 @@ public final class App {
         System.exit(code);
     }
 
-    static String firstLine(String s) {
+    public static String firstLine(String s) {
         return s.strip().lines().findFirst().orElse("");
     }
 
@@ -140,12 +144,12 @@ public final class App {
         return workspace;
     }
 
-    static boolean isServicePrincipal(String userName) {
+    public static boolean isServicePrincipal(String userName) {
         return userName != null && userName.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
     }
 
     /** The SP's Databricks OAuth token (the SDK refreshes it). */
-    static String bearer(WorkspaceClient workspace) {
+    public static String bearer(WorkspaceClient workspace) {
         return workspace.config().authenticate().get("Authorization").replaceFirst("^Bearer ", "");
     }
 
@@ -189,7 +193,7 @@ public final class App {
         return null;
     }
 
-    static String required(Properties p, String key) {
+    public static String required(Properties p, String key) {
         String v = p.getProperty(key);
         if (v == null || v.isBlank()) throw new IllegalArgumentException("missing " + key + " (make registry writes it to apps/)");
         return v.trim();

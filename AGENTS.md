@@ -65,7 +65,7 @@ infra/uc.sh           idempotent Unity Catalog bootstrap (`make uc`): credential
 infra/registry.py     idempotent registry bootstrap (`make registry`): Lakebase project, schema, app roles, UC views, API grants
 src/registry/         the subscription registry: schema, owner trigger, RLS, API functions, grants (registry.sql)
 src/subscription_api/ the Subscription API (Databricks App, FastAPI): caller, shape check, Databricks compiles, store, wait
-src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), one package of 7 classes, JUnit tests. Not in the
+src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), 7 classes in role packages, JUnit tests. Not in the
                       wheel or bundle sync.
 examples/             not deployed, linted, or tested: subscriptions/ (earlier SQL-file design), aws-cross-cloud/
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
@@ -202,15 +202,14 @@ docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; 
     (only `e2e-*` names) or another app for checks while someone is using that SP. Don't rebuild a jar someone is
     running: it crashes with `NoClassDefFoundError`.
   - **Library logs are at WARN** (`simplelogger.properties`), so the demo output stays readable.
-- **The Java client is deliberately small:**
-  - `App`;
-  - `MySubscriptions` (name → SQL);
-  - `SubscriptionApi` (HTTP);
-  - `EventHubs` (UC token, OAUTHBEARER, consumer settings);
-  - `Listener` and `Notification` (the delivery contract);
-  - `E2E`.
+- **The Java client is deliberately small**, with packages by role so a reader starts at the top:
+  - `App` (entry point) and `MySubscriptions` (name → SQL, the file developers edit) at the root;
+  - `api/SubscriptionApi` (HTTP);
+  - `notifications/Listener` and `Notification` (the delivery contract);
+  - `platform/EventHubs` (UC token, OAUTHBEARER, consumer settings);
+  - `e2e/E2E`.
 
-  Keep logic on the server.
+  Keep logic on the server. Add a package only for a new role, not per class.
 - **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). Its flows run
   batches concurrently, so the shared registry client serializes access (`tests/test_hub_registry.py`). Use pg8000:
   psycopg[binary] aborted the serverless Python process. Serverless has no `persist`/`cache`, so a failed batch is

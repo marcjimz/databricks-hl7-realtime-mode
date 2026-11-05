@@ -14,16 +14,16 @@ java -jar src/subscriber/target/hl7-subscriber.jar         # declare MySubscript
 java -jar src/subscriber/target/hl7-subscriber.jar --e2e   # the end-to-end checks: a PASS/FAIL table, exit 1 on any failure
 ```
 
-One package (`src/main/java/com/databricks/hl7/subscriber/`):
+Classes by role (`src/main/java/com/databricks/hl7/subscriber/`). The two at the top are the ones you read first:
 
 | Class | What it does |
 |---|---|
-| `MySubscriptions` | What this app receives: name → SQL. Stop the app, edit, rebuild, run. |
-| `App` | Settings, sign-in as the SP, declare to the API, wait for the hub, listen. Exit codes 2–6. |
-| `SubscriptionApi` | The HTTP calls: declare, put, cancel, status (with wait), validate |
-| `EventHubs` | Unity Catalog-issued Entra token, the Kafka OAUTHBEARER callback, the consumer settings |
-| `Listener`, `Notification` | The delivery contract: dedupe by `notificationId`, current revisions only, catch-up summary, commit after handling |
-| `E2E` | The 24 live checks |
+| `MySubscriptions` | What this app receives: name → SQL. The file you edit: stop the app, edit, rebuild, run. |
+| `App` | The entry point: settings, sign-in as the SP, declare to the API, wait for the hub, listen. Exit codes 2–6. |
+| `api/SubscriptionApi` | The HTTP calls: declare, put, cancel, status (with wait), validate |
+| `notifications/Listener`, `Notification` | The delivery contract: dedupe by `notificationId`, current revisions only, catch-up summary, commit after handling |
+| `platform/EventHubs` | Unity Catalog-issued Entra token, the Kafka OAUTHBEARER callback, the consumer settings |
+| `e2e/E2E` | The 24 live checks (`--e2e`) |
 
 - `apps/<app>.properties` (gitignored): written by `make registry` on every run, because URLs change when the
   workspace is rebuilt. The profile name defaults to the app name. No secrets.

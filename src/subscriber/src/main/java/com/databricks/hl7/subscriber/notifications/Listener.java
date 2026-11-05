@@ -1,4 +1,4 @@
-package com.databricks.hl7.subscriber;
+package com.databricks.hl7.subscriber.notifications;
 
 import java.io.PrintStream;
 import java.time.Duration;
