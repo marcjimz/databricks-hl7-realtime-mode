@@ -22,11 +22,12 @@ import os
 import re
 import threading
 import time
+from typing import Literal
 
 from databricks.sdk import WorkspaceClient
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Header, Query, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 try:
     from subscription_api import db, rules  # tests and the hub (src/ on the path)
@@ -42,20 +43,146 @@ NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # = the registry's CHECK on subsc
 HUB_STALE_AFTER = 120  # seconds without a hub batch for a source
 MAX_WAIT = 60  # per call; clients poll (a proxy in between may cut long requests)
 
-app = FastAPI(title="HL7 subscriptions", version="1")
+DESCRIPTION = """
+The contract any application uses to receive gold HL7 records it chooses with Databricks SQL. The full guide, with
+examples: docs/integration.md in the repo.
+
+**Authentication.** Call with `Authorization: Bearer <token>`. The token is your app's Databricks service principal's
+OAuth token (machine-to-machine, from `https://<workspace>/oidc/v1/token`). The Databricks Apps proxy verifies it and
+tells the API who is calling. The service principal must be an onboarded subscriber app.
+
+**The handshake.**
+1. `PUT /api/v1/subscriptions` with the app's whole set of `{name, sql}`. Databricks compiles every rule in that call.
+   Either all are accepted (each with a `revision` and your `destination` topic), or nothing is applied and each refusal
+   carries Databricks' own error.
+2. `GET /api/v1/subscriptions?wait=25`, repeated until `state` is `READY`: the hub is running exactly those revisions.
+   `FAILED` and `HUB_STALE` are final answers too. Keep each call short (≤ 25 s): a proxy in between may cut long
+   requests.
+3. Read your `destination` topic (Kafka protocol on Azure Event Hubs, OAUTHBEARER with a token from Unity Catalog).
+   Deduplicate on `notificationId`, and act only on the `(subscriptionId, revision)` pairs you registered.
+
+A rule is `SELECT <columns> FROM <gold source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The same
+SQL against your views in the SQL editor returns the records you'll receive.
+"""
+
+app = FastAPI(
+    title="HL7 Subscription API",
+    version="1",
+    description=DESCRIPTION,
+    openapi_tags=[
+        {"name": "subscriptions", "description": "Declare, change, cancel, and watch your subscriptions"},
+        {"name": "service", "description": "Health"},
+    ],
+)
+_VERIFIED_CALLER = Header(default=None, include_in_schema=False)  # set by the Apps proxy, never by the client
 
 
 class Item(BaseModel):
-    name: str
-    sql: str
+    name: str = Field(description="1-63 lowercase letters, digits, or '-'; unique within your app",
+                      examples=["critical-potassium"])  # fmt: skip
+    sql: str = Field(
+        description="SELECT <columns> FROM <gold source> WHERE <filter>, in Databricks SQL",
+        examples=["SELECT patient_id, value_num, units FROM gold_observations "
+                  "WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"],
+    )  # fmt: skip
 
 
 class Declared(BaseModel):
-    subscriptions: list[Item]
+    subscriptions: list[Item] = Field(description="Your app's whole set: anything not listed is cancelled")
 
 
 class One(BaseModel):
-    sql: str
+    sql: str = Field(description="SELECT <columns> FROM <gold source> WHERE <filter>, in Databricks SQL")
+
+
+# Responses. Extra fields are kept, so the contract can grow without breaking clients.
+class _Open(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class Accepted(_Open):
+    subscriptionId: str = Field(description="Stable for the subscription's life; notifications carry it")
+    name: str
+    revision: int = Field(description="Counts every change; an identical rule keeps its revision")
+    state: Literal["ACCEPTED"]
+    query: str = Field(description="The canonical SQL that's stored and run")
+    destination: str = Field(description="Your topic: where notifications arrive")
+    unchanged: bool | None = Field(default=None, description="True when the rule was already active as is")
+
+
+class Cancelled(_Open):
+    subscriptionId: str
+    name: str
+    revision: int
+    state: Literal["CANCELLING"] = Field(description="The hub stops it at its next batch (then CANCELLED)")
+
+
+class DeclareResult(_Open):
+    applied: Literal[True]
+    accepted: list[Accepted]
+    cancelled: list[Cancelled] = Field(description="Subscriptions you no longer declare")
+
+
+class Refusal(_Open):
+    name: str | None = None
+    code: str = Field(description="Databricks' error class (UNRESOLVED_COLUMN, PARSE_SYNTAX_ERROR, ...) or ours "
+                      "(SQL_NOT_ALLOWED, INVALID_NAME, RULE_LIMIT_REACHED)")  # fmt: skip
+    message: str
+
+
+class RefusedResult(_Open):
+    applied: Literal[False]
+    refused: list[Refusal]
+
+
+class Error(_Open):
+    code: str = Field(description="UNAUTHENTICATED, APP_NOT_ONBOARDED, DUPLICATE_NAME, NOT_FOUND_OR_INACCESSIBLE")
+    message: str
+
+
+class Checked(_Open):
+    name: str
+    query: str
+
+
+class ValidateResult(_Open):
+    valid: bool
+    refused: list[Refusal]
+    accepted: list[Checked]
+
+
+class Subscription(_Open):
+    subscriptionId: str
+    name: str
+    revision: int
+    enabled: bool
+    source: str
+    query: str
+    fields: list[str]
+    state: str = Field(description="The hub's verdict for this revision: PENDING, ACTIVE, FAILED, or CANCELLED")
+    error: str | None = Field(default=None, description="Spark's error when FAILED")
+
+
+class Status(_Open):
+    app: str
+    state: Literal["READY", "PENDING", "FAILED", "HUB_STALE"] = Field(
+        description="READY: the hub runs exactly your current revisions. PENDING: not yet. FAILED: it can't run one "
+        "(see problems). HUB_STALE: the hub hasn't processed one of your sources recently."
+    )  # fmt: skip
+    problems: list[str]
+    subscriptions: list[Subscription]
+    hub: dict[str, str] = Field(description="Source -> the hub's last batch time (ISO 8601)")
+
+
+class Health(_Open):
+    ok: bool
+
+
+_ERRORS = {
+    401: {"model": Error, "description": "No verified caller"},
+    403: {"model": Error, "description": "Not an onboarded subscriber app (APP_NOT_ONBOARDED)"},
+}
+_REFUSED = {422: {"model": RefusedResult, "description": "Refused: nothing applied; Databricks' error per rule"}}
 
 
 class Refused(Exception):
@@ -216,13 +343,19 @@ def _refusals(checked):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-@app.get("/api/v1/health")
+@app.get("/api/v1/health", tags=["service"], response_model=Health, summary="Liveness")
 def health():
     return {"ok": True}
 
 
-@app.post("/api/v1/validate")
-def validate(body: Declared, x_forwarded_email: str | None = Header(default=None)):
+@app.post(
+    "/api/v1/validate",
+    tags=["subscriptions"],
+    response_model=ValidateResult,
+    responses=_ERRORS,
+    summary="Check rules without applying anything",
+)
+def validate(body: Declared, x_forwarded_email: str | None = _VERIFIED_CALLER):
     who = _caller(x_forwarded_email)
     with Session(who["role"]) as conn:
         checked = _validate(body.subscriptions, who, _registered(conn))
@@ -230,8 +363,14 @@ def validate(body: Declared, x_forwarded_email: str | None = Header(default=None
             "accepted": [{"name": c["name"], "query": c["rule"].query} for c in checked if c["ok"]]}  # fmt: skip
 
 
-@app.put("/api/v1/subscriptions")
-def declare(body: Declared, x_forwarded_email: str | None = Header(default=None)):
+@app.put(
+    "/api/v1/subscriptions",
+    tags=["subscriptions"],
+    response_model=DeclareResult,
+    responses=_ERRORS | _REFUSED,
+    summary="Declare your whole set (atomic; cancels what you no longer declare)",
+)
+def declare(body: Declared, x_forwarded_email: str | None = _VERIFIED_CALLER):
     who = _caller(x_forwarded_email)
     with Session(who["role"]) as conn:
         registered = _registered(conn)
@@ -247,8 +386,14 @@ def declare(body: Declared, x_forwarded_email: str | None = Header(default=None)
     return {"applied": True, "accepted": accepted, "cancelled": cancelled}
 
 
-@app.put("/api/v1/subscriptions/{name}")
-def put_one(name: str, body: One, x_forwarded_email: str | None = Header(default=None)):
+@app.put(
+    "/api/v1/subscriptions/{name}",
+    tags=["subscriptions"],
+    response_model=Accepted,
+    responses=_ERRORS | _REFUSED,
+    summary="Create or change one subscription",
+)
+def put_one(name: str, body: One, x_forwarded_email: str | None = _VERIFIED_CALLER):
     who = _caller(x_forwarded_email)
     with Session(who["role"]) as conn:
         registered = _registered(conn)
@@ -258,8 +403,14 @@ def put_one(name: str, body: One, x_forwarded_email: str | None = Header(default
         return _apply(conn, checked, registered)[0]
 
 
-@app.delete("/api/v1/subscriptions/{name}")
-def cancel(name: str, x_forwarded_email: str | None = Header(default=None)):
+@app.delete(
+    "/api/v1/subscriptions/{name}",
+    tags=["subscriptions"],
+    response_model=Cancelled,
+    responses=_ERRORS | {404: {"model": Error, "description": "No active subscription with that name"}},
+    summary="Cancel one subscription",
+)
+def cancel(name: str, x_forwarded_email: str | None = _VERIFIED_CALLER):
     who = _caller(x_forwarded_email)
     with Session(who["role"]) as conn:
         try:
@@ -294,8 +445,17 @@ def _epoch(ts: str) -> float:
     return datetime.fromisoformat(ts).timestamp()
 
 
-@app.get("/api/v1/subscriptions")
-def status(wait: int = 0, x_forwarded_email: str | None = Header(default=None)):
+@app.get(
+    "/api/v1/subscriptions",
+    tags=["subscriptions"],
+    response_model=Status,
+    responses=_ERRORS,
+    summary="Your subscriptions and whether the hub runs them (optionally wait)",
+)
+def status(
+    wait: int = Query(0, description=f"Seconds to wait for READY or FAILED (capped at {MAX_WAIT}; use <= 25)"),
+    x_forwarded_email: str | None = _VERIFIED_CALLER,
+):
     who = _caller(x_forwarded_email)
     deadline = time.time() + min(max(wait, 0), MAX_WAIT)
     while True:

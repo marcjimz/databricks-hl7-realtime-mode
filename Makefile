@@ -80,7 +80,7 @@ demo: guard-target
 	@$(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json; d=json.load(sys.stdin)['resources']['dashboards']; \
 	  print('workspace:               $(DATABRICKS_HOST)'); print('latency dashboard:       ' + d['hl7_latency']['url']); \
 	  print('subscriptions dashboard: ' + d['hl7_subscriptions']['url'])"
-	@printf 'subscription API:        %s\n' "$$($(DBX) apps get hl7-subscriptions-$(TARGET) -o json | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])')"
+	@printf 'subscription API:        %s (contract: /docs)\n' "$$($(DBX) apps get hl7-subscriptions-$(TARGET) -o json | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])')"
 
 # A full refresh of the mirror empties the Delta tables the dashboard reads and restarts them at the live edge.
 clear-data: guard-target
