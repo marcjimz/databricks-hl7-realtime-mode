@@ -5,46 +5,47 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HL7 in milliseconds, subscriptions in SQL</title>
 <!--
-  The story of this repo as an interactive deck. One self-contained file: open it in a browser.
-  Keys: → / Space next, ← back, Home / End, F fullscreen. Click the diagram parts to see details.
-  Every number here is a measured result from docs/latency.md and docs/subscriptions.md (2026-11-05).
+  This repo's story as an interactive deck. One self-contained file: open it in a browser.
+  Keys: → / Space next, ← back, Home / End, F fullscreen. Click the architecture to see details.
+  Numbers are measured results from docs/latency.md and docs/subscriptions.md (2026-11-05).
 -->
 <style>
   :root {
-    --lava: #FF3621; --navy: #1B3139; --navy2: #0B2026; --oat: #EEEDE9; --oat2: #F9F7F4;
-    --green: #00A972; --yellow: #FFAB00; --blue: #2272B4; --gray: #5A6F77; --line: #2A4A54;
-    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --lava: #FF3621; --navy: #1B3139; --navy2: #0B2026; --panel: #13303A; --panel2: #1E3C47; --oat2: #F9F7F4;
+    --green: #00A972; --yellow: #FFAB00; --blue: #2272B4; --gray: #5A6F77; --soft: #9FB1B6; --line: #2A4A54;
+    --mono: "DM Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--navy2); color: var(--oat2);
     font-family: "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
   .deck { position: relative; height: 100vh; overflow: hidden; }
-  .slide { position: absolute; inset: 0; padding: 5vh 6vw 9vh; display: flex; flex-direction: column;
+  .slide { position: absolute; inset: 0; padding: 4.5vh 5vw 8vh; display: flex; flex-direction: column;
     opacity: 0; pointer-events: none; transform: translateX(3vw); transition: opacity .35s, transform .35s; }
   .slide.active { opacity: 1; pointer-events: auto; transform: none; }
   .slide.light { background: var(--oat2); color: var(--navy); }
-  .kicker { color: var(--lava); font-weight: 700; letter-spacing: .12em; text-transform: uppercase; font-size: .85rem; }
+  .kicker { color: var(--lava); font-weight: 700; letter-spacing: .12em; text-transform: uppercase; font-size: .8rem; }
   h1 { font-size: clamp(2rem, 4.6vw, 4rem); line-height: 1.05; margin: .3em 0 .2em; }
-  h2 { font-size: clamp(1.5rem, 2.8vw, 2.5rem); margin: .25em 0 .5em; }
-  h3 { margin: 0 0 .4em; font-size: 1.1rem; }
-  p, li { font-size: clamp(.95rem, 1.25vw, 1.2rem); line-height: 1.45; }
-  .sub { color: #B9C4C7; font-size: clamp(1rem, 1.6vw, 1.4rem); max-width: 60ch; }
-  .light .sub { color: var(--gray); }
-  code, pre { font-family: var(--mono); }
-  .grow { flex: 1; min-height: 0; }
-  .row { display: flex; gap: 2vw; }
+  h2 { font-size: clamp(1.4rem, 2.5vw, 2.3rem); margin: .2em 0 .6em; }
+  h3 { margin: 0 0 .35em; font-size: 1.05rem; }
+  p, li { font-size: clamp(.9rem, 1.15vw, 1.1rem); line-height: 1.45; }
+  .sub { color: #B9C4C7; font-size: clamp(1rem, 1.5vw, 1.35rem); max-width: 58ch; }
+  code { font-family: var(--mono); font-size: .92em; }
+  .row { display: flex; gap: 1.6vw; }
   .col { flex: 1; min-width: 0; }
-  .card { background: #fff; color: var(--navy); border-radius: 10px; padding: 1.1rem 1.3rem;
+  .grow { flex: 1; min-height: 0; }
+  .card { background: #fff; color: var(--navy); border-radius: 10px; padding: 1rem 1.2rem;
     box-shadow: 0 1px 3px rgba(0,0,0,.08); border-top: 4px solid var(--lava); }
-  .dark .card, .slide:not(.light) .card { background: #13303A; color: var(--oat2); box-shadow: none; }
-  .card p, .card li { font-size: clamp(.85rem, 1.05vw, 1.05rem); margin: .3em 0; }
+  .slide:not(.light) .card { background: var(--panel); color: var(--oat2); box-shadow: none; }
+  .card p, .card li { font-size: clamp(.82rem, 1vw, 1rem); margin: .3em 0; }
+  .card ul { padding-left: 1.1rem; margin: .3em 0; }
   .muted { color: var(--gray); }
-  .tag { display: inline-block; font-size: .75rem; font-weight: 700; padding: .15em .55em; border-radius: 99px;
-    background: var(--lava); color: #fff; letter-spacing: .04em; }
+  .slide:not(.light) .muted { color: var(--soft); }
+  .tag { display: inline-block; font-size: .7rem; font-weight: 700; padding: .12em .5em; border-radius: 99px;
+    background: var(--gray); color: #fff; letter-spacing: .04em; vertical-align: middle; }
   .tag.green { background: var(--green); } .tag.yellow { background: var(--yellow); color: var(--navy); }
-  .tag.blue { background: var(--blue); } .tag.gray { background: var(--gray); }
+  .tag.red { background: var(--lava); }
 
-  /* Chrome: progress, counter, nav */
+  /* Chrome */
   .progress { position: fixed; left: 0; bottom: 0; height: 4px; background: var(--lava); transition: width .35s; z-index: 5; }
   .counter { position: fixed; right: 1.4rem; bottom: 1rem; font-size: .85rem; color: var(--gray); z-index: 5; }
   .nav { position: fixed; left: 1.4rem; bottom: .7rem; display: flex; gap: .4rem; z-index: 5; }
@@ -57,103 +58,117 @@
 
   /* Title */
   .title-band { position: absolute; right: -8vw; top: -10vh; width: 55vw; height: 130vh; transform: rotate(14deg);
-    background: linear-gradient(160deg, rgba(255,54,33,.22), rgba(255,54,33,0) 70%); pointer-events: none; }
-  .bigstats { display: flex; gap: 3vw; margin-top: auto; }
+    background: linear-gradient(160deg, rgba(255,54,33,.2), rgba(255,54,33,0) 70%); pointer-events: none; }
+  .bigstats { display: flex; gap: 3.5vw; margin-top: auto; }
   .bigstat b { display: block; font-size: clamp(2rem, 4vw, 3.4rem); color: var(--lava); line-height: 1; }
   .bigstat span { color: #B9C4C7; font-size: .95rem; }
 
   /* Architecture */
-  .arch { display: grid; grid-template-columns: 1.05fr 2.6fr 1.2fr; gap: 1.2vw; align-items: stretch; }
-  .lane { border: 1px dashed var(--line); border-radius: 12px; padding: .8rem; display: flex; flex-direction: column; gap: .6rem; }
-  .lane > .lbl { font-size: .75rem; letter-spacing: .1em; text-transform: uppercase; color: #8FA3A9; }
-  .node { background: #13303A; border: 1.5px solid var(--line); border-radius: 9px; padding: .55rem .7rem; cursor: pointer;
-    transition: border-color .2s, transform .2s, background .2s; }
+  .archwrap { display: grid; grid-template-columns: 1fr 19rem; gap: 1.2vw; flex: 1; min-height: 0; }
+  .arch { display: grid; grid-template-columns: 9rem 1fr; grid-template-rows: 1fr 1fr 1fr auto; gap: 1rem 1rem; min-height: 0; }
+  .pathlbl { font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--soft); align-self: center;
+    border-left: 3px solid var(--lava); padding-left: .55rem; line-height: 1.35; }
+  .pathlbl b { display: block; color: var(--oat2); font-size: 1.05rem; letter-spacing: 0; text-transform: none; }
+  .pathlbl.sub2 { border-color: var(--blue); } .pathlbl.lake { border-color: var(--green); }
+  .lane { display: flex; align-items: center; gap: .45rem; background: rgba(255,255,255,.025); border: 1px dashed var(--line);
+    border-radius: 12px; padding: .8rem; }
+  .node { flex: 1; align-self: stretch; display: flex; flex-direction: column; justify-content: center; background: var(--panel); border: 1.5px solid var(--line); border-radius: 9px; padding: .7rem .8rem;
+    cursor: pointer; transition: border-color .2s, transform .2s, background .2s; min-width: 0; }
   .node:hover { border-color: var(--lava); transform: translateY(-2px); }
-  .node.sel { border-color: var(--lava); background: #1E3C47; }
-  .node b { display: block; font-size: .98rem; }
-  .node small { color: #9FB1B6; font-size: .8rem; }
-  .flowline { display: flex; align-items: center; gap: .4rem; flex-wrap: nowrap; }
-  .flowline .node { flex: 1; text-align: center; }
-  .arrow { color: var(--lava); font-weight: 700; }
-  .ms { color: var(--green); font-family: var(--mono); font-size: .78rem; }
-  .detail { margin-top: 1.2rem; min-height: 6.5rem; border-left: 4px solid var(--lava); padding: .6rem 1rem;
-    background: #13303A; border-radius: 0 10px 10px 0; }
-  .detail h3 { color: var(--lava); }
-  .detail p { margin: .2em 0; font-size: clamp(.9rem, 1.1vw, 1.1rem); }
-
-  /* Bars */
-  .bars { display: flex; flex-direction: column; gap: .9rem; margin-top: 1rem; }
-  .bar { display: grid; grid-template-columns: 15rem 1fr 5rem; align-items: center; gap: 1rem; }
-  .bar .track { height: 26px; background: #E3E0D8; border-radius: 6px; position: relative; overflow: hidden; }
-  .bar .fill { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--navy); border-radius: 6px;
-    transition: width 1s cubic-bezier(.2,.8,.2,1); }
-  .bar .fill.p50 { background: var(--lava); }
-  .bar .target { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--green); }
-  .bar .v { font-family: var(--mono); font-weight: 700; }
+  .node.sel { border-color: var(--lava); background: var(--panel2); }
+  .node b { display: block; font-size: clamp(.9rem, 1.1vw, 1.1rem); }
+  .node small { display: block; color: var(--soft); font-size: clamp(.72rem, .85vw, .86rem); line-height: 1.3; margin-top: .1rem; }
+  .node .ms { color: var(--green); font-family: var(--mono); font-size: .85rem; margin-top: .3rem; }
+  .node.topic { flex: .8; border-style: dashed; background: transparent; }
+  .node.rtm { border-color: #7A3B32; }
+  .arr { align-self: center; color: var(--lava); font-weight: 700; font-size: .95rem; }
+  .gov { grid-column: 1 / 3; display: flex; align-items: center; gap: 1rem; background: rgba(34,114,180,.12);
+    border: 1.5px solid var(--blue); border-radius: 12px; padding: .8rem 1rem; cursor: pointer; }
+  .gov:hover, .gov.sel { background: rgba(34,114,180,.25); }
+  .gov b { white-space: nowrap; }
+  .gov span { color: var(--soft); font-size: .9rem; }
+  .side { background: var(--panel); border-radius: 12px; padding: 1rem 1.1rem; border-top: 4px solid var(--lava);
+    display: flex; flex-direction: column; overflow: auto; }
+  .side h3 { color: var(--lava); }
+  .side p { font-size: .98rem; margin: .3em 0; line-height: 1.5; }
+  .side .facts { margin-top: .5rem; padding-top: .5rem; border-top: 1px solid var(--line); }
+  .side .facts div { font-size: .9rem; margin: .25rem 0; color: var(--soft); }
+  .side .facts b { color: var(--oat2); font-family: var(--mono); font-weight: 600; }
 
   /* Code + terminal */
-  .code { font-family: var(--mono); background: #0E1E24; color: #DCE6E8; border-radius: 10px; padding: 1rem 1.2rem; font-size: clamp(.78rem, 1vw, .98rem);
-    line-height: 1.5; white-space: pre; overflow: auto; }
+  .code { font-family: var(--mono); background: #0E1E24; color: #DCE6E8; border-radius: 10px; padding: .8rem 1rem;
+    font-size: clamp(.78rem, .98vw, 1rem); line-height: 1.6; white-space: pre; overflow: auto; }
   .code .k { color: #FF8C7A; } .code .s { color: #9AD9B0; } .code .c { color: #6F8A91; } .code .q { color: #FFD27A; }
-  .term { background: #050F12; border-radius: 10px; padding: 1rem 1.2rem; font-family: var(--mono);
-    font-size: clamp(.72rem, .92vw, .92rem); line-height: 1.55; min-height: 15rem; overflow: auto; color: #CFDADD; }
-  .term .ln { opacity: 0; transition: opacity .25s; white-space: pre-wrap; }
+  .codetabs { display: flex; gap: .3rem; margin-bottom: .4rem; }
+  .codetabs button { font-family: var(--mono); font-size: .78rem; border: 1px solid var(--line); background: transparent;
+    color: var(--soft); border-radius: 6px 6px 0 0; padding: .3rem .7rem; cursor: pointer; }
+  .codetabs button.on { background: #0E1E24; color: #fff; border-color: #0E1E24; }
+  .term { background: #050F12; border-radius: 10px; padding: .8rem 1rem; font-family: var(--mono);
+    font-size: clamp(.64rem, .78vw, .82rem); line-height: 1.55; overflow: auto; color: #CFDADD; flex: 1; min-height: 12rem; }
+  .term .ln { opacity: .13; transition: opacity .25s; white-space: pre-wrap; }
   .term .ln.show { opacity: 1; }
-  .term .ok { color: var(--green); } .term .bad { color: #FF6B57; } .term .dim { color: #6F8A91; } .term .hl { color: var(--yellow); }
-  .btn { background: var(--lava); color: #fff; border: 0; border-radius: 7px; padding: .5rem 1rem; font-weight: 700;
-    cursor: pointer; font-size: .95rem; }
+  .term .ok { color: var(--green); } .term .dim { color: #6F8A91; } .term .hl { color: var(--yellow); }
+  .btn { background: var(--lava); color: #fff; border: 0; border-radius: 7px; padding: .45rem .9rem; font-weight: 700;
+    cursor: pointer; font-size: .9rem; font-family: inherit; }
   .btn.ghost { background: transparent; border: 1.5px solid var(--lava); color: var(--lava); }
-  .tabs { display: flex; gap: .5rem; margin-bottom: .7rem; flex-wrap: wrap; }
-  .tabs button { border: 1.5px solid var(--line); background: transparent; color: inherit; border-radius: 99px;
-    padding: .35rem .9rem; cursor: pointer; font-size: .9rem; }
-  .light .tabs button { border-color: #CFCBC2; }
-  .tabs button.on { background: var(--lava); border-color: var(--lava); color: #fff; }
+  .stats { display: flex; gap: .6rem; margin-top: .7rem; }
+  .stat { flex: 1; background: var(--panel); border-radius: 9px; padding: .55rem .7rem; }
+  .stat b { display: block; font-family: var(--mono); font-size: 1.25rem; color: var(--green); }
+  .stat span { font-size: .75rem; color: var(--soft); }
 
   /* Sequence */
-  .seq { display: grid; grid-template-columns: repeat(5, 1fr); gap: .4rem; position: relative; margin-top: .5rem; }
-  .actor { text-align: center; font-weight: 700; font-size: .92rem; padding: .5rem; border-radius: 8px; background: var(--navy);
-    color: var(--oat2); }
-  .actor small { display: block; font-weight: 400; font-size: .72rem; color: #9FB1B6; }
+  .seq { display: grid; grid-template-columns: repeat(5, 1fr); gap: .4rem; margin-top: .3rem; }
+  .actor { text-align: center; font-weight: 700; font-size: .9rem; padding: .5rem; border-radius: 8px; background: var(--navy); color: var(--oat2); }
+  .actor small { display: block; font-weight: 400; font-size: .72rem; color: var(--soft); }
   .msgs { position: relative; margin-top: .4rem; }
-  .msg { display: grid; grid-template-columns: repeat(5, 1fr); align-items: center; height: 2.35rem; opacity: .15;
-    transition: opacity .3s; }
+  .msg { display: grid; grid-template-columns: repeat(5, 1fr); align-items: center; height: 2.3rem; opacity: .15; transition: opacity .3s; }
   .msg.show { opacity: 1; }
   .msg.cur .lab { background: var(--lava); color: #fff; }
-  .msg .lab { font-size: .82rem; padding: .2rem .5rem; border-radius: 6px; background: #E3E0D8; color: var(--navy);
-    text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; }
+  .msg .lab { font-size: .8rem; padding: .2rem .5rem; border-radius: 6px; background: #E3E0D8; color: var(--navy);
+    text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative; z-index: 1; }
   .msg .lab::after { content: "→"; position: absolute; right: .35rem; }
   .msg .lab.back::after { content: "←"; left: .35rem; right: auto; }
   .msg .lab.back { padding-left: 1.3rem; }
+  .msg .lab.self::after { content: "↺"; }
   .lifelines { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(5, 1fr); pointer-events: none; }
   .lifelines div { border-left: 2px dotted #CFCBC2; margin-left: 50%; }
   .narr { margin-top: .9rem; min-height: 3.2rem; font-size: clamp(.95rem, 1.2vw, 1.15rem); }
   .narr b { color: var(--lava); }
 
-  /* Tables */
-  table { border-collapse: collapse; width: 100%; font-size: clamp(.85rem, 1.05vw, 1.05rem); }
-  th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid #DAD6CC; vertical-align: top; }
-  .slide:not(.light) th, .slide:not(.light) td { border-color: var(--line); }
-  th { font-size: .8rem; text-transform: uppercase; letter-spacing: .06em; color: var(--gray); }
-  td.num { font-family: var(--mono); font-weight: 700; }
-  td .was { color: var(--gray); text-decoration: line-through; font-weight: 400; margin-right: .4rem; }
-
-  /* Rule simulator */
-  .sim textarea { width: 100%; height: 6.2rem; font-family: var(--mono); font-size: .95rem; border-radius: 8px;
-    border: 1.5px solid #CFCBC2; padding: .7rem; resize: none; color: var(--navy); }
-  .verdict { margin-top: .7rem; padding: .7rem 1rem; border-radius: 8px; font-family: var(--mono); font-size: .88rem;
-    background: #0E1E24; color: #DCE6E8; min-height: 3.2rem; white-space: pre-wrap; }
-  .examples { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .6rem; }
-  .examples button { font-size: .8rem; border: 1px solid #CFCBC2; background: #fff; border-radius: 99px; padding: .3rem .7rem; cursor: pointer; }
+  /* Rules */
+  .sim textarea { width: 100%; height: 5.4rem; font-family: var(--mono); font-size: .88rem; border-radius: 8px;
+    border: 1.5px solid #CFCBC2; padding: .6rem; resize: none; color: var(--navy); background: #fff; }
+  .verdict { margin-top: .5rem; padding: .6rem .9rem; border-radius: 8px; font-family: var(--mono); font-size: .8rem;
+    background: #0E1E24; color: #DCE6E8; min-height: 3rem; white-space: pre-wrap; }
+  .examples { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .5rem; }
+  .examples .grp { font-size: .7rem; color: var(--gray); text-transform: uppercase; letter-spacing: .08em; align-self: center; margin: 0 .2rem 0 .4rem; }
+  .examples button { font-size: .78rem; border: 1px solid #CFCBC2; background: #fff; border-radius: 99px; padding: .25rem .65rem; cursor: pointer; font-family: inherit; }
+  .examples button.ok { border-color: var(--green); }
   .examples button:hover { border-color: var(--lava); }
 
-  .checks li { list-style: none; margin: .35em 0; }
-  .checks li::before { content: "✓"; color: var(--green); font-weight: 700; margin-right: .55rem; }
+  /* Governance grid */
+  .ggrid { display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: 1fr 1fr; gap: 1rem; flex: 1; min-height: 0; }
+  .gcard { background: #fff; border-radius: 12px; padding: 1rem 1.2rem; border-left: 5px solid var(--blue); display: flex; flex-direction: column; }
+  .gcard .q { font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--gray); }
+  .gcard h3 { font-size: 1.15rem; margin: .2rem 0 .4rem; }
+  .gcard p { font-size: clamp(.82rem, .98vw, .98rem); margin: .2em 0; }
+  .gcard .proof { margin-top: auto; padding-top: .5rem; font-size: .8rem; color: var(--green); font-weight: 600; }
+
+  /* Tables */
+  table { border-collapse: collapse; width: 100%; font-size: clamp(.82rem, 1vw, 1rem); }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid #DAD6CC; vertical-align: top; }
+  th { font-size: .75rem; text-transform: uppercase; letter-spacing: .06em; color: var(--gray); }
+  td.num { font-family: var(--mono); font-weight: 700; white-space: nowrap; }
+  td.good { color: var(--green); }
+  .checks { padding: 0; margin: .3rem 0; }
+  .checks li { list-style: none; margin: .3em 0; font-size: clamp(.82rem, 1vw, 1rem); }
+  .checks li::before { content: "✓"; color: var(--green); font-weight: 700; margin-right: .5rem; }
   .checks li.todo::before { content: "○"; color: var(--yellow); }
   .reveal { opacity: 0; transform: translateY(8px); transition: opacity .4s, transform .4s; }
   .slide.active .reveal { opacity: 1; transform: none; }
   .slide.active .reveal.d1 { transition-delay: .1s; } .slide.active .reveal.d2 { transition-delay: .25s; }
   .slide.active .reveal.d3 { transition-delay: .4s; } .slide.active .reveal.d4 { transition-delay: .55s; }
-  .foot { margin-top: auto; font-size: .8rem; color: var(--gray); }
+  .foot { margin-top: auto; padding-top: .6rem; font-size: .8rem; color: var(--gray); }
 </style>
 </head>
 <body>
@@ -162,47 +177,46 @@
 <!-- 1 · Title ---------------------------------------------------------------------------------------------------- -->
 <section class="slide" data-title="Title">
   <div class="title-band"></div>
-  <div class="kicker">Azure Databricks · Real-Time Mode · Lakebase · Databricks Apps</div>
+  <div class="kicker">Azure Databricks · Real-Time Mode · Databricks Apps</div>
   <h1>HL7 v2 in milliseconds.<br>Subscriptions in SQL, at runtime.</h1>
-  <p class="sub">An HL7 v2 feed is parsed into clinical events in tens of milliseconds per layer. Every layer is also a
-    governed Delta table. Java apps choose the events they want with plain Databricks SQL, while everything runs. No
-    redeploy, no keys, no way around it.</p>
+  <p class="sub">We parse an HL7 v2 feed into clinical events in under 90 ms per step, and keep every step as a table in
+    Unity Catalog. Java apps pick the events they need with Databricks SQL, while the pipelines keep running.</p>
   <div class="bigstats">
-    <div class="bigstat reveal d1"><b>&lt;90 ms</b><span>p99 per hop, raw → gold</span></div>
-    <div class="bigstat reveal d2"><b>~5 s</b><span>p99 gold → an app's own topic</span></div>
+    <div class="bigstat reveal d1"><b>&lt;90 ms</b><span>p99 per step, raw → gold</span></div>
+    <div class="bigstat reveal d2"><b>~5 s</b><span>p99, gold → the app's topic</span></div>
     <div class="bigstat reveal d3"><b>1,000</b><span>SQL rules per hub, p99 7 s</span></div>
-    <div class="bigstat reveal d4"><b>0</b><span>secrets in pipelines or settings</span></div>
+    <div class="bigstat reveal d4"><b>0</b><span>keys or secrets in the pipelines</span></div>
   </div>
-  <p class="foot">Use → / ← or the buttons below · F for fullscreen</p>
+  <p class="foot">→ / ← to move · F for fullscreen</p>
 </section>
 
-<!-- 2 · Problem ------------------------------------------------------------------------------------------------- -->
+<!-- 2 · Why ----------------------------------------------------------------------------------------------------- -->
 <section class="slide light" data-title="Why">
   <div class="kicker">Why</div>
-  <h2>Every app wants a different slice of the same feed, now</h2>
+  <h2>Many apps need different parts of the same feed, quickly</h2>
   <div class="row grow">
     <div class="col card reveal d1">
-      <h3>Today</h3>
+      <h3>How it works today</h3>
       <ul>
-        <li>An interface engine routes HL7 to each downstream system, one hand-built channel at a time.</li>
-        <li>Each team writes its own consumer, its own parser, its own filter. Logic drifts.</li>
-        <li>Analytics gets the data later, from a different copy.</li>
+        <li>An interface engine routes HL7 to each system through hand-built channels.</li>
+        <li>Each team writes its own consumer, parser, and filters, and they drift apart.</li>
+        <li>Analytics reads a separate copy, hours later.</li>
       </ul>
     </div>
     <div class="col card reveal d2">
       <h3>What teams ask for</h3>
       <ul>
-        <li>“Tell me in seconds when a patient's potassium is critical.”</li>
-        <li>“Change that rule today, without a release of the platform.”</li>
-        <li>“Only the columns I'm allowed to see.”</li>
+        <li>“Alert me within seconds when a potassium result is critical.”</li>
+        <li>“Let me change that threshold today, without a platform release.”</li>
+        <li>“Show me only the columns I'm allowed to see.”</li>
       </ul>
     </div>
     <div class="col card reveal d3" style="border-top-color: var(--green)">
-      <h3>What we built</h3>
+      <h3>What this builds</h3>
       <ul>
-        <li><b>One parse</b>, in real time, into a contract every app shares.</li>
-        <li><b>One governed copy</b> in Unity Catalog, for BI, audit, and replay.</li>
-        <li><b>Subscriptions in SQL</b>: what you test in the SQL editor is what runs.</li>
+        <li>One parse, in real time, into a schema every app shares.</li>
+        <li>One governed copy in Unity Catalog for BI, audit, and replay.</li>
+        <li>Subscriptions written in SQL. A rule returns the same rows in the SQL editor as it delivers live.</li>
       </ul>
     </div>
   </div>
@@ -211,228 +225,232 @@
 <!-- 3 · Architecture -------------------------------------------------------------------------------------------- -->
 <section class="slide" data-title="Architecture">
   <div class="kicker">Architecture · click any part</div>
-  <h2>Three paths over one feed</h2>
-  <div class="arch">
-    <div class="lane">
-      <div class="lbl">In</div>
-      <div class="node" data-k="feed"><b>HL7 v2 feed</b><small>ADT · ORU · ORM, or Epic JSON</small></div>
-      <div class="node" data-k="eh"><b>Azure Event Hubs</b><small>Premium · Entra ID only</small></div>
-    </div>
-    <div class="lane">
-      <div class="lbl">Real-Time Mode · serverless SDP (GA)</div>
-      <div class="flowline">
-        <div class="node" data-k="bronze"><b>bronze</b><span class="ms">86 ms</span></div><span class="arrow">→</span>
-        <div class="node" data-k="silver"><b>silver</b><span class="ms">78 ms</span></div><span class="arrow">→</span>
-        <div class="node" data-k="gold"><b>gold</b><span class="ms">78 ms</span></div>
+  <h2>One feed, three paths, one place for governance</h2>
+  <div class="archwrap">
+    <div class="arch">
+      <div class="pathlbl"><b>Real time</b>milliseconds</div>
+      <div class="lane">
+        <div class="node" data-k="feed"><b>HL7 v2 feed</b><small>ADT · ORU · ORM, or Epic JSON</small></div><span class="arr">→</span>
+        <div class="node topic" data-k="eh"><b>raw topic</b><small>Event Hubs</small></div><span class="arr">→</span>
+        <div class="node rtm" data-k="bronze"><b>Bronze</b><small>land + stamp</small><span class="ms">p99 86 ms</span></div><span class="arr">→</span>
+        <div class="node rtm" data-k="silver"><b>Silver</b><small>full HL7 parse</small><span class="ms">p99 78 ms</span></div><span class="arr">→</span>
+        <div class="node rtm" data-k="gold"><b>Gold</b><small>encounters · results · orders</small><span class="ms">p99 78 ms</span></div><span class="arr">→</span>
+        <div class="node topic" data-k="goldtopics"><b>gold topics</b><small>Event Hubs</small></div>
       </div>
-      <div class="lbl" style="margin-top:.4rem">Lakehouse · micro-batch SDP</div>
-      <div class="node" data-k="st"><b>Streaming tables, one per topic</b><small>&lt;catalog&gt;.hl7_realtime.&lt;topic&gt; · latency columns · dashboard</small></div>
-      <div class="lbl" style="margin-top:.4rem">Subscriptions · micro-batch SDP + Lakebase + Databricks App</div>
-      <div class="flowline">
-        <div class="node" data-k="api"><b>Subscription API</b><small>Databricks App</small></div><span class="arrow">↔</span>
-        <div class="node" data-k="reg"><b>Registry</b><small>Lakebase</small></div><span class="arrow">→</span>
-        <div class="node" data-k="hub"><b>Hub</b><small>all rules, one pass</small></div>
-      </div>
-    </div>
-    <div class="lane">
-      <div class="lbl">Out</div>
-      <div class="node" data-k="app"><b>Java apps</b><small>each on its own topic</small></div>
-      <div class="node" data-k="uc"><b>Unity Catalog</b><small>grants · credentials · lineage</small></div>
-      <div class="node" data-k="bi"><b>SQL · BI · AI</b><small>the same tables</small></div>
-    </div>
-  </div>
-  <div class="detail" id="detail"><h3>Click a component</h3><p>Each box shows what it is, why it's there, and what was measured.</p></div>
-</section>
 
-<!-- 4 · Why topics between layers ------------------------------------------------------------------------------- -->
-<section class="slide light" data-title="Simplest shape">
-  <div class="kicker">Could it be simpler?</div>
-  <h2>Real-Time Mode reads and writes topics, not tables</h2>
-  <div class="row grow">
-    <div class="col">
-      <div class="card reveal d1">
-        <h3>The constraint (GA docs, Real-Time Mode in SDP)</h3>
-        <p>Sinks: Kafka, Event Hubs, MSK, and ForEach. <b>Delta is not supported as a real-time source or sink</b>, so a
-          real-time flow can't land on a streaming table directly.</p>
+      <div class="pathlbl lake"><b>Lakehouse</b>seconds</div>
+      <div class="lane">
+        <div class="node topic" data-k="alltopics"><b>every topic</b><small>raw → gold, quarantine</small></div><span class="arr">→</span>
+        <div class="node" data-k="mirror"><b>Lakehouse pipeline</b><small>micro-batch, upserts</small></div><span class="arr">→</span>
+        <div class="node" data-k="st"><b>Streaming tables</b><small>one per topic, same name</small></div><span class="arr">→</span>
+        <div class="node" data-k="bi"><b>SQL · dashboards · Genie</b><small>latency dashboard included</small></div>
       </div>
-      <div class="card reveal d2" style="margin-top:1rem">
-        <h3>So the shape is: hot path in topics, lakehouse beside it</h3>
-        <p>Each real-time layer writes a topic named after its table. <b>One</b> micro-batch pipeline lands every topic in
-          the streaming table of the same name. It's off the hot path, so it never slows a hop.</p>
-        <p class="muted">If Real-Time Mode gains a Delta sink, the mirror pipeline goes away and nothing else changes.</p>
+
+      <div class="pathlbl sub2"><b>Subscriptions</b>seconds</div>
+      <div class="lane">
+        <div class="node" data-k="app"><b>Java app</b><small>its own service principal</small></div><span class="arr">⇄</span>
+        <div class="node" data-k="api"><b>Subscription API</b><small>Databricks App</small></div><span class="arr">→</span>
+        <div class="node" data-k="reg"><b>Operational Store</b><small>rules · revisions · status</small></div><span class="arr">→</span>
+        <div class="node" data-k="hub"><b>Subscription hub</b><small>reads gold topics</small></div><span class="arr">→</span>
+        <div class="node topic" data-k="apptopic"><b>app's own topic</b><small>back to the Java app</small></div>
       </div>
+
+      <div class="gov" data-k="uc"><b>Unity Catalog</b><span>identities · per-app views of granted columns · service credentials for Event Hubs ·
+        streaming tables · lineage · audit</span></div>
     </div>
-    <div class="col">
-      <div class="card reveal d3" style="border-top-color: var(--green)">
-        <h3>What it runs, in total</h3>
-        <table>
-          <tr><td class="num">3</td><td>Real-Time Mode pipelines: bronze, silver, gold (one flow each, as recommended)</td></tr>
-          <tr><td class="num">1</td><td>Lakehouse pipeline: every topic → its streaming table</td></tr>
-          <tr><td class="num">1</td><td>Subscription hub pipeline (micro-batch: it needs foreachBatch)</td></tr>
-          <tr><td class="num">1</td><td>Databricks App: the Subscription API, 2 instances</td></tr>
-          <tr><td class="num">1</td><td>Lakebase project: the subscription registry</td></tr>
-        </table>
-        <p class="muted" style="margin-top:.6rem">All serverless. Rebuilt from scratch with <code>make up</code> + <code>make demo dev</code>.</p>
+    <div class="side" id="detail">
+      <h3>Click a part</h3>
+      <p>Each part shows what it does, why it's there, and what was measured.</p>
+      <div class="facts">
+        <div>Runs on: <b>3</b> real-time pipelines, <b>1</b> lakehouse pipeline, <b>1</b> hub, <b>1</b> app, <b>1</b> operational store. All serverless.</div>
+        <div>Rebuild: <b>make up</b> then <b>make demo dev</b></div>
       </div>
     </div>
   </div>
 </section>
 
-<!-- 5 · Hot path latency ---------------------------------------------------------------------------------------- -->
-<section class="slide light" data-title="Latency">
-  <div class="kicker">Measured · 200 msg/s · serverless Real-Time Mode (GA) · one Azure region</div>
-  <h2>Every hop under 200 ms at p99</h2>
-  <div class="bars" id="bars">
-    <div class="bar"><span>raw → bronze</span><div class="track"><div class="fill" data-w="86"></div><div class="fill p50" data-w="7"></div><div class="target" style="left:100%"></div></div><span class="v">86 ms</span></div>
-    <div class="bar"><span>bronze → silver (full HL7 parse)</span><div class="track"><div class="fill" data-w="78"></div><div class="target" style="left:100%"></div></div><span class="v">78 ms</span></div>
-    <div class="bar"><span>silver → gold</span><div class="track"><div class="fill" data-w="78"></div><div class="target" style="left:100%"></div></div><span class="v">78 ms</span></div>
-  </div>
-  <p class="muted" style="margin-top:.8rem">Dark: p99 · <span style="color:var(--lava)">red</span>: p50 · scale ends at the 200 ms target.
-    Timestamps are Event Hubs broker clocks (±16 ms resolution).</p>
-  <div class="row" style="margin-top:1rem">
-    <div class="col card reveal d1"><h3>Native Spark, no JARs</h3><p>HL7 is delimited text: <code>split</code>, <code>try_element_at</code>. A full parse costs less than the measurement resolution.</p></div>
-    <div class="col card reveal d2"><h3>Honest tail</h3><p>Max is a few seconds: checkpoints every 15 min and rare Event Hubs connection hangs, capped at ~5 s.</p></div>
-    <div class="col card reveal d3"><h3>Live telemetry</h3><p>Every streaming-table row carries <code>hop_ms</code> / <code>e2e_ms</code>. The dashboard is a query, not a test.</p></div>
-  </div>
-</section>
-
-<!-- 6 · Java developer ------------------------------------------------------------------------------------------ -->
+<!-- 4 · Java at runtime ----------------------------------------------------------------------------------------- -->
 <section class="slide" data-title="Java at runtime">
   <div class="kicker">The Java developer's view</div>
-  <h2>Write SQL in your code. Run. Receive.</h2>
+  <h2>Write SQL in the app, run it, receive matches</h2>
   <div class="row grow">
-    <div class="col">
-      <div class="code"><span class="c">// MySubscriptions.java: the whole contract</span>
-<span class="k">rules</span>.put(<span class="s">"critical-potassium"</span>, <span class="s">"""</span>
-<span class="q">    SELECT patient_id, value_num, units
-    FROM gold_observations
-    WHERE observation_cd_desc = 'Potassium'
-      AND value_num >= 6.5</span><span class="s">"""</span>);</div>
-      <ul style="margin-top:1rem">
-        <li><b>Test it first</b> in the SQL editor against your own view,
-          <code>hl7_rtm_demo.sub_&lt;app&gt;.gold_observations</code>. The rows it returns are the records you'll get.</li>
-        <li><b>The code is the source of truth.</b> On start the app declares exactly this set; anything deleted is cancelled.</li>
-        <li><b>Your own identity:</b> a service principal profile. No Azure secret: Unity Catalog mints the Event Hubs token.</li>
-      </ul>
+    <div class="col" style="display:flex; flex-direction:column; min-height:0">
+      <div class="codetabs" id="codetabs"></div>
+      <div class="code grow" id="code"></div>
+      <p class="muted" style="font-size:.82rem; margin:.5rem 0 0">Shortened from the real files in the jar
+        (<code>src/subscriber</code>, 7 classes). Settings come from <code>make registry</code>, and the secret stays in the CLI profile.</p>
     </div>
-    <div class="col">
-      <div style="display:flex; gap:.5rem; margin-bottom:.6rem">
+    <div class="col" style="display:flex; flex-direction:column; min-height:0">
+      <div style="display:flex; gap:.5rem; margin-bottom:.5rem">
         <button class="btn" id="runBtn">▶ java -jar hl7-subscriber.jar</button>
         <button class="btn ghost" id="resetBtn">Reset</button>
       </div>
       <div class="term" id="term"></div>
-      <p class="muted" style="font-size:.85rem">Real output from the README walkthrough, 2026-11-05.</p>
+      <div class="stats">
+        <div class="stat"><b>~5 s</b><span>rule declared → ACTIVE</span></div>
+        <div class="stat"><b>4.7 s</b><span>p99, gold → app (1 rule)</span></div>
+        <div class="stat"><b>7.1 s</b><span>p99 at 1,000 rules</span></div>
+        <div class="stat"><b>&lt;90 ms</b><span>p99 per real-time step</span></div>
+      </div>
+      <p class="muted" style="font-size:.78rem; margin:.4rem 0 0">Terminal output is from the README walkthrough run on 2026-11-05.</p>
     </div>
   </div>
 </section>
 
-<!-- 7 · Sequence ------------------------------------------------------------------------------------------------ -->
+<!-- 5 · Sequence ------------------------------------------------------------------------------------------------ -->
 <section class="slide light" data-title="Under the hood">
   <div class="kicker">Under the hood · press Next step</div>
-  <h2>From a Java string to a live rule, with no redeploy</h2>
+  <h2>From a Java string to a live rule, without a redeploy</h2>
   <div class="seq">
-    <div class="actor">Java app<small>its own SP</small></div>
+    <div class="actor">Java app<small>its own service principal</small></div>
     <div class="actor">Subscription API<small>Databricks App</small></div>
     <div class="actor">SQL warehouse<small>Databricks compiles</small></div>
-    <div class="actor">Registry<small>Lakebase</small></div>
-    <div class="actor">Hub<small>SDP micro-batch</small></div>
+    <div class="actor">Operational Store<small>rules · revisions · status</small></div>
+    <div class="actor">Hub<small>micro-batch pipeline</small></div>
   </div>
-  <div class="msgs" id="msgs">
-    <div class="lifelines"><div></div><div></div><div></div><div></div><div></div></div>
-  </div>
+  <div class="msgs" id="msgs"><div class="lifelines"><div></div><div></div><div></div><div></div><div></div></div></div>
   <div class="narr" id="narr"></div>
   <div style="display:flex; gap:.5rem; margin-top:auto">
     <button class="btn" id="stepBtn">Next step</button><button class="btn ghost" id="stepReset">Reset</button>
   </div>
 </section>
 
-<!-- 8 · Guardrails ---------------------------------------------------------------------------------------------- -->
-<section class="slide light" data-title="Guardrails">
-  <div class="kicker">Guardrails · try a rule</div>
-  <h2>Databricks says no, in the same call, and nothing is applied</h2>
+<!-- 6 · Rules --------------------------------------------------------------------------------------------------- -->
+<section class="slide light" data-title="Rules">
+  <div class="kicker">What a rule can do · try one</div>
+  <h2>Any Databricks SQL filter on one record. Errors come back from Databricks.</h2>
   <div class="row grow sim">
-    <div class="col">
-      <textarea id="ruleIn" spellcheck="false">SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0</textarea>
+    <div class="col" style="flex:1.15">
+      <textarea id="ruleIn" spellcheck="false"></textarea>
       <div class="examples" id="examples"></div>
       <div class="verdict" id="verdict"></div>
-      <p class="muted" style="font-size:.82rem">A preview that runs in this page, modeled on the real verdicts from the E2E run and README. The
-        real check is the API: a shape check, then Databricks' <code>DESCRIBE QUERY</code> against the app's own views.</p>
-    </div>
-    <div class="col">
-      <div class="card">
-        <h3>The only rule logic of our own: the shape</h3>
-        <p><code>SELECT &lt;columns&gt; FROM &lt;one gold source&gt; WHERE &lt;filter&gt;</code>, with any Databricks built-in.</p>
-        <p>No joins, subqueries, CTEs, aggregates, parameters, or functions that reach outside the record
-          (<code>http_request</code>, <code>secret</code>, <code>ai_*</code>, UDFs). The hub evaluates filters with its own
-          permissions, so a rule must stay one filter over one record.</p>
+      <p class="muted" style="font-size:.78rem; margin:.4rem 0 0">This preview runs in the page. It mimics the real verdicts from the E2E run and
+        the README. The real check runs in the API: a shape check, then Databricks' <code>DESCRIBE QUERY</code> against the app's own views.</p>
+      <div class="card" style="border-top-color: var(--blue); margin-top:.8rem" id="activator">
+        <h3>Compared with Fabric Activator</h3>
+        <p><b>Activator has, and a rule here doesn't:</b> built-in conditions over time ("becomes", "increases", "stays true
+          for", "no data for", averages over 10 s–24 h windows) and a no-code designer.</p>
+        <p><b>Here, and not in Activator:</b> rules written in SQL and tested in the SQL editor, registered by each app's code
+          at runtime, and checked against that app's Unity Catalog grants. Matches go to the app's own stream, while Activator
+          sends email, Teams, Power Automate, or Fabric items. The limit is 1,000 rules per hub; Activator allows 500 per item.</p>
       </div>
-      <div class="card" style="margin-top:1rem; border-top-color: var(--blue)">
-        <h3>Everything else is Databricks</h3>
-        <p>Misspelled or ungranted column, wrong type, unknown source: Databricks' own error class, passed through unchanged.
-          The API is a facade, not a second SQL dialect.</p>
+    </div>
+    <div class="col" style="display:flex; flex-direction:column; gap:.7rem">
+      <div class="card" style="border-top-color: var(--green)">
+        <h3>Works today: any built-in, applied to one record</h3>
+        <p><code>CASE</code>, <code>regexp_like</code>, <code>try_cast</code>, <code>abs</code>, date math, <code>IN</code> lists, JSON functions, and so on.
+          The hub applies the same filter the SQL editor does.</p>
+      </div>
+      <div class="card" style="border-top-color: var(--yellow)">
+        <h3>Not in a rule: windows and joins <span class="tag yellow">by design</span></h3>
+        <p>A rule sees one record. Rules like “3 rising potassium results in 1 hour” or “no vitals for 30 minutes” need state.
+          The platform builds those once, as a new gold source, using windowed real-time flows (tumbling and sliding windows are GA in Real-Time Mode).
+          Apps then subscribe to that source with a plain filter.</p>
+      </div>
+      <div class="card">
+        <h3>Enrichment happens in the platform, not in each app</h3>
+        <p>Gold records already carry the patient, visit, and code context. Lookups such as unit, attending, or care team
+          are added once, upstream of the hub, with broadcast joins (supported in Real-Time Mode). Every app's rules and
+          notifications then see the same enriched record. <span class="tag">next</span></p>
       </div>
     </div>
   </div>
 </section>
 
-<!-- 9 · Security ------------------------------------------------------------------------------------------------ -->
-<section class="slide" data-title="Isolation">
-  <div class="kicker">Governed by design</div>
-  <h2>Each app sees only what it's granted, and only its own results</h2>
-  <div class="tabs" id="secTabs"></div>
-  <div class="detail" id="secBody" style="min-height: 12rem"></div>
-  <p class="foot">Guarded by 24 live E2E checks (<code>--e2e</code>) and the registry tests on a real Postgres. Multi-app
-    isolation with three live service principals is the next test.</p>
+<!-- 7 · Governance ---------------------------------------------------------------------------------------------- -->
+<section class="slide light" data-title="Governance">
+  <div class="kicker">Security and isolation</div>
+  <h2>Each app reads only what it's granted and receives only its own results</h2>
+  <div class="ggrid">
+    <div class="gcard reveal d1">
+      <div class="q">Who is calling?</div>
+      <h3>The app's own service principal</h3>
+      <p>The Databricks Apps proxy authenticates every call and sets the caller's identity. It overwrites forged headers
+        and rejects anonymous calls with 401.</p>
+      <div class="proof">Forged header tested live</div>
+    </div>
+    <div class="gcard reveal d1">
+      <div class="q">What can it read?</div>
+      <h3>Only its granted columns</h3>
+      <p>Each app has Unity Catalog views (<code>sub_&lt;app&gt;.&lt;source&gt;</code>) with only its columns. Databricks compiles
+        rules against those views, so an ungranted column gets <code>UNRESOLVED_COLUMN</code>.</p>
+      <div class="proof">E2E checks 7–8</div>
+    </div>
+    <div class="gcard reveal d2">
+      <div class="q">What can a rule do?</div>
+      <h3>Filter one record</h3>
+      <p>The hub runs filters with its own permissions. Subqueries, joins, and functions that reach outside the record
+        (network, secrets, JVM, UDFs) are refused before Databricks compiles the rule.</p>
+      <div class="proof">E2E checks 11–14 · unit tests</div>
+    </div>
+    <div class="gcard reveal d2">
+      <div class="q">Who reads the results?</div>
+      <h3>Only that app</h3>
+      <p>Each app has its own Event Hub, readable only through its own Unity Catalog service credential. Only that app's
+        service principal has ACCESS on the credential. Unity Catalog issues short-lived tokens, so the app holds no Azure secret.</p>
+      <div class="proof">E2E checks 2–5</div>
+    </div>
+    <div class="gcard reveal d3">
+      <div class="q">Can an app bypass the API?</div>
+      <h3>No</h3>
+      <p>App roles in the operational store can't log in. Only the API acts as them, and row-level security keeps each app
+        to its own rows. The store's Data API is off, and old login roles are dropped.</p>
+      <div class="proof">E2E check 6 · registry tests on Postgres</div>
+    </div>
+    <div class="gcard reveal d3">
+      <div class="q">Where are the secrets?</div>
+      <h3>Not in the platform</h3>
+      <p>Event Hubs has SAS keys disabled, and Spark authenticates with a Unity Catalog service credential. The only secret
+        is the service principal's OAuth secret, kept in the developer's CLI profile. The app won't start if a settings
+        file contains one.</p>
+      <div class="proof">test_no_secrets.py</div>
+    </div>
+  </div>
+  <p class="foot">Not yet tested live: three apps with different grants on the same hub. That test comes next.</p>
 </section>
 
-<!-- 10 · Scale -------------------------------------------------------------------------------------------------- -->
-<section class="slide light" data-title="Scale">
-  <div class="kicker">Measured at the cap · 2026-11-05</div>
-  <h2>1,000 SQL rules on one stream: p99 7 s</h2>
+<!-- 8 · Scale + status ------------------------------------------------------------------------------------------ -->
+<section class="slide light" data-title="Scale and status">
+  <div class="kicker">Measured 2026-11-05 · where it stands</div>
+  <h2>1,000 SQL rules on one stream at p99 7 s, and what's next</h2>
   <div class="row grow">
     <div class="col">
       <table>
-        <tr><th>1,000 rules</th><th>Before</th><th>Now</th></tr>
-        <tr><td>Hub batch interval</td><td class="num">~67 s</td><td class="num" style="color:var(--green)">~4 s</td></tr>
-        <tr><td>Delivery p50</td><td class="num">155 s</td><td class="num" style="color:var(--green)">4.5 s</td></tr>
-        <tr><td>Delivery p99</td><td class="num">171 s</td><td class="num" style="color:var(--green)">7.1 s</td></tr>
-        <tr><td>A rule change → ACTIVE</td><td class="num">—</td><td class="num" style="color:var(--green)">8 s</td></tr>
-        <tr><td>1 rule, for reference</td><td class="num"></td><td class="num">p99 4.7 s</td></tr>
+        <tr><th>At 1,000 rules</th><th>Before</th><th>Now</th></tr>
+        <tr><td>Hub batch interval</td><td class="num">~67 s</td><td class="num good">~4 s</td></tr>
+        <tr><td>Delivery p50 / p99</td><td class="num">155 / 171 s</td><td class="num good">4.5 / 7.1 s</td></tr>
+        <tr><td>Rule change → ACTIVE</td><td class="num">—</td><td class="num good">8 s</td></tr>
+        <tr><td>One rule, for reference</td><td class="num"></td><td class="num">p99 4.7 s</td></tr>
       </table>
-      <p class="muted" style="margin-top:.7rem">Above the cap, a new rule is refused with <code>RULE_LIMIT_REACHED</code>. Past 1,000: more
-        hubs (shards), designed in docs/SCALABILITY.md.</p>
-    </div>
-    <div class="col">
-      <div class="card reveal d1"><h3>1 · Compile per change, not per batch</h3><p>A background thread recompiles when the registry changes; batches keep the last compiled set. 67 s → 5.5 s.</p></div>
-      <div class="card reveal d2" style="margin-top:.7rem"><h3>2 · One SQL expression per 200 rules</h3><p>Not a dozen Column calls per rule: each call is a driver round trip.</p></div>
-      <div class="card reveal d3" style="margin-top:.7rem"><h3>3 · Simple rules are data</h3><p><code>col = 'x' AND n &gt;= 6.5</code> becomes rows, joined through an equality index. The plan is the same size for 1 or 1,000 rules.</p></div>
-    </div>
-  </div>
-</section>
-
-<!-- 11 · Status ------------------------------------------------------------------------------------------------- -->
-<section class="slide" data-title="Status">
-  <div class="kicker">Where it stands</div>
-  <h2>Verified live, and what's next</h2>
-  <div class="row grow">
-    <div class="col card">
-      <h3>Verified on the dev workspace</h3>
-      <ul class="checks">
-        <li>Raw → gold under 200 ms p99 per hop, over soaks spanning epoch boundaries</li>
-        <li>Every layer in a streaming table, upserted (no duplicates after a restart)</li>
-        <li>Java app: add, change, remove, refused, stopped-hub (exit codes 0, 0, 0, 2, 4)</li>
-        <li>24/24 E2E checks, including no path around the API</li>
-        <li>1,000-rule cap at p99 7 s; rebuild from a Sunday wipe with two commands</li>
+      <p style="margin:.8rem 0 .3rem"><b>How:</b></p>
+      <ul class="checks" style="margin-top:0">
+        <li>Rules are compiled when they change, in the background, not on every batch.</li>
+        <li>Each group of 200 rules runs as one SQL expression.</li>
+        <li>Simple rules are stored as data and matched through an equality index.</li>
       </ul>
+      <p class="muted" style="font-size:.85rem">A rule beyond the 1,000-rule cap is refused with <code>RULE_LIMIT_REACHED</code>. More
+        rules than that means more hubs (design in docs/SCALABILITY.md).</p>
     </div>
-    <div class="col card" style="border-top-color: var(--yellow)">
-      <h3>Next</h3>
-      <ul class="checks">
-        <li class="todo">Two more service principals: live cross-app isolation (columns, sources, topics, revocation)</li>
-        <li class="todo">The E2E job in the workspace (needs the Service Principal: User role)</li>
-        <li class="todo">Shards past 1,000 rules, if a customer needs it</li>
-        <li class="todo">Load-based App autoscaling, when it reaches this workspace (fixed 2 instances today)</li>
-      </ul>
+    <div class="col" style="display:flex; flex-direction:column; gap:.8rem">
+      <div class="card" style="border-top-color: var(--green)">
+        <h3>Verified on the dev workspace</h3>
+        <ul class="checks">
+          <li>Under 200 ms p99 per real-time step, over soaks that span checkpoints</li>
+          <li>Every step lands in a streaming table, with no duplicates after a restart</li>
+          <li>Java walkthrough: add, change, remove, refuse, stopped hub (exit codes 0, 0, 0, 2, 4)</li>
+          <li>All 24 end-to-end checks pass, including no path around the API</li>
+          <li>Rebuilds after the weekly sandbox wipe with two commands</li>
+        </ul>
+      </div>
+      <div class="card" style="border-top-color: var(--yellow)">
+        <h3>Next</h3>
+        <ul class="checks">
+          <li class="todo">Two more service principals, to test isolation between apps live</li>
+          <li class="todo">Windowed gold sources and hub-side enrichment</li>
+          <li class="todo">Running the end-to-end checks as a workspace job (needs the Service Principal: User role)</li>
+          <li class="todo">More hubs beyond 1,000 rules · App autoscaling once available (2 fixed instances today)</li>
+        </ul>
+      </div>
     </div>
   </div>
 </section>
@@ -445,6 +463,7 @@
 <div class="nav"><button id="prev">←</button><button id="next">→</button></div>
 
 <script>
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 const slides = [...document.querySelectorAll(".slide")];
 let cur = 0;
 const dots = document.getElementById("dots");
@@ -454,7 +473,6 @@ slides.forEach((s, i) => {
   d.onclick = () => go(i);
   dots.appendChild(d);
 });
-
 function go(i) {
   cur = Math.max(0, Math.min(slides.length - 1, i));
   slides.forEach((s, j) => s.classList.toggle("active", j === cur));
@@ -462,8 +480,6 @@ function go(i) {
   document.getElementById("progress").style.width = ((cur + 1) / slides.length * 100) + "%";
   document.getElementById("counter").textContent = `${cur + 1} / ${slides.length} · ${slides[cur].dataset.title}`;
   history.replaceState(null, "", "#" + (cur + 1));
-  const t = slides[cur].dataset.title;
-  if (t === "Latency") animateBars();
 }
 document.getElementById("prev").onclick = () => go(cur - 1);
 document.getElementById("next").onclick = () => go(cur + 1);
@@ -476,34 +492,96 @@ document.addEventListener("keydown", e => {
   if (e.key === "f" || e.key === "F") document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
 });
 
-// Architecture details ----------------------------------------------------------------------------------------------
+// Architecture ------------------------------------------------------------------------------------------------------
+// key: [title, what it does, [facts]]
 const ARCH = {
-  feed: ["HL7 v2 feed", "ADT (encounters), ORU (results), ORM (orders) as raw pipe-delimited HL7, or the existing Epic JSON feed (a drop-in pipeline with the same silver contract). Generators run as serverless jobs for the demo."],
-  eh: ["Azure Event Hubs Premium", "A topic between every layer, named after the table it lands in: <catalog>.<schema>.<table>. SAS keys are disabled: pipelines authenticate with a Unity Catalog service credential (the access connector's managed identity). Premium was required: Standard's tail missed 200 ms."],
-  bronze: ["bronze · Real-Time Mode", "Raw HL7 → bronze_hl7, with the broker timestamp carried forward. p99 86 ms (p50 7 ms). One real-time flow per pipeline, serverless, GA channel."],
-  silver: ["silver · Real-Time Mode", "The full HL7 parse with native Spark functions into the customer's 34-column Epic silver contract; bad messages to quarantine from the same flow. p99 78 ms."],
-  gold: ["gold · Real-Time Mode", "One message → encounters, observations (one per OBX), and orders, routed by a topic column from one flow. Every record has the full JSON shape and a stable _meta identity. p99 78 ms."],
-  st: ["Streaming tables · micro-batch", "One pipeline lands every topic in the Delta table of the same name: AUTO CDC upserts keyed by raw-topic coordinates, so replays don't duplicate. Each row carries hop_ms / e2e_ms, which the latency dashboard reads. Real-Time Mode can't write Delta directly, which is why this sits beside the hot path."],
-  api: ["Subscription API · Databricks App", "FastAPI, stateless, 2 instances. Knows the caller from the Apps proxy (the SP's application ID; forged headers are overwritten). Checks the rule's shape, has Databricks compile it (DESCRIBE QUERY on the caller's own views), stores it, and waits until the hub runs it. The only way in."],
-  reg: ["Registry · Lakebase Postgres", "Subscriptions, revisions, status, heartbeats. App roles are NOLOGIN, used only by the API through SET LOCAL ROLE, so the owner trigger and row-level security see the app. The Data API is off. Registered in Unity Catalog for the monitoring dashboard."],
-  hub: ["Subscription hub · micro-batch SDP", "Reads the gold topics, re-checks each rule, evaluates all of a source's rules in one pass, and writes each match to the app's own topic with only the fields its rule selects. Up to 1,000 rules at p99 7 s. A rule that fails on data is FAILED alone."],
-  app: ["Java apps", "Seven small classes: declare SQL, wait until ACTIVE, listen. Each app reads only its own hub through its own UC service credential, so Unity Catalog mints the Event Hubs token and the app holds no Azure secret."],
-  uc: ["Unity Catalog", "Per-app views expose only granted columns (Databricks' own UNRESOLVED_COLUMN for anything else). Service credentials for Event Hubs, one per app. Streaming tables, dashboards, and the registry all governed in one place."],
-  bi: ["SQL · BI · AI", "The same streaming tables serve dashboards, Genie, notebooks, and models. A subscription rule pasted into the SQL editor returns the records the hub delivers."],
+  feed: ["HL7 v2 feed", "ADT (admissions), ORU (results), and ORM (orders) as raw HL7 v2. Or the existing pre-parsed Epic JSON feed, through a drop-in pipeline that produces the same silver schema.",
+    ["Demo load: 200 msg/s from a serverless generator job", "Messages keyed by patient, so each patient's events stay in order"]],
+  eh: ["Event Hubs topics", "A topic sits between every step. Each topic is named after the table it lands in: <catalog>.<schema>.<table>. Real-Time Mode reads and writes topics. It can't use Delta as a source or a sink.",
+    ["Event Hubs Premium (Standard's tail missed 200 ms)", "SAS keys disabled: Entra ID only"]],
+  bronze: ["Bronze · Real-Time Mode", "Lands each raw message and carries forward the broker timestamp from every topic it passed through, so each step's latency is measured with broker clocks.",
+    ["p50 7 ms · p99 86 ms", "One real-time flow per pipeline, serverless, GA"]],
+  silver: ["Silver · Real-Time Mode", "Parses the full HL7 message into the customer's 34-column Epic silver schema, using built-in Spark functions (no JARs or UDFs). Bad messages go to quarantine from the same flow.",
+    ["p99 78 ms", "The parse costs less than the 16 ms timestamp resolution"]],
+  gold: ["Gold · Real-Time Mode", "Splits each message into encounters, observations (one per result), and orders, written to three topics from one flow. Every record has the full JSON shape and a stable record ID.",
+    ["p99 78 ms", "Additive schema changes only"]],
+  goldtopics: ["Gold topics", "The gold encounters, observations, and orders topics. The subscription hub and the lakehouse pipeline both read them, and neither one adds latency to the real-time path.",
+    ["Each record carries its raw, bronze, silver, and gold timestamps"]],
+  alltopics: ["Every topic", "Raw, bronze, silver, quarantine, and the three gold topics all land in tables. Real-Time Mode can't write Delta, so one micro-batch pipeline next to the real-time path does it.",
+    ["If Real-Time Mode gains a Delta sink, this pipeline is no longer needed"]],
+  mirror: ["Lakehouse pipeline", "One micro-batch pipeline that upserts each topic into its table, keyed by the record's position in the raw topic. A replay after a restart updates rows instead of duplicating them, and the pipeline adds latency columns as it goes.",
+    ["0 duplicates after restarts (verified)"]],
+  st: ["Streaming tables", "<catalog>.hl7_realtime.<topic>, one per topic, governed in Unity Catalog. Each row carries hop_ms and e2e_ms, so latency is a query rather than a separate test.",
+    ["The latency dashboard reads these tables"]],
+  bi: ["SQL · dashboards · Genie", "The same tables serve dashboards, notebooks, Genie, and models. A subscription rule pasted into the SQL editor returns the same records the hub delivers.",
+    ["Two bundled dashboards: latency and subscriptions"]],
+  app: ["Java app", "Seven small classes. It declares its SQL rules, waits until the hub runs them, then reads its own topic. It signs in as its own service principal, and Unity Catalog issues its Event Hubs token.",
+    ["Exits non-zero on refused, failed, or unconfirmed rules", "Resumes where it left off after time away and never skips a match"]],
+  api: ["Subscription API · Databricks App", "A stateless FastAPI app, the only way to register rules. It checks a rule's shape, has Databricks compile it against the caller's own views, stores it, and waits until the hub runs it.",
+    ["2 instances (horizontal scale)", "Errors from Databricks are passed through unchanged"]],
+  reg: ["Operational Store", "A managed Postgres database (Lakebase) that holds subscriptions, revisions, the hub's status for each revision, and heartbeats. Every change gets a new revision, and row-level security keeps each app to its own rows.",
+    ["Enforces the 1,000-rule cap", "Readable in Unity Catalog for the monitoring dashboard"]],
+  hub: ["Subscription hub", "A micro-batch pipeline that reads the gold topics and re-checks every rule. It runs all of a source's rules in one pass and writes each match to that app's topic, with only the fields the rule selects.",
+    ["1,000 rules: batch ~4 s, p99 7.1 s", "A rule that fails on bad data is marked FAILED; the others keep running"]],
+  apptopic: ["The app's own topic", "<catalog>.subscribers.<app>. Only that app can read it, through its own access connector and Unity Catalog service credential. Each notification carries a stable ID and the source record's position.",
+    ["Isolation guarded by E2E checks 2–5"]],
+  uc: ["Unity Catalog", "One place for governance: service principals, per-app views with only the granted columns, Event Hubs service credentials, the streaming tables, and the registry for monitoring. Lineage and audit come with it.",
+    ["No keys or connection strings anywhere"]],
 };
 const detail = document.getElementById("detail");
-document.querySelectorAll(".node[data-k]").forEach(n => n.onclick = () => {
-  document.querySelectorAll(".node.sel").forEach(x => x.classList.remove("sel"));
+document.querySelectorAll("[data-k]").forEach(n => n.onclick = () => {
+  document.querySelectorAll(".sel").forEach(x => x.classList.remove("sel"));
   n.classList.add("sel");
-  const [h, p] = ARCH[n.dataset.k];
-  detail.innerHTML = `<h3>${h}</h3><p>${p.replace(/</g, "&lt;")}</p>`;
+  const [h, p, facts] = ARCH[n.dataset.k];
+  detail.innerHTML = `<h3>${esc(h)}</h3><p>${esc(p)}</p><div class="facts">${facts.map(f => `<div>• ${esc(f)}</div>`).join("")}</div>`;
 });
 
-// Latency bars -----------------------------------------------------------------------------------------------------
-function animateBars() {
-  document.querySelectorAll("#bars .fill").forEach(f => { f.style.width = "0"; });
-  setTimeout(() => document.querySelectorAll("#bars .fill").forEach(f => { f.style.width = (f.dataset.w / 200 * 100) + "%"; }), 80);
+// Java code tabs ----------------------------------------------------------------------------------------------------
+const CODE = {
+  "MySubscriptions.java": `<span class="c">// What this app receives: name -> Databricks SQL. Edit, rebuild, run.</span>
+<span class="k">public static</span> Map&lt;String, String&gt; all() {
+    <span class="k">var</span> rules = <span class="k">new</span> LinkedHashMap&lt;String, String&gt;();
+    rules.put(<span class="s">"critical-potassium"</span>, <span class="s">"""</span>
+<span class="q">        SELECT patient_id, value_num, units FROM gold_observations
+        WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5</span><span class="s">"""</span>);
+    <span class="k">return</span> rules;
+}`,
+  "App.java": `<span class="c">// 1. Declare what the code says. Databricks compiles each rule in this call.</span>
+<span class="k">var</span> declared = api.declare(MySubscriptions.all());
+<span class="k">if</span> (declared.status() == <span class="q">422</span>) {          <span class="c">// refused: Databricks' error per rule</span>
+    <span class="k">for</span> (JsonNode r : declared.body().path(<span class="s">"refused"</span>)) print(<span class="s">"refused"</span>, r);
+    exit(<span class="q">2</span>, <span class="s">"fix MySubscriptions.java"</span>);
 }
+
+<span class="c">// 2. Wait until the hub runs exactly these revisions (short polls).</span>
+<span class="k">while</span> (!done(state = api.status(POLL_SECONDS).body().path(<span class="s">"state"</span>).asText())) { }
+<span class="k">if</span> (!state.equals(<span class="s">"READY"</span>)) exit(state.equals(<span class="s">"FAILED"</span>) ? <span class="q">3</span> : <span class="q">4</span>, state);
+
+<span class="c">// 3. Read this app's own topic. Unity Catalog issues the token: no Azure secret.</span>
+EventHubs.useCredential(workspace, cfg.get(<span class="s">"eventhubs.credential"</span>), namespace);
+<span class="k">try</span> (<span class="k">var</span> consumer = <span class="k">new</span> KafkaConsumer&lt;&gt;(EventHubs.consumer(namespace, group))) {
+    consumer.subscribe(List.of(topic));
+    <span class="k">new</span> Listener(current, group, System.out, Instant.now()).run(consumer, ...);
+}`,
+  "SubscriptionApi.java": `<span class="c">// The whole client for the Subscription API: plain HTTPS with the SP's OAuth token.</span>
+<span class="c">// PUT  /api/v1/subscriptions        declare the full set (atomic)</span>
+<span class="c">// GET  /api/v1/subscriptions?wait=N  READY | PENDING | FAILED | HUB_STALE</span>
+Response declare(Map&lt;String, String&gt; rules) {
+    <span class="k">var</span> body = rules.entrySet().stream()
+        .map(e -&gt; Map.of(<span class="s">"name"</span>, e.getKey(), <span class="s">"sql"</span>, e.getValue())).toList();
+    <span class="k">return</span> send(<span class="s">"PUT"</span>, <span class="s">"/api/v1/subscriptions"</span>, body);
+}
+Response status(<span class="k">int</span> waitSeconds) {
+    <span class="k">return</span> send(<span class="s">"GET"</span>, <span class="s">"/api/v1/subscriptions?wait="</span> + waitSeconds, <span class="k">null</span>);
+}`,
+};
+const codetabs = document.getElementById("codetabs"), codeEl = document.getElementById("code");
+Object.keys(CODE).forEach((k, i) => {
+  const b = document.createElement("button"); b.textContent = k;
+  b.onclick = () => { [...codetabs.children].forEach(x => x.classList.remove("on")); b.classList.add("on"); codeEl.innerHTML = CODE[k]; };
+  codetabs.appendChild(b);
+  if (i === 0) b.click();
+});
 
 // Terminal ----------------------------------------------------------------------------------------------------------
 const TERM = [
@@ -521,42 +599,36 @@ const term = document.getElementById("term");
 let timers = [];
 function resetTerm() {
   timers.forEach(clearTimeout); timers = [];
-  term.innerHTML = TERM.map(([c, t]) => `<div class="ln ${c}">${t.replace(/</g, "&lt;")}</div>`).join("");
+  term.innerHTML = TERM.map(([c, t]) => `<div class="ln ${c}">${esc(t)}</div>`).join("");
 }
 resetTerm();
 document.getElementById("resetBtn").onclick = resetTerm;
 document.getElementById("runBtn").onclick = () => {
   resetTerm();
-  const delays = [0, 600, 1300, 1500, 3200, 3700, 5200, 5500, 6000];
-  [...term.children].forEach((l, i) => timers.push(setTimeout(() => l.classList.add("show"), delays[i])));
+  [0, 600, 1300, 1500, 3200, 3700, 5200, 5500, 6000].forEach((d, i) => timers.push(setTimeout(() => term.children[i].classList.add("show"), d)));
 };
 
-// Sequence ----------------------------------------------------------------------------------------------------------
-// [from column, to column, label, narration]
+// Sequence: [from, to, label, narration] -----------------------------------------------------------------------------
 const SEQ = [
-  [0, 1, "PUT /subscriptions [{name, sql}]", "The app declares its <b>whole set</b> with its own service principal's token. The Apps proxy tells the API who's calling."],
-  [1, 1, "shape check", "The API checks <b>only the shape</b>: one SELECT of columns, one gold source, a WHERE. No joins, subqueries, or functions that leave the record."],
-  [1, 2, "DESCRIBE QUERY on sub_<app>.<source>", "<b>Databricks compiles the rule</b> against this app's own views, which hold only its granted columns."],
-  [2, 1, "OK, or Databricks' error", "Any error comes back <b>unchanged</b> (e.g. UNRESOLVED_COLUMN), and one refusal means nothing is applied."],
-  [1, 3, "SET LOCAL ROLE app; upsert", "Stored as the app's own role: the owner trigger stamps a <b>revision</b>, and row-level security keeps apps apart."],
-  [1, 0, "ACCEPTED, revision 1", "The app prints ACCEPTED and starts polling for ACTIVE in short calls."],
-  [4, 3, "generation changed?", "Each micro-batch, the hub asks for one number. When it moved, a <b>background thread</b> recompiles; batches never wait."],
-  [4, 3, "status ACTIVE (rev 1)", "When the new rule set runs, the hub records <b>ACTIVE</b> for that exact revision."],
-  [1, 0, "ACTIVE", "The app sees ACTIVE (about 5 s after it asked) and starts listening on its own topic."],
-  [4, 0, "match → the app's own topic", "Matches arrive with <b>only the selected fields</b>, a stable notification ID, and the source coordinates. p99 ~5 s from gold."],
+  [0, 1, "PUT /subscriptions [{name, sql}]", "The app sends its <b>whole set</b> of rules, using its service principal's token. The Apps proxy tells the API who is calling."],
+  [1, 1, "shape check", "The API checks only the <b>shape</b>: a SELECT of columns from one gold source with a WHERE. No joins, subqueries, or functions that reach outside the record."],
+  [1, 2, "DESCRIBE QUERY on the app's own view", "<b>Databricks compiles the rule</b> against this app's views, which have only its granted columns."],
+  [2, 1, "OK, or Databricks' error", "If Databricks returns an error (for example UNRESOLVED_COLUMN), the API passes it back <b>unchanged</b>. If any rule is refused, none are applied."],
+  [1, 3, "register: critical-potassium → revision 1", "The rule is stored under this app's name. The store assigns a <b>revision</b> and checks the 1,000-rule cap. Each app sees only its own rules."],
+  [1, 0, "ACCEPTED · revision 1", "The app prints ACCEPTED and starts checking for ACTIVE."],
+  [4, 3, "anything changed?", "Every micro-batch, the hub reads one number from the store. When it changes, a <b>background thread</b> recompiles the rules, so batches don't wait."],
+  [4, 3, "revision 1 ACTIVE", "Once the new rules are running, the hub records <b>ACTIVE</b> for that exact revision."],
+  [1, 0, "ACTIVE", "The app sees ACTIVE, about 5 seconds after it sent the rule, and starts reading its own topic."],
+  [4, 0, "match → the app's own topic", "Each match carries <b>only the selected fields</b>, a stable notification ID, and the source record's position. p99 is about 5 s from gold."],
 ];
 const msgs = document.getElementById("msgs"), narr = document.getElementById("narr");
 SEQ.forEach(([a, b, label]) => {
-  const row = document.createElement("div");
-  row.className = "msg";
-  const lo = Math.min(a, b), hi = Math.max(a, b);
+  const row = document.createElement("div"); row.className = "msg";
   const lab = document.createElement("div");
-  lab.className = "lab" + (b < a ? " back" : "");
+  lab.className = "lab" + (b < a ? " back" : "") + (a === b ? " self" : "");
   lab.textContent = label;
-  lab.style.gridColumn = `${lo + 1} / ${hi + 2}`;
-  if (a === b) lab.style.gridColumn = `${a + 1} / ${a + 2}`;
-  row.appendChild(lab);
-  msgs.appendChild(row);
+  lab.style.gridColumn = a === b ? `${a + 1} / ${a + 2}` : `${Math.min(a, b) + 1} / ${Math.max(a, b) + 2}`;
+  row.appendChild(lab); msgs.appendChild(row);
 });
 let step = -1;
 function showStep() {
@@ -569,67 +641,58 @@ document.getElementById("stepReset").onclick = () => { step = -1; showStep(); };
 showStep();
 
 // Rule preview ------------------------------------------------------------------------------------------------------
-const EXAMPLES = {
-  "valid": "SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0",
-  "typo": "SELECT patient_id FROM gold_observations WHERE value_numm > 6",
-  "not granted": "SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH'",
-  "subquery": "SELECT patient_id FROM gold_observations WHERE patient_id IN (SELECT patient_id FROM gold_encounters)",
-  "network call": "SELECT patient_id FROM gold_observations WHERE http_request('https://x.example', 'GET') IS NOT NULL",
-  "join": "SELECT o.patient_id FROM gold_observations o JOIN gold_orders r ON o.patient_id = r.patient_id",
-};
+const EXAMPLES = [
+  ["Works", "simple", "SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0"],
+  ["Works", "CASE + regex", "SELECT patient_id, value_num, abnormal_flag FROM gold_observations\nWHERE regexp_like(observation_cd_desc, '(?i)^(potassium|sodium)$')\n  AND CASE WHEN observation_cd_desc ILIKE 'potassium' THEN value_num >= 6.5 ELSE value_num < 120 END"],
+  ["Works", "try_cast", "SELECT patient_id, value FROM gold_observations WHERE units = 'mmol/L' AND try_cast(value AS DOUBLE) > 6.5"],
+  ["Refused", "typo", "SELECT patient_id FROM gold_observations WHERE value_numm > 6"],
+  ["Refused", "not granted", "SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH'"],
+  ["Refused", "window", "SELECT patient_id, value_num FROM gold_observations\nWHERE observation_cd_desc = 'Potassium'\nQUALIFY avg(value_num) OVER (PARTITION BY patient_id ORDER BY _meta.gold_ts\n  RANGE BETWEEN INTERVAL 1 HOUR PRECEDING AND CURRENT ROW) > 6"],
+  ["Refused", "subquery", "SELECT patient_id FROM gold_observations WHERE patient_id IN (SELECT patient_id FROM gold_encounters)"],
+  ["Refused", "network call", "SELECT patient_id FROM gold_observations WHERE http_request('https://x.example', 'GET') IS NOT NULL"],
+];
 const GRANTED = ["patient_id", "visit_id", "observation_cd", "observation_cd_desc", "value", "value_num", "units", "abnormal_flag"];
-const ALL_COLS = GRANTED.concat(["msg_sending_facility", "msg_control_id", "order_cd", "order_cd_desc"]);
+const UNGRANTED = ["msg_sending_facility", "msg_control_id", "order_cd", "order_cd_desc"];
+const WORDS = new Set(["select", "from", "where", "and", "or", "not", "in", "is", "null", "like", "ilike", "between", "case", "when", "then",
+  "else", "end", "as", "double", "int", "string", "true", "false", "gold_observations", "gold_encounters", "gold_orders",
+  "regexp_like", "try_cast", "lower", "upper", "abs", "coalesce", "cast", "date_diff", "hour"]);
 const ex = document.getElementById("examples"), ruleIn = document.getElementById("ruleIn"), verdict = document.getElementById("verdict");
-Object.entries(EXAMPLES).forEach(([k, v]) => {
-  const b = document.createElement("button"); b.textContent = k;
+let lastGrp = null;
+EXAMPLES.forEach(([grp, k, v]) => {
+  if (grp !== lastGrp) { const g = document.createElement("span"); g.className = "grp"; g.textContent = grp; ex.appendChild(g); lastGrp = grp; }
+  const b = document.createElement("button"); b.textContent = k; if (grp === "Works") b.className = "ok";
   b.onclick = () => { ruleIn.value = v; judge(); };
   ex.appendChild(b);
 });
+const NO = '<span style="color:#FF6B57">refused</span>', DIM = s => `<span style="color:#6F8A91">${s}</span>`;
 function judge() {
   const sql = ruleIn.value.trim(), low = sql.toLowerCase();
-  const refuse = what => `<span style="color:#FF6B57">refused</span>  SQL_NOT_ALLOWED: ${what} isn't allowed: a rule is SELECT &lt;columns&gt; FROM &lt;source&gt; WHERE &lt;filter&gt;\n<span style="color:#6F8A91">nothing applied · exit 2</span>`;
+  const refuse = what => `${NO}  SQL_NOT_ALLOWED: ${what} isn't allowed: a rule is SELECT &lt;columns&gt; FROM &lt;source&gt; WHERE &lt;filter&gt;\n${DIM("nothing applied · exit 2")}`;
+  const fn = low.match(/\b(http_request|secret|try_secret|reflect|java_method|ai_\w+|read_\w+|current_user|rand|uuid)\s*\(/);
   let out;
-  if (/\bjoin\b/.test(low)) out = refuse("a join");
+  if (/\bover\s*\(/.test(low) || /\bqualify\b/.test(low)) out = refuse("a window function") + "\n" + DIM("→ over-time logic belongs in a platform-built gold source; subscribe to it with a filter");
+  else if (/\bjoin\b/.test(low)) out = refuse("a join");
   else if (/\(\s*select\b/.test(low)) out = refuse("a subquery");
-  else if (/\b(http_request|secret|reflect|java_method|ai_\w+)\s*\(/.test(low)) out = refuse(low.match(/\b(http_request|secret|reflect|java_method|ai_\w+)\s*\(/)[1] + "()");
+  else if (/\b(group\s+by|order\s+by|limit)\b/.test(low)) out = refuse(low.match(/\b(group\s+by|order\s+by|limit)\b/)[1].toUpperCase());
+  else if (fn) out = refuse(fn[1] + "()");
   else if (!/^select\b[\s\S]+\bfrom\s+gold_(observations|encounters|orders)\b/.test(low)) out = refuse("anything but one source table");
   else {
-    const idents = (low.replace(/'[^']*'/g, "").match(/[a-z_][a-z0-9_]*/g) || [])
-      .filter(w => !["select", "from", "where", "and", "or", "not", "in", "is", "null", "like", "between", "gold_observations", "gold_encounters", "gold_orders", "lower", "upper", "true", "false"].includes(w));
+    const idents = (low.replace(/'[^']*'/g, "").match(/[a-z_][a-z0-9_]*/g) || []).filter(w => !WORDS.has(w));
     const unknown = idents.find(w => !GRANTED.includes(w));
-    if (unknown && !ALL_COLS.includes(unknown)) {
-      const near = GRANTED.filter(c => c.startsWith(unknown.slice(0, 3))).slice(0, 3).map(c => "`" + c + "`").join(", ");
-      out = `<span style="color:#FF6B57">refused</span>  UNRESOLVED_COLUMN.WITH_SUGGESTION: A column, variable, or function parameter with name \`${unknown}\` cannot be resolved. Did you mean one of the following? [${near || "`value_num`, `value`"}]\n<span style="color:#6F8A91">Databricks' own error, passed through · nothing applied · exit 2</span>`;
+    if (unknown && !UNGRANTED.includes(unknown)) {
+      const near = GRANTED.filter(c => c.startsWith(unknown.slice(0, 3))).slice(0, 3).map(c => "`" + c + "`").join(", ") || "`value_num`, `value`";
+      out = `${NO}  UNRESOLVED_COLUMN.WITH_SUGGESTION: A column, variable, or function parameter with name \`${esc(unknown)}\` cannot be resolved. Did you mean one of the following? [${near}]\n${DIM("Databricks' own error, passed through · nothing applied · exit 2")}`;
     } else if (unknown) {
-      out = `<span style="color:#FF6B57">refused</span>  UNRESOLVED_COLUMN.WITH_SUGGESTION: \`${unknown}\` cannot be resolved (not granted to this app: its view doesn't have it)\n<span style="color:#6F8A91">Databricks' own error, passed through · nothing applied · exit 2</span>`;
+      out = `${NO}  UNRESOLVED_COLUMN.WITH_SUGGESTION: \`${unknown}\` cannot be resolved: this app's view doesn't have it (not granted)\n${DIM("Databricks' own error, passed through · nothing applied · exit 2")}`;
     } else {
-      out = `<span style="color:#00A972">subscribed</span>  my-rule  revision 1 ACCEPTED\n<span style="color:#00A972">hub</span>         my-rule  revision 1 ACTIVE   <span style="color:#6F8A91">(~5 s later, no redeploy)</span>`;
+      out = `<span style="color:#00A972">subscribed</span>  my-rule  revision 1 ACCEPTED\n<span style="color:#00A972">hub</span>         my-rule  revision 1 ACTIVE   ${DIM("(about 5 s later, no redeploy)")}`;
     }
   }
   verdict.innerHTML = out;
 }
+ruleIn.value = EXAMPLES[1][2];
 ruleIn.addEventListener("input", judge);
 judge();
-
-// Security tabs -----------------------------------------------------------------------------------------------------
-const SEC = {
-  "Who is calling": "The app calls the API with its own service principal's OAuth token. The Databricks Apps proxy authenticates it and sets the caller's identity; a forged header is overwritten (tested live). Anonymous calls get 401. The app refuses to run as anything but a service principal.",
-  "What it may read": "Unity Catalog views per app, <code>&lt;catalog&gt;.sub_&lt;app&gt;.&lt;source&gt;</code>, expose only its granted columns. Databricks compiles every rule against them, so an ungranted column is Databricks' own UNRESOLVED_COLUMN. Filtering on a column counts as reading it. The hub re-checks granted columns before it runs a rule.",
-  "What a rule may do": "One filter over one record, with any Databricks built-in. The hub evaluates filters with its own permissions, so subqueries, joins, and functions that reach outside the record (network, secrets, JVM, AI, UDFs) are refused before Databricks ever sees them.",
-  "Who reads results": "Each app has its own Event Hub, readable only by its own access connector, behind its own Unity Catalog service credential with ACCESS granted to that app's SP only. Unity Catalog mints a short-lived Event Hubs token: no Azure secret in the app.",
-  "No way around it": "Registry app roles are NOLOGIN and used only by the API (SET LOCAL ROLE), so the owner trigger and row-level security see the app. The Lakebase Data API is off and old login roles are dropped. E2E check 6 proves a direct path is refused.",
-  "Secrets": "None in pipelines, settings, or the repo. Event Hubs has SAS keys disabled; Spark uses a UC service credential. The SP's own OAuth secret lives only in the developer's Databricks CLI profile, and the app refuses to start if a settings file holds one.",
-};
-const tabs = document.getElementById("secTabs"), secBody = document.getElementById("secBody");
-Object.keys(SEC).forEach((k, i) => {
-  const b = document.createElement("button"); b.textContent = k;
-  b.onclick = () => {
-    [...tabs.children].forEach(x => x.classList.remove("on")); b.classList.add("on");
-    secBody.innerHTML = `<h3>${k}</h3><p>${SEC[k]}</p>`;
-  };
-  tabs.appendChild(b);
-  if (i === 0) b.click();
-});
 
 go(Math.max(0, (parseInt(location.hash.slice(1)) || 1) - 1));
 </script>
