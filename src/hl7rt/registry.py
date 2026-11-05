@@ -90,6 +90,21 @@ class Registry:
         )  # fmt: skip
         self._reported[subscription_id] = (revision, state)
 
+    @property
+    def generation(self):
+        """The registry generation the last refresh() saw (changes whenever any subscription does)."""
+        return self._generation
+
+    @_locked
+    def progress(self, source: str, batch_id: int, rules: int, ms: dict[str, int]):
+        """Where this batch's time went (subscription_registry.hub_progress), for docs/SCALABILITY.md."""
+        self._db().run(
+            "INSERT INTO subscription_registry.hub_progress (source, batch_id, rules, refresh_ms, prepare_ms, "
+            "compile_ms, write_ms, report_ms) VALUES (:s, :b, :n, :refresh, :prepare, :compile, :write, :report) "
+            "ON CONFLICT (source, batch_id) DO NOTHING",
+            s=source, b=batch_id, n=rules, **ms,
+        )  # fmt: skip
+
     @_locked
     def heartbeat(self, source: str, batch_id: int, rules: int):
         self._db().run(

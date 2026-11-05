@@ -138,3 +138,37 @@ def test_wait_reports_pending_then_ready_once_the_hub_runs_the_revision(client, 
     owner.run("INSERT INTO subscription_registry.hub_heartbeat VALUES ('gold_observations', now(), 1, 1) "
               "ON CONFLICT (source) DO UPDATE SET last_batch_at = now()")  # fmt: skip
     assert client.get("/api/v1/subscriptions?wait=5", headers=A).json()["state"] == "READY"
+
+
+def test_the_rule_cap_is_a_refusal_and_applies_nothing(client, pg):
+    owner = pg()
+    enabled = owner.run("SELECT count(*) FROM subscription_registry.subscriptions WHERE enabled")[0][0]
+    owner.run("UPDATE subscription_registry.limits SET value = :v WHERE name = 'max_enabled_rules'", v=enabled + 1)
+    try:
+        r = declare(client, [("cap-a", POTASSIUM), ("cap-b", POTASSIUM.replace("> 6", "> 9"))])
+        assert r.status_code == 422 and r.json()["applied"] is False
+        assert r.json()["refused"][0]["code"] == "RULE_LIMIT_REACHED"
+        names = [s["name"] for s in client.get("/api/v1/subscriptions", headers=A).json()["subscriptions"]]
+        assert "cap-a" not in names, "atomic: the first rule fit, but nothing was applied"
+    finally:
+        owner.run("UPDATE subscription_registry.limits SET value = 1000 WHERE name = 'max_enabled_rules'")
+
+
+def test_names_are_checked_before_anything_else(client):
+    r = declare(client, [("Bad Name!", POTASSIUM)])
+    assert r.status_code == 422 and r.json()["refused"][0]["code"] == "INVALID_NAME"
+    r = declare(client, [("same", POTASSIUM), ("same", POTASSIUM)])
+    assert r.status_code == 422 and r.json()["code"] == "DUPLICATE_NAME"
+    assert not client.compiled, "nothing reached Databricks"
+
+
+def test_declaring_nothing_cancels_everything(client):
+    declare(client, [("gone-1", POTASSIUM), ("gone-2", POTASSIUM.replace("> 6", "> 8"))])
+    r = declare(client, []).json()
+    assert r["applied"] and {c["name"] for c in r["cancelled"]} >= {"gone-1", "gone-2"}
+    assert client.get("/api/v1/subscriptions", headers=A).json()["state"] == "READY", "nothing left to wait for"
+
+
+def test_a_case_insensitive_rule_is_stored_in_canonical_form(client):
+    r = declare(client, [("upper", "SELECT PATIENT_ID FROM GOLD_OBSERVATIONS WHERE VALUE_NUM > 6")])
+    assert r.json()["accepted"][0]["query"] == "SELECT patient_id FROM gold_observations WHERE value_num > 6"

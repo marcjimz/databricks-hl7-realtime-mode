@@ -77,11 +77,38 @@ CREATE TABLE IF NOT EXISTS subscription_registry.hub_heartbeat (
   rules         int NOT NULL
 );
 
+-- Written by the hub per micro-batch: where the time goes (milliseconds per phase), for docs/SCALABILITY.md.
+CREATE TABLE IF NOT EXISTS subscription_registry.hub_progress (
+  source     text NOT NULL,
+  batch_id   bigint NOT NULL,
+  at         timestamptz NOT NULL DEFAULT now(),
+  rules      int NOT NULL,
+  refresh_ms int NOT NULL,  -- registry check and reload
+  prepare_ms int NOT NULL,  -- time this batch waited for a compile (0 when it used the background-compiled set)
+  compile_ms int NOT NULL DEFAULT 0,  -- what compiling the set in use cost (checks + expressions), wherever it ran
+  write_ms   int NOT NULL,  -- Spark: plan, evaluate, write to Event Hubs
+  report_ms  int NOT NULL,  -- status and heartbeat
+  PRIMARY KEY (source, batch_id)
+);
+
+-- Platform limits. The hub evaluates every enabled rule in each micro-batch, so their number is capped.
+CREATE TABLE IF NOT EXISTS subscription_registry.limits (
+  name  text PRIMARY KEY,
+  value int NOT NULL
+);
+INSERT INTO subscription_registry.limits VALUES ('max_enabled_rules', 1000) ON CONFLICT (name) DO NOTHING;
+
+-- All apps' enabled rules, whoever asks (apps only see their own rows): for the cap in stamp().
+CREATE OR REPLACE FUNCTION subscription_registry.enabled_rules() RETURNS bigint
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = subscription_registry AS $$
+  SELECT count(*) FROM subscription_registry.subscriptions WHERE enabled
+$$;
+
 -- ---------------------------------------------------------------------------------------------------------------------
 -- Every write to subscriptions goes through here: the owner is the acting role (the app, never the service), the app
 -- must be onboarded and granted the source and fields, and revision/generation are server-assigned.
 CREATE OR REPLACE FUNCTION subscription_registry.stamp() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE app subscription_registry.apps;
+DECLARE app subscription_registry.apps; new_rule bool;
 BEGIN
   IF TG_OP = 'UPDATE' AND (NEW.owner <> OLD.owner OR NEW.name <> OLD.name OR NEW.subscription_id <> OLD.subscription_id) THEN
     RAISE EXCEPTION 'OWNERSHIP_DENIED: owner, name, and id are immutable' USING ERRCODE = '42501';
@@ -97,6 +124,22 @@ BEGIN
       RAISE EXCEPTION 'FIELDS_DENIED: % not granted to this app',
         (SELECT coalesce(array_agg(x), '{}') FROM unnest(NEW.fields) x WHERE x <> ALL (app.allowed_fields))
         USING ERRCODE = '42501';
+    END IF;
+  END IF;
+  -- The hub's rule cap, across every app. One writer at a time, so two apps can't both take the last slot.
+  -- (An upsert fires the INSERT trigger even when it becomes an UPDATE: an already enabled name isn't a new rule.)
+  IF TG_OP = 'UPDATE' THEN
+    new_rule := NEW.enabled AND NOT OLD.enabled;
+  ELSE
+    new_rule := NEW.enabled AND NOT EXISTS (SELECT 1 FROM subscription_registry.subscriptions x
+                                            WHERE x.owner = current_user AND x.name = NEW.name AND x.enabled);
+  END IF;
+  IF new_rule THEN
+    PERFORM pg_advisory_xact_lock(hashtext('subscription_registry.enabled_rules'));
+    IF subscription_registry.enabled_rules() >= (SELECT value FROM subscription_registry.limits
+                                                 WHERE name = 'max_enabled_rules') THEN
+      RAISE EXCEPTION 'RULE_LIMIT_REACHED: the hub runs at most % rules; cancel one first',
+        (SELECT value FROM subscription_registry.limits WHERE name = 'max_enabled_rules') USING ERRCODE = '54000';
     END IF;
   END IF;
   NEW.generation := nextval('subscription_registry.generation');
@@ -207,7 +250,8 @@ REVOKE ALL ON ALL FUNCTIONS IN SCHEMA subscription_api FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA subscription_registry FROM PUBLIC;
 GRANT USAGE ON SCHEMA subscription_api, subscription_registry TO subscriber;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA subscription_api TO subscriber;
-GRANT EXECUTE ON FUNCTION subscription_registry.stamp() TO subscriber;
+GRANT EXECUTE ON FUNCTION subscription_registry.stamp(), subscription_registry.enabled_rules() TO subscriber;
+GRANT SELECT ON subscription_registry.limits TO subscriber;
 GRANT SELECT ON subscription_registry.apps, subscription_registry.status, subscription_registry.hub_heartbeat TO subscriber;
 GRANT SELECT, INSERT, UPDATE ON subscription_registry.subscriptions TO subscriber;
 GRANT USAGE ON SEQUENCE subscription_registry.generation TO subscriber;

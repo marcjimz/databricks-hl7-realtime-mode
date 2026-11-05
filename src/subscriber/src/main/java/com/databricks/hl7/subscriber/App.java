@@ -34,6 +34,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
  */
 public final class App {
     static final int WAIT_SECONDS = 120;
+    static final int POLL_SECONDS = 25;
     private static final Duration HEALTH_CHECK_EVERY = Duration.ofSeconds(30);
 
     public static void main(String[] args) throws Exception {
@@ -69,8 +70,18 @@ public final class App {
         }
         if (current.isEmpty()) exit(0, "no subscriptions declared in MySubscriptions.java");
 
-        // 2. Wait until the hub runs exactly these revisions (the API waits; READY, FAILED, or not yet).
-        JsonNode status = api.status(WAIT_SECONDS).body();
+        // 2. Wait until the hub runs exactly these revisions: READY, FAILED, or not within WAIT_SECONDS. The API holds
+        //    each call for up to POLL_SECONDS (short, so no proxy in between cuts it off).
+        Instant deadline = Instant.now().plusSeconds(WAIT_SECONDS);
+        JsonNode status;
+        while (true) {
+            long left = Math.max(1, Duration.between(Instant.now(), deadline).getSeconds());
+            var r = api.status((int) Math.min(POLL_SECONDS, left));
+            if (!r.ok()) exit(4, "the Subscription API answered " + r.status() + ": " + r.body());
+            status = r.body();
+            String state = status.path("state").asText();
+            if (state.equals("READY") || state.equals("FAILED") || !Instant.now().isBefore(deadline)) break;
+        }
         for (JsonNode s : status.path("subscriptions")) {
             if (s.path("enabled").asBoolean() && !"PENDING".equals(s.path("state").asText())) {
                 System.out.printf("hub         %-22s revision %d %s%n", s.path("name").asText(), s.path("revision").asInt(),

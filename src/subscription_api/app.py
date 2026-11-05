@@ -38,8 +38,9 @@ CATALOG = os.environ.get("HL7_CATALOG", "hl7_rtm_demo")
 ENDPOINT = os.environ.get("HL7_REGISTRY_ENDPOINT", "")
 DATABASE = os.environ.get("HL7_REGISTRY_DATABASE", "databricks_postgres")
 WAREHOUSE = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
+NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # = the registry's CHECK on subscriptions.name
 HUB_STALE_AFTER = 120  # seconds without a hub batch for a source
-MAX_WAIT = 300
+MAX_WAIT = 60  # per call; clients poll (a proxy in between may cut long requests)
 
 app = FastAPI(title="HL7 subscriptions", version="1")
 
@@ -172,18 +173,41 @@ def _apply(conn, checked: list[dict], registered: dict) -> list[dict]:
     out = []
     for c in checked:
         r = c["rule"]
-        receipt = conn.run("SELECT subscription_api.subscribe(:n, :s, :q, :w, CAST(:f AS text[]))", n=c["name"],
-                           s=r.source, q=r.query, w=r.where, f=list(r.fields))[0][0]  # fmt: skip
+        try:
+            receipt = conn.run("SELECT subscription_api.subscribe(:n, :s, :q, :w, CAST(:f AS text[]))", n=c["name"],
+                               s=r.source, q=r.query, w=r.where, f=list(r.fields))[0][0]  # fmt: skip
+        except Exception as e:  # noqa: BLE001 - a registry domain error (RULE_LIMIT_REACHED, ...): refuse it all
+            message = _registry_message(e)
+            raise Refused(
+                422,
+                {"applied": False, "refused": [{"name": c["name"], "code": message.split(":")[0], "message": message}]},
+            ) from None
         before = registered.get(c["name"])
         out.append(receipt | {"unchanged": bool(before and before["enabled"] and
                                                 before["revision"] == receipt["revision"])})  # fmt: skip
     return out
 
 
+def _registry_message(e: Exception) -> str:
+    return e.args[0].get("M", str(e)) if e.args and isinstance(e.args[0], dict) else str(e)
+
+
 def _validate(items: list[Item], who: dict, registered: dict) -> list[dict]:
     names = [i.name for i in items]
     if len(names) != len(set(names)):
         raise Refused(422, {"code": "DUPLICATE_NAME", "message": "each subscription name once"})
+    bad = [n for n in names if not NAME.fullmatch(n)]
+    if bad:
+        raise Refused(
+            422,
+            {
+                "applied": False,
+                "refused": [
+                    {"name": n, "code": "INVALID_NAME", "message": "a name is 1-63 lowercase letters, digits, or -"}
+                    for n in bad
+                ],
+            },
+        )
     return [_check(i, who, registered) for i in items]
 
 
@@ -241,7 +265,7 @@ def cancel(name: str, x_forwarded_email: str | None = Header(default=None)):
         try:
             return conn.run("SELECT subscription_api.unsubscribe(:n)", n=name)[0][0]
         except Exception as e:  # noqa: BLE001 - the registry's domain error
-            message = e.args[0].get("M", str(e)) if e.args and isinstance(e.args[0], dict) else str(e)
+            message = _registry_message(e)
             raise Refused(404, {"code": message.split(":")[0], "message": message}) from None
 
 

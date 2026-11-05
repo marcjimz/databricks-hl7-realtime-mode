@@ -106,3 +106,52 @@ def test_only_this_apps_views_and_gold_sources():
 
 def test_unparseable_sql_is_left_to_databricks_to_explain():
     assert refused("SELECT patient_id FROM gold_observations WHER value_num > 6") == "PARSE"
+
+
+# Corner cases: each has a deterministic answer, and none reaches the hub in a form it can't run.
+def test_identifiers_are_case_insensitive_like_databricks():
+    r = ok("SELECT PATIENT_ID, `Value_Num` FROM GOLD_OBSERVATIONS WHERE Observation_Cd_Desc = 'Potassium'")
+    assert r.source == "gold_observations" and r.fields == ("patient_id", "value_num")
+    assert r.where == "observation_cd_desc = 'Potassium'", "literals keep their case"
+
+
+def test_comments_and_a_trailing_semicolon_are_harmless():
+    r = ok("SELECT patient_id -- who\nFROM gold_observations /* labs */ WHERE value_num > 6;")
+    assert r.query == "SELECT patient_id FROM gold_observations WHERE value_num > 6"
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT patient_id, patient_id FROM gold_observations",  # the payload can't hold a field twice
+        "SELECT patient_id FROM gold_observations WHERE rand() < 0.01",  # a rule matches the same way every time
+        "SELECT patient_id FROM gold_observations WHERE uuid() = patient_id",
+        "SELECT patient_id FROM gold_observations WHERE value_num IN (" + ", ".join(["1"] * 5000) + ")",  # too long
+        "SELECT patient_id FROM gold_observations WHERE " + "(" * 3000 + "value_num > 1" + ")" * 3000,  # too deep
+        "SELECT patient_id FROM gold_observations WHERE value_num > ${threshold}",  # template, not SQL
+        "INSERT INTO gold_observations SELECT * FROM gold_observations",
+        "DELETE FROM gold_observations",
+        "SELECT patient_id FROM gold_observations VERSION AS OF 1",  # time travel reads data the stream never had
+    ],
+)
+def test_corner_cases_that_shouldnt_be_rules_are_refused(sql):
+    assert refused(sql) in ("SQL_NOT_ALLOWED", "PARSE")
+
+
+def test_unicode_literals_are_kept_exactly():
+    assert ok("SELECT patient_id FROM gold_observations WHERE observation_cd_desc = 'Potássio ✓'").where == (
+        "observation_cd_desc = 'Potássio ✓'"
+    )
+
+
+def test_no_where_is_every_record_and_a_constant_filter_is_allowed():
+    assert ok("SELECT patient_id FROM gold_observations").where is None
+    assert ok("SELECT patient_id FROM gold_observations WHERE TRUE").where == "TRUE"
+
+
+def test_the_hub_recheck_normalizes_and_bounds_too():
+    from subscription_api.rules import check_condition
+
+    assert check_condition("VALUE_NUM > 1", {"value_num"}) == "value_num > 1"
+    with pytest.raises(RuleError):
+        check_condition("value_num > 1" + " AND value_num > 1" * 1000, {"value_num"})

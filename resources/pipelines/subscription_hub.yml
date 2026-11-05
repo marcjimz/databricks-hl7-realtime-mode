@@ -27,3 +27,5 @@ resources:
         hl7.topics.gold_encounters: ${var.hl7_gold_encounters_topic}
         hl7.topics.gold_observations: ${var.hl7_gold_observations_topic}
         hl7.topics.gold_orders: ${var.hl7_gold_orders_topic}
+        hl7.subscriptions.chunk: ${var.hub_rules_per_projection}
+        hl7.subscriptions.max_records_per_batch: ${var.hub_max_records_per_batch}

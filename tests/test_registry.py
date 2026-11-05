@@ -167,5 +167,23 @@ def test_apps_and_the_service_cannot_read_the_monitor(pg):
             pg(role).run("SELECT * FROM subscription_monitor.subscriptions")
 
 
+def test_the_hub_runs_at_most_a_capped_number_of_rules_across_all_apps(pg):
+    owner, a, b = pg(), pg("app_a"), pg("app_b")
+    enabled = owner.run("SELECT count(*) FROM subscription_registry.subscriptions WHERE enabled")[0][0]
+    owner.run("UPDATE subscription_registry.limits SET value = :v WHERE name = 'max_enabled_rules'", v=enabled + 2)
+    try:
+        subscribe(a, "cap-1")
+        subscribe(b, "cap-2", query="SELECT patient_id FROM gold_observations", where=None, fields=["patient_id"])
+        assert error(a, "cap-3") == "RULE_LIMIT_REACHED", "the cap counts every app's rules, not just the caller's"
+        assert (
+            subscribe(a, "cap-1", query=Q.replace("< 8", "< 9"), where=WHERE.replace("< 8", "< 9"))["revision"] == 2
+        ), "changing an enabled rule doesn't take another slot"
+        a.run("SELECT subscription_api.unsubscribe('cap-1')")
+        assert subscribe(a, "cap-3")["state"] == "ACCEPTED", "cancelling frees a slot"
+        assert error(a, "cap-1") == "RULE_LIMIT_REACHED", "re-enabling a cancelled rule takes a slot again"
+    finally:
+        owner.run("UPDATE subscription_registry.limits SET value = 1000 WHERE name = 'max_enabled_rules'")
+
+
 def test_registry_sql_is_idempotent(pg):
     pg().run(SQL)  # applied on every `make registry`
