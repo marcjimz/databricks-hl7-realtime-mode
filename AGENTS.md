@@ -64,8 +64,8 @@ infra/uc.sh           idempotent Unity Catalog bootstrap (`make uc`): credential
 infra/registry.py     idempotent Lakebase registry bootstrap (`make registry`): project, schema, Data API, apps
 src/registry/         the subscription registry: schema, validation, API functions, grants (registry.sql)
 src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), JUnit tests. Not in the wheel or bundle sync.
-                      Packages by responsibility: config, identity, rules, registry, eventhubs, delivery, e2e
-                      (src/subscriber/README.md). App only wires them together.
+                      Packages: subscriptions (what it asks for), hub (register, wait, receive), platform
+                      (settings, identity, Event Hubs; depends on nothing else), e2e. App only wires them.
 examples/             not deployed, linted, or tested: subscriptions/ (earlier SQL-file design), aws-cross-cloud/
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
 docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; diagrams/ (.drawio + PNG + slides)

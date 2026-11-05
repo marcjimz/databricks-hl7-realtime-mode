@@ -1,16 +1,16 @@
 package com.databricks.hl7.subscriber;
 
-import com.databricks.hl7.subscriber.config.SubscriberConfig;
-import com.databricks.hl7.subscriber.delivery.Listener;
 import com.databricks.hl7.subscriber.e2e.E2E;
-import com.databricks.hl7.subscriber.eventhubs.EventHubsTokens;
-import com.databricks.hl7.subscriber.eventhubs.KafkaSettings;
-import com.databricks.hl7.subscriber.eventhubs.UcOAuthBearerHandler;
-import com.databricks.hl7.subscriber.identity.Databricks;
-import com.databricks.hl7.subscriber.registry.Activation;
-import com.databricks.hl7.subscriber.registry.RegistryClient;
-import com.databricks.hl7.subscriber.registry.Sync;
-import com.databricks.hl7.subscriber.rules.Subscription;
+import com.databricks.hl7.subscriber.hub.Activation;
+import com.databricks.hl7.subscriber.hub.Listener;
+import com.databricks.hl7.subscriber.hub.RegistryClient;
+import com.databricks.hl7.subscriber.platform.Databricks;
+import com.databricks.hl7.subscriber.platform.EventHubsTokens;
+import com.databricks.hl7.subscriber.platform.KafkaSettings;
+import com.databricks.hl7.subscriber.platform.SubscriberConfig;
+import com.databricks.hl7.subscriber.platform.UcOAuthBearerHandler;
+import com.databricks.hl7.subscriber.subscriptions.Subscription;
+import com.databricks.hl7.subscriber.subscriptions.Sync;
 import com.databricks.sdk.WorkspaceClient;
 import java.io.IOException;
 import java.io.InputStream;
@@ -36,9 +36,10 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
  * or the registry refuses its identity (6). While listening it warns when the hub stops.
  *
  * <pre>
- *   config/     where things are          identity/   who the app is            rules/      what it can ask for
- *   registry/   the Lakebase registry     eventhubs/  its own Event Hub         delivery/   what arrives
- *   e2e/        the end-to-end checks
+ *   subscriptions/  what the app asks for (Predicate, Subscription, Sync)
+ *   hub/            the round trip with the platform: register, wait for the hub, receive (RegistryClient, Listener)
+ *   platform/       how it connects: settings, identity, Event Hubs tokens and Kafka settings
+ *   e2e/            the end-to-end checks
  * </pre>
  */
 public final class App {

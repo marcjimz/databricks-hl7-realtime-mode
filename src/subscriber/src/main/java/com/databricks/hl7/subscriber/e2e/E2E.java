@@ -1,16 +1,16 @@
 package com.databricks.hl7.subscriber.e2e;
 
-import static com.databricks.hl7.subscriber.rules.Predicate.field;
+import static com.databricks.hl7.subscriber.subscriptions.Predicate.field;
 
-import com.databricks.hl7.subscriber.config.SubscriberConfig;
-import com.databricks.hl7.subscriber.delivery.Notification;
-import com.databricks.hl7.subscriber.eventhubs.EventHubsTokens;
-import com.databricks.hl7.subscriber.eventhubs.KafkaSettings;
-import com.databricks.hl7.subscriber.eventhubs.UcOAuthBearerHandler;
-import com.databricks.hl7.subscriber.identity.Databricks;
-import com.databricks.hl7.subscriber.registry.Activation;
-import com.databricks.hl7.subscriber.registry.RegistryClient;
-import com.databricks.hl7.subscriber.rules.Subscription;
+import com.databricks.hl7.subscriber.hub.Activation;
+import com.databricks.hl7.subscriber.hub.Notification;
+import com.databricks.hl7.subscriber.hub.RegistryClient;
+import com.databricks.hl7.subscriber.platform.Databricks;
+import com.databricks.hl7.subscriber.platform.EventHubsTokens;
+import com.databricks.hl7.subscriber.platform.KafkaSettings;
+import com.databricks.hl7.subscriber.platform.SubscriberConfig;
+import com.databricks.hl7.subscriber.platform.UcOAuthBearerHandler;
+import com.databricks.hl7.subscriber.subscriptions.Subscription;
 import com.databricks.sdk.WorkspaceClient;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import java.time.Duration;
@@ -165,8 +165,8 @@ public final class E2E {
                 : "never", stale.isEmpty());
     }
 
-    private void refused(String name, com.databricks.hl7.subscriber.rules.Predicate where, List<String> fields, String source,
-            String code) {
+    private void refused(String name, com.databricks.hl7.subscriber.subscriptions.Predicate where,
+            List<String> fields, String source, String code) {
         var s = new Subscription("e2e-refused", source, where, fields);
         record(name, ruleText(s), code, attempt(() -> {
             registry.subscribe(s);
