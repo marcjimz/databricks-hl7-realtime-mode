@@ -69,7 +69,8 @@ src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), 7 classes
                       wheel or bundle sync.
 examples/             not deployed, linted, or tested: subscriptions/ (earlier SQL-file design), aws-cross-cloud/
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
-docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON, story.html (interactive deck);
+docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON, story.html (interactive deck),
+                      SPIKE-sql-channels (full-SQL design spike, not built);
                       diagrams/ (.drawio + PNG + slides)
 ```
 
