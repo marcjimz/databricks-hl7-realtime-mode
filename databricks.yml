@@ -101,6 +101,12 @@ variables:
   app_max_instances:
     description: Subscription API instances (maximum).
     default: 2
+  hub_rules_per_projection:
+    description: Rules the subscription hub evaluates per projection (see docs/SCALABILITY.md for how it was chosen).
+    default: 200
+  hub_max_records_per_batch:
+    description: Most gold records the subscription hub reads per micro-batch per source (it holds a batch in memory).
+    default: 20000
   registry_catalog:
     description: The registry database in Unity Catalog (registered by make registry), read by the subscriptions dashboard.
     default: ${var.catalog}_registry

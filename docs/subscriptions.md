@@ -36,19 +36,28 @@ The hub runs micro-batches (seconds, not milliseconds). It needs `foreachBatch` 
 runtime, and Real-Time Mode doesn't support `foreachBatch`. `foreach_batch_sink` is Public Preview, so the hub runs on
 the PREVIEW channel. The RTM hot path is unchanged.
 
-**Measured** (2026-11-05, demo load, every rule matching 0.1% of patients). Delivery is the app-hub broker time minus
+**How the hub evaluates rules:**
+- **Up to 1,000 enabled rules across all apps.** Past that, a new rule is refused with `RULE_LIMIT_REACHED`; cancel
+  one first.
+- **Compiled off the delivery path:** the rule set is compiled in the background when the registry changes, and
+  batches keep using the last compiled set.
+- **Simple rules run as data:** a column compared with a literal, joined by `AND`. Each record meets only the rules
+  that name one of its values (an equality index), in a plan whose size doesn't depend on the rule count.
+- **Other rules run as SQL expressions:** functions, `OR`, `LIKE`.
+- **The path doesn't change the result:** both select the same records as the SQL editor and send identical
+  notifications.
+
+**Measured** (2026-11-05, demo load, rules matching 0.1% of patients each). Delivery is the app-hub broker time minus
 the gold record's broker time:
 
-| Rules on one source | Hub batch interval | Delivery p50 | p99 | Keeps up |
+| Rules on one source | Hub batch interval | Delivery p50 | p99 | One rule change → ACTIVE |
 |---|---|---|---|---|
-| 1 | ~2–3 s | 2.7 s | 4.7 s | yes |
-| 100 | 6.5–8.4 s | 18 s | 24 s | barely |
-| 1,000 | ~67 s | 155 s | 171 s | **no**: the backlog grows |
+| 1 | 3.4–4 s | 2.7 s | 4.7 s | ~5 s |
+| 1,000 (the cap) | ~4 s | 4.5 s | 7.1 s | 8 s |
+| 1,000, of which 100 use functions | ~4 s | 4.5 s | 6.5 s | — |
 
-At 1,000 rules every rule compiled and went ACTIVE, with none FAILED, but batch time grows about linearly with the rule
-count. The plan for that is in [SCALABILITY.md](SCALABILITY.md): measure each phase, move per-batch work to per-change
-work, index rules by their leading equality, then shard the hub. From the raw HL7 topic to the app's hub, one rule
-measured p99 4.8 s, of which the hot path takes under 100 ms. These numbers don't include the app's own poll.
+From the raw HL7 topic to the app's hub, one rule measured p99 4.8 s, of which the hot path takes under 100 ms. These
+numbers don't include the app's own poll. How it got here, and what's next past the cap: [SCALABILITY.md](SCALABILITY.md).
 
 ## Security model
 
@@ -75,7 +84,7 @@ The app stops with a reason instead of listening quietly:
 
 | Exit | When |
 |---|---|
-| 2 | A rule was refused, with Databricks' own error or `SQL_NOT_ALLOWED`. Nothing was applied. |
+| 2 | A rule was refused: Databricks' own error, `SQL_NOT_ALLOWED`, `INVALID_NAME`, or `RULE_LIMIT_REACHED`. Nothing was applied. |
 | 3 | The hub can't run an accepted revision (FAILED, with Spark's error) |
 | 4 | The hub didn't confirm within 2 minutes, or isn't processing their sources (`HUB_STALE`: stopped pipeline) |
 | 5 | It signed in as something other than a service principal |
@@ -122,7 +131,11 @@ WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8
     view in full, as tested in the editor.
   - `WHERE` is any Databricks SQL filter over that record: comparisons, `IN`, `BETWEEN`, `LIKE`, `IS NULL`, `AND`/`OR`/
     `NOT`, and built-ins such as `lower`, `startswith`, `contains`, `abs`, `coalesce`.
-- **Refused:** functions that reach outside the record (`http_request`, `secret`, `reflect`/`java_method`, `ai_*`,
+- **Normalized:** identifiers are case-insensitive, as in Databricks, and stored in lowercase. Comments and a trailing
+  `;` are dropped from the canonical query.
+- **Refused:** randomness (`rand`, `uuid`, …): a rule must match the same record the same way every time. Also time
+  travel (`VERSION AS OF`), a field listed twice, and SQL over 10,000 characters.
+- **Also refused:** functions that reach outside the record (`http_request`, `secret`, `reflect`/`java_method`, `ai_*`,
   `read_*`, UC UDFs, `current_user`), and joins, subqueries, CTEs, set operations, aggregates, sorting, `LIMIT`,
   parameters, and multiple statements. All are `SQL_NOT_ALLOWED`.
 - **The same semantics as the SQL editor:** the hub evaluates the stored WHERE with Spark, so the rule selects in the

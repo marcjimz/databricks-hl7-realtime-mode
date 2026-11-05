@@ -161,6 +161,8 @@ docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; 
 
 ## Subscription rules (see docs/subscriptions.md)
 
+- **Identifiers are case-insensitive, as in Databricks.** `rules.parse` normalizes them to lowercase, or the hub's
+  case-sensitive grant check would fail a rule Databricks accepted.
 - **Rules are Databricks SQL, and Databricks compiles them.** The Subscription API (`src/subscription_api`, a Databricks
   App) runs `DESCRIBE QUERY` against the caller's own views and passes Databricks' errors through unchanged. The only
   rule logic of our own is the shape check (`rules.py`): one SELECT of columns, from one gold source, with a WHERE. No
@@ -213,8 +215,25 @@ docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON; 
   batches concurrently, so the shared registry client serializes access (`tests/test_hub_registry.py`). Use pg8000:
   psycopg[binary] aborted the serverless Python process. Serverless has no `persist`/`cache`, so a failed batch is
   recomputed to find the failing rule.
-- **Hub scale is measured, not assumed:** at 1 rule p99 is 4.7 s; at 100 rules 24 s; at 1,000 rules a batch takes ~67 s
-  and it falls behind. Don't claim more until docs/SCALABILITY.md's next steps are measured.
+- **The hub runs at most 1,000 enabled rules** (`subscription_registry.limits`; the trigger serializes the count with an
+  advisory lock, and an upsert of an already-enabled name isn't a new rule). At the cap it delivers p99 ~7 s
+  (docs/SCALABILITY.md has the measured steps). Keep it fast with these rules:
+  - **Compile per registry change, never per batch.** The hub compiles a source's rules in a background thread, and
+    batches use the last compiled set (`_RuleSet`). `hub_progress` records each batch's phases: read it before
+    optimizing.
+  - **Don't build expressions with PySpark `Column` calls per rule.** Each call is a round trip to the driver (about
+    70 ms per rule). Build one `F.expr` string per chunk, from checked parts only: the WHERE regenerated from its
+    parsed tree, quoted identifiers (`rules.identifier`), and escaped literals (`rules.literal`).
+  - **Simple rules are data, joined through an equality index** (`clauses()` in rules.py, `_data_matches`). Without the
+    index, a cross join of records and rules was 10× slower. Anything not simple keeps the expression path. Both paths
+    must match `spark.sql` and send identical notifications (`tests/test_subscriptions.py`).
+  - **Read each micro-batch once** (collect into a local DataFrame; batches are bounded by `maxOffsetsPerTrigger`).
+    Each union branch over the source would read it again.
+  - **Serverless doesn't allow `persist`/`cache` or Spark codegen settings.** Restructure the plan instead.
+  - **A running continuous pipeline doesn't pick up changed source files on deploy** unless its definition changed.
+    Restart it (stop + start-update; it resumes from its checkpoint).
+- **The Apps proxy may cut long requests.** Clients poll `?wait` in short calls (≤25 s); the API caps each call at
+  60 s.
 - **Monitoring reads the registry through Unity Catalog.** `make registry` registers the database as `<catalog>_registry`
   (`w.postgres.create_catalog`). The subscriptions dashboard reads the `subscription_monitor` views (platform only;
   nothing granted to `subscriber`). Views there are dropped and recreated: `CREATE OR REPLACE VIEW` can't change a

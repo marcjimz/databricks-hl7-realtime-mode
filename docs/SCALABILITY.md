@@ -36,43 +36,60 @@ Each section names the test that will prove it, and the pass bar.
 | Azure RBAC role assignments | 4,000 per subscription | 1 per app (Receiver on its hub) | fine to thousands; group-based assignment beyond |
 | Hub compute | serverless autoscaling; one filter per rule per source per batch | batch time grows with rules: **the first bottleneck to measure** | single-pass evaluation, then hub shards (below) |
 
-### The hub is the part that needs work (measured)
+### The hub at its rule cap (measured)
 
-The hub evaluates every rule of a source in one projection per micro-batch: the matching rules per record, as an array,
-then explode, in chunks of 200 rules. That's step 2 of the ladder below, built. First measurement (P1, 2026-11-05, demo
-load, every rule matching 0.1% of patients, one source):
+The hub runs at most **1,000 enabled rules across all apps**. The registry enforces the cap (`RULE_LIMIT_REACHED`, in
+`subscription_registry.limits`) and the API returns it as a refusal. For calibration: Fabric Activator allows 500 rules
+per item. The cap has to *perform*, so here is how the hub got there. All runs are at demo load, rules matching 0.1% of
+patients each, on one source. `hub_progress` records each batch's phases.
 
-| Rules | Hub batch interval | Delivery p50 | p99 | Keeps up |
+| Step | What changed | Batch interval | Delivery p50 / p99 | One rule change → ACTIVE |
 |---|---|---|---|---|
-| 1 | ~2–3 s | 2.7 s | 4.7 s | yes |
-| 100 | 6.5–8.4 s | 18 s | 24 s | barely |
-| 1,000 | ~67 s | 155 s | 171 s | **no**: the backlog grows |
+| 0 | One rule (baseline) | 3.4–4 s | 2.7 / 4.7 s | ~5 s |
+| 1 | 1,000 rules as expressions, rebuilt every batch | ~67 s | 155 / 171 s, **falls behind** | — |
+| 2 | The rule set is compiled in a background thread on each registry change; batches keep the last one | 5.5 s | 13 / 16 s | 84 s |
+| 3 | Each 200-rule chunk is one SQL expression instead of ~15 Column calls per rule | 6.3 s | — | 18 s |
+| 4 | Each micro-batch read once into memory, not once per chunk | 5.8 s | — | 13 s |
+| 5 | **Simple rules run as data, with an equality index** | **~4 s** | **4.5 / 7.1 s** | **8 s** |
+| 5b | Step 5 with 900 data + 100 expression rules | ~4 s | 4.5 / 6.5 s | — |
 
-All 1,000 rules compiled on serverless and went ACTIVE, with none FAILED. The data per batch is small, so batch time
-growing with rule count points at per-batch, per-rule work on the driver, not at data volume. A bigger driver isn't the
-lever, and serverless doesn't size the driver anyway. Suspects, to measure before fixing:
-- each rule re-checked with sqlglot every batch;
-- a 1,000-expression plan rebuilt and analyzed every batch;
-- each 200-rule chunk re-parsing the batch.
+What each step taught:
+- **Step 1:** the cost was per batch, not per record (a batch is a few hundred records). `hub_progress` showed it was the
+  compile: checking 1,000 rules and building their Spark expressions took about 65 s, repeated every batch.
+- **Step 2:** compiling only when the registry changes, off the batch path, took batches from 67 s to 5.5 s. A change
+  still waited for a full recompile, though. A per-rule check cache didn't help: the checks weren't the cost.
+- **Step 3:** each PySpark `Column` call is a round trip to the driver, so building expressions was the cost.
+  Rule-by-rule `F.when`/`F.struct` cost about 70 ms per rule; one `F.expr` string per chunk compiles 1,000 rules in about
+  0.5 s. The string is assembled only from checked parts: the WHERE regenerated from its parsed tree, quoted
+  identifiers, and escaped literals. Tests cover attempts to break out of it.
+- **Steps 3–4:** smaller chunks were slower (50 rules: 14 s), because each chunk is one more branch over the batch.
+  Reading the batch once helped only a little. The remaining ~5 s was planning a plan whose size grows with the rule
+  count, and serverless doesn't let you change Spark's codegen settings.
+- **Step 5, rules as data:** most rules are a conjunction of a column compared with a literal (`=`, `<>`, `<`, `<=`,
+  `>`, `>=`, `BETWEEN`, `[NOT] IN`, `IS [NOT] NULL`). Those become rows in a small rules table.
+  - A record's string values are broadcast-joined to the rules that name them: the index is each rule's first string
+    `=` or `IN`.
+  - One constant expression then checks every clause. The plan is the same size for 1 or 1,000 rules.
+  - **A cross join instead of the index was worse:** 45–65 s, because every record met every rule.
+  - **Rules that aren't simple keep the expression path:** functions, `OR`, `LIKE`, `NOT (...)`, and rules with no
+    string equality (which meet every record). Measured worst case, all 1,000 as expressions (step 4): ~6 s batches,
+    p99 about 16 s.
+- **Correctness doesn't depend on the path.** For every operator, NULLs included, tests check that both paths match
+  `spark.sql`, and that both send byte-identical notifications.
 
-The ladder, each step only if the previous measurement calls for it:
+Not done, and not needed at the cap:
+- splitting rule *evaluation* into per-app shards;
+- an index for numeric-only rules;
+- a separate cap for expression-path rules.
 
-1. **Measure each phase** per batch: refresh, check, plan, write. Timings go to a `hub_progress` table.
-2. **Single pass per batch** (built): one projection per chunk of rules.
-3. **Do per change what doesn't change per batch:**
-   - check and compile the rules once per registry generation, not every batch;
-   - parse the batch once, not once per chunk.
-4. **Index rules by their leading equality.** Most clinical rules start with `observation_cd_desc = 'Potassium'` or
-   `observation_cd = '2823-3'`. Group rules by that key and join each record to just the rules for its key (a broadcast
-   join against a small rules table); only the rest of the filter is evaluated. For example, 10,000 rules over
-   200 lab codes is about 50 evaluations per record instead of 10,000.
-5. **Shard the hub:**
-   - **How:** the API assigns each rule a `shard` (hash of its subscription ID, or by app for tenant isolation) when it's
-     registered. N hub pipelines each read the whole gold topic and evaluate only their shard's rules, with their own
-     checkpoint and heartbeat.
-   - **Gains:** capacity grows with N, planning is split across N drivers, and a bad batch on one shard doesn't stall
-     the others.
-   - **Costs:** each shard reads the full gold stream (N× Event Hubs read) and has its own compute.
+Sharding (below) is the lever past 1,000 rules, or for isolating a heavy tenant.
+
+**Past the cap: shard the hub.**
+- **How:** the API assigns each rule a `shard` when it's registered, by hash of its subscription ID or by app for tenant
+  isolation. N hub pipelines each read the whole gold topic and evaluate only their shard's rules, with their own
+  checkpoint and heartbeat, and the cap applies per shard.
+- **Gains:** capacity grows with N, and a bad batch on one shard doesn't stall the others.
+- **Costs:** each shard reads the full gold stream (N× Event Hubs read) and has its own compute.
 
 The Subscription API scales separately. It's stateless, with 2 fixed instances; Databricks Apps allows up to 5, and
 load-based autoscaling is a future private preview. Its load is registration calls and waits, not the data path. Test:

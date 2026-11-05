@@ -163,7 +163,7 @@ listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group s
   the backlog is reported as a count (`catching up` … `caught up`). Matches for other subscriptions or earlier revisions
   are counted as `skipped`.
 
-### 2. Change the code and run it again
+### 2. Add a subscription (and change one)
 
 Stop the app with Ctrl-C first: rebuilding replaces the jar a running app loads its classes from, and it would crash.
 Raise the threshold, drop `units`, and add a second subscription:
@@ -192,10 +192,28 @@ listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group s
 …
 ```
 
-Potassium now arrives without `units`, and only at 7.0 or above. Deleting a subscription from the code cancels it on
-the next run (`cancelled  low-hemoglobin`).
+Potassium now arrives without `units`, and only at 7.0 or above, and `low-hemoglobin` matches arrive too.
 
-### 3. Ask for something you aren't allowed
+### 3. Remove a subscription
+
+Delete `low-hemoglobin` from `MySubscriptions` (or `git checkout` the file, which also puts potassium back to 6.5), then
+rebuild and run. The code is the source of truth, so the API cancels what it no longer declares:
+
+```
+$ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar
+signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
+subscribed  critical-potassium     revision 3 ACCEPTED
+            SELECT patient_id, value_num, units FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5
+cancelled   low-hemoglobin         (no longer in MySubscriptions)
+hub         critical-potassium     revision 3 ACTIVE
+listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group sp-hl7-realtime-demo (Ctrl-C to stop)
+…
+```
+
+The hub stops `low-hemoglobin` at its next batch (CANCELLED on the dashboard), and any of its matches still on the hub
+are counted as `skipped`, not printed.
+
+### 4. Ask for something you aren't allowed
 
 Add a misspelled column, a column this app isn't granted, and a subquery. Databricks' own errors come back in the same
 call, nothing is applied, and the app exits with code 2:
@@ -220,8 +238,10 @@ ERROR       3 subscription(s) refused; fix MySubscriptions.java
 - **Why a subquery is refused:** the hub runs the rule with its own permissions, so a rule is one filter over one
   record. Joins, subqueries, and functions that reach outside the record are refused. Remove the three lines before the
   next step.
+- **The hub's rule cap:** the hub runs at most 1,000 rules across all apps (`RULE_LIMIT_REACHED` past that; cancel one
+  first). It's a platform limit, in `subscription_registry.limits`.
 
-### 4. Stop the hub
+### 5. Stop the hub
 
 The app doesn't listen silently to a stopped hub. Stop the hub pipeline:
 
@@ -252,7 +272,7 @@ hub's heartbeat change ([details](docs/subscriptions.md#monitoring)).
 ### Clean up
 
 - `git checkout src/subscriber/src/main/java/com/databricks/hl7/subscriber/MySubscriptions.java` restores the
-  original rule. The next run cancels `low-hemoglobin`.
+  original rule.
 - `make stop dev` stops the pipelines, the feeds, and the Subscription API.
 
 ### In the workspace
