@@ -23,6 +23,11 @@ The hub runs micro-batches (seconds, not milliseconds): it needs `foreachBatch` 
 runtime, and Real-Time Mode doesn't support `foreachBatch`. `foreach_batch_sink` is Public Preview, so the hub runs
 on the PREVIEW channel. The RTM hot path is unchanged.
 
+**Measured (2026-11-05, one app, 1 rule, demo load, steady state):** the notification's broker time on the app's hub
+minus the gold record's broker time was p50 2.7 s, p99 4.7 s, max 5.2 s over 8,803 notifications in 15 minutes. From
+the raw HL7 topic to the app's hub it was p50 2.8 s and p99 4.8 s: the hot path adds well under 100 ms of that. Not
+included: the app's own poll after the record lands. Scale is untested: see [SCALABILITY.md](SCALABILITY.md).
+
 ## Security model
 
 | Layer | What enforces it |
