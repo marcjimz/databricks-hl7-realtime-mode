@@ -6,8 +6,12 @@
 
 # HL7 v2 on Spark Real-Time Mode
 
-Millisecond HL7 processing on Azure Databricks. Raw HL7 v2 is parsed and split into clinical entities in tens of
-milliseconds per layer, and every layer also lands in Delta. Built on
+A Databricks-native framework for **dynamic runtime filtering** of clinical streams. Applications declare the HL7 events
+they want in Databricks SQL while everything runs, and receive matches on their own topic within seconds. No pipeline
+redeploy, and no code of theirs runs on the platform.
+
+Underneath, raw HL7 v2 is parsed and split into clinical entities in tens of milliseconds per layer, and every layer
+also lands in Delta. Built on
 [Real-Time Mode](https://www.databricks.com/blog/introducing-real-time-mode-apache-sparktm-structured-streaming),
 serverless Lakeflow Spark Declarative Pipelines, and Azure Event Hubs, connected through a Unity Catalog service credential, with
 no keys or connection strings.
@@ -28,12 +32,25 @@ SUBSCRIPTIONS (seconds)
 - **Subscriptions** let apps choose gold records at runtime, each delivered to the app's own hub
   ([docs/subscriptions.md](docs/subscriptions.md)).
 
-**Everything runs on Databricks.** Applications integrate at two points, in any language:
-- the **Subscription API**, with an OpenAPI contract (`docs/api/openapi.json`, browsable at `<api>/docs`);
-- **their own Event Hubs topic**, read with any Kafka client using a token from Unity Catalog.
+## Subscribe from any application
 
-The handshake, the notification format, and the errors: [docs/integration.md](docs/integration.md). The Java app in
-`src/subscriber` is one reference client, not part of the platform.
+The interface for external apps is the **Subscription API** (OpenAPI: [`docs/api/openapi.json`](docs/api/openapi.json),
+Swagger at `<api>/docs`) plus **the app's own Event Hubs topic**. Any language works. The app authenticates as its own
+Databricks service principal:
+
+```
+1. PUT  <api>/api/v1/subscriptions        {"subscriptions": [{"name": "critical-potassium",
+                                            "sql": "SELECT patient_id, value_num FROM gold_observations
+                                                    WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"}]}
+        → ACCEPTED (revision, destination topic), or Databricks' own error and nothing applied
+2. GET  <api>/api/v1/subscriptions?wait=25  → repeat until READY (the hub runs exactly these revisions, ~5 s)
+3. Read the destination topic with any Kafka client (OAUTHBEARER, token from Unity Catalog);
+   deduplicate on notificationId
+```
+
+Change the SQL and declare again: the new filter is live within seconds. The full handshake, notification format, and
+errors: [docs/integration.md](docs/integration.md). The Java app in `src/subscriber` is one reference client, not part
+of the platform.
 
 ## Results
 

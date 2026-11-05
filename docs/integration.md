@@ -1,169 +1,84 @@
 # Integrating an application
 
-The platform is Databricks-native. Real-Time Mode pipelines parse HL7 into gold topics and tables, a hub applies each
-app's SQL rules, and Unity Catalog governs every step. **An application meets it at two places only:**
+Applications meet the platform at two points, in any language:
+1. **The Subscription API** (HTTPS and JSON): declare rules in Databricks SQL and wait until they run.
+2. **The app's own topic** (the Kafka protocol on Azure Event Hubs): receive the matches.
 
-1. **The Subscription API**: HTTPS and JSON, with an OpenAPI contract. The app declares what it wants in Databricks
-   SQL and waits until the platform runs it.
-2. **The app's own topic**: the Kafka protocol on Azure Event Hubs. Matches arrive there as JSON.
+**The contract:** [`api/openapi.json`](api/openapi.json), generated from the API (`tests/test_openapi.py` keeps them
+equal), with Swagger UI at `<api>/docs`. Generate a client from it in any language.
 
-Anything that can make an HTTPS call and run a Kafka consumer can integrate, in any language. The Java app in
-`src/subscriber` is one reference client. Every step below maps to one of its classes.
+## What an app needs
 
-## What an application needs
+- **A Databricks service principal** (client ID and OAuth secret). It's the app's identity, and the secret is the app's own.
+- **Onboarding by the platform team:** the sources and columns it may read (docs/subscriptions.md, "Set up"). This
+  produces three settings, with no secrets in them: `api.url`, `eventhubs.namespace`, and `eventhubs.credential`.
+- **Network access:** HTTPS to the workspace and the API, and port 9093 to `<namespace>.servicebus.windows.net`.
 
-| What | Where it comes from |
-|---|---|
-| A Databricks **service principal** (client ID + OAuth secret) | Created by the app's team. It's the app's identity, and the secret stays theirs. |
-| **Onboarding** of that service principal: which gold sources and columns it may read | The platform team: `subscriber_apps` in Terraform, then `make up` (docs/subscriptions.md, "Set up") |
-| The **API URL**, the **Event Hubs namespace**, and the app's **Unity Catalog credential** name | Written by `make registry` to `src/subscriber/apps/<app>.properties` (`api.url`, `eventhubs.namespace`, `eventhubs.credential`). No secrets. |
-| Network access | HTTPS to the workspace (`*.azuredatabricks.net`) and the API (`*.databricksapps.com`), and port 9093 to `<namespace>.servicebus.windows.net` |
+## The handshake
 
-The app never holds an Azure key or connection string. Unity Catalog issues short-lived Event Hubs tokens to the app's
-service principal.
-
-## The contract
-
-- **Browse it live:** `<api.url>/docs` (Swagger UI) and `<api.url>/openapi.json`. Sign in as a workspace user with
-  access to the app, or send an onboarded service principal's token.
-- **In the repo:** [`docs/api/openapi.json`](api/openapi.json). It's generated from the API itself, and
-  `tests/test_openapi.py` fails if the two differ. Generate a client in any language from it, for example with
-  `openapi-generator-cli generate -i docs/api/openapi.json -g python -o client/`.
-
-| Call | What it does |
-|---|---|
-| `PUT /api/v1/subscriptions` | Declare the app's **whole set** of `{name, sql}`. Atomic: either every rule is accepted, or nothing is applied. Cancels anything no longer declared. |
-| `GET /api/v1/subscriptions?wait=N` | The app's subscriptions and whether the hub runs them. With `wait`, it holds up to N seconds (max 60) for `READY` or `FAILED`. |
-| `PUT /api/v1/subscriptions/{name}` | Create or change one subscription |
-| `DELETE /api/v1/subscriptions/{name}` | Cancel one |
-| `POST /api/v1/validate` | Every check `PUT` runs, including Databricks' compile, without applying anything |
-| `GET /api/v1/health` | Liveness |
-
-## The handshake, step by step
-
-The examples use `curl`. `$WS` is the workspace URL, and `$API` is `api.url`.
-
-### 1. Get the service principal's token
+`$WS` is the workspace URL and `$API` is `api.url`.
 
 ```bash
+# 1. The service principal's token (OAuth M2M; any Databricks SDK can do this)
 TOKEN=$(curl -s -u "$CLIENT_ID:$CLIENT_SECRET" "$WS/oidc/v1/token" \
   -d grant_type=client_credentials -d scope=all-apis | jq -r .access_token)
+
+# 2. Declare the whole set. Atomic: all accepted, or nothing applied. Undeclared rules are cancelled.
+curl -s -X PUT "$API/api/v1/subscriptions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"subscriptions": [{"name": "critical-potassium", "sql": "SELECT patient_id, value_num FROM gold_observations WHERE value_num >= 6.5"}]}'
+#   200 → {"applied": true, "accepted": [{"subscriptionId", "revision", "query", "destination", "unchanged"}], "cancelled": [...]}
+#   422 → {"applied": false, "refused": [{"name", "code", "message"}]}   (code: Databricks' error class, or ours)
+
+# 3. Wait, in short calls, until the hub runs exactly these revisions
+curl -s "$API/api/v1/subscriptions?wait=25" -H "Authorization: Bearer $TOKEN"
+#   state: READY (start reading) | PENDING (poll again) | FAILED (see problems) | HUB_STALE (the hub is stopped)
+
+# 4. An Event Hubs token for the app's topic, issued by Unity Catalog to this service principal only
+curl -s -X POST "$WS/api/2.1/unity-catalog/temporary-service-credentials" -H "Authorization: Bearer $TOKEN" \
+  -d '{"credential_name": "<eventhubs.credential>", "azure_options": {"resources": ["https://<eventhubs.namespace>.servicebus.windows.net/.default"]}}'
+#   → {"azure_aad": {"aad_token"}, "expiration_time"}   (refresh before it expires)
 ```
 
-The token lasts about an hour. Get a new one before it expires, or let a Databricks SDK do it (Java, Python, Go, and
-the CLI all support OAuth M2M profiles).
+Test a rule in the SQL editor first, against `<catalog>.sub_<app>.<source>`: it returns the records the app will
+receive. `POST /api/v1/validate` runs every check without applying anything.
 
-### 2. Declare the subscriptions
+## Reading the topic
 
-```bash
-curl -s -X PUT "$API/api/v1/subscriptions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{
-  "subscriptions": [{"name": "critical-potassium",
-    "sql": "SELECT patient_id, value_num, units FROM gold_observations WHERE observation_cd_desc = '\''Potassium'\'' AND value_num >= 6.5"}]}'
-```
+Use any Kafka client on `destination`. Settings:
+- `bootstrap.servers`: `<namespace>.servicebus.windows.net:9093`
+- `security.protocol`: `SASL_SSL`, with `sasl.mechanism` `OAUTHBEARER` (the token is `aad_token`)
+- **one stable `group.id` per app**, so it resumes where it stopped
+- `enable.auto.commit`: `false`; commit after handling
+- `metadata.max.age.ms` and `connections.max.idle.ms`: `180000`
 
-Databricks compiles each rule in this call, against the app's own views. Test the same SQL first in the SQL editor
-against `<catalog>.sub_<app>.<source>`. It returns the records the app will receive.
-
-**200: accepted.** Keep `subscriptionId` and `revision`, and read from `destination`:
-
-```json
-{"applied": true,
- "accepted": [{"subscriptionId": "6f1c…", "name": "critical-potassium", "revision": 1, "state": "ACCEPTED",
-               "query": "SELECT patient_id, value_num, units FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5",
-               "destination": "hl7_rtm_demo.subscribers.sp-hl7-realtime-demo", "unchanged": false}],
- "cancelled": []}
-```
-
-**422: refused, nothing applied.** The error is Databricks' own:
-
-```json
-{"applied": false,
- "refused": [{"name": "typo", "code": "UNRESOLVED_COLUMN.WITH_SUGGESTION",
-              "message": "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `value_numm` cannot be resolved. Did you mean one of the following? [`value_num`, …]"}]}
-```
-
-### 3. Wait until the hub runs exactly these revisions
-
-```bash
-until s=$(curl -s "$API/api/v1/subscriptions?wait=25" -H "Authorization: Bearer $TOKEN" | jq -r .state) \
-      && [ "$s" != PENDING ]; do :; done; echo "$s"
-```
-
-| `state` | Meaning | What the app does |
-|---|---|---|
-| `READY` | The hub runs every current revision (each subscription's `state` is `ACTIVE`) | Start reading |
-| `PENDING` | Not yet. Usually ~5–8 s after a change. | Poll again. Keep each call ≤ 25 s, because a proxy in between may cut longer ones. |
-| `FAILED` | The hub can't run a revision. `problems` carries Spark's error. | Fix the rule and declare again |
-| `HUB_STALE` | The hub hasn't processed one of the app's sources for 2 minutes | Alert: the platform's hub is stopped |
-
-### 4. Read the app's topic
-
-**Get an Event Hubs token from Unity Catalog**, as the same service principal:
-
-```bash
-curl -s -X POST "$WS/api/2.1/unity-catalog/temporary-service-credentials" -H "Authorization: Bearer $TOKEN" -d '{
-  "credential_name": "<eventhubs.credential>",
-  "azure_options": {"resources": ["https://<eventhubs.namespace>.servicebus.windows.net/.default"]}}'
-# -> {"azure_aad": {"aad_token": "…"}, "expiration_time": <epoch ms>}
-```
-
-Only the app's own service principal can mint with its credential. Refresh before `expiration_time`; the Java client
-refreshes 5 minutes early.
-
-**Consume `destination` with any Kafka client**, using that token for SASL OAUTHBEARER:
-
-| Setting | Value |
-|---|---|
-| `bootstrap.servers` | `<eventhubs.namespace>.servicebus.windows.net:9093` |
-| `security.protocol` / `sasl.mechanism` | `SASL_SSL` / `OAUTHBEARER`. The token callback returns `aad_token`. |
-| `group.id` | One stable group per app, so it resumes where it stopped and never skips |
-| `enable.auto.commit` | `false`: commit only after handling, so a crash replays instead of skipping |
-| `metadata.max.age.ms`, `connections.max.idle.ms` | `180000` (Azure closes idle connections at 240 s; Microsoft's Kafka guidance) |
-| `request.timeout.ms`, `session.timeout.ms` | `60000`, `30000` |
-
-## What arrives: the notification
-
-The key is the patient ID, so one patient's notifications stay in order within a partition. The value is JSON:
+Each message is keyed by patient ID. The value is JSON:
 
 ```json
 {"notificationId": "4b0e…", "subscriptionId": "6f1c…", "subscription": "critical-potassium", "revision": 1,
- "source": "gold_observations", "sourcePartition": 3, "sourceOffset": 1048211,
- "gold_ts": "2026-11-05T05:02:15.775Z",
- "payload": {"patient_id": "MRN021417", "units": "mmol/L", "value_num": 6.7}}
+ "source": "gold_observations", "sourcePartition": 3, "sourceOffset": 1048211, "gold_ts": "2026-11-05T05:02:15.775Z",
+ "payload": {"patient_id": "MRN021417", "value_num": 6.7}}
 ```
 
-| Field | Meaning |
-|---|---|
-| `notificationId` | Stable across redeliveries (subscription revision + source record). **Deduplicate on it.** |
-| `subscriptionId`, `revision` | Which rule revision matched. Act only on the pairs your last declare returned; anything else is backlog from an earlier revision. |
-| `subscription` | The rule's name |
-| `source`, `sourcePartition`, `sourceOffset` | Where the gold record came from |
-| `gold_ts` | When the gold record was produced (the broker's time) |
-| `payload` | Exactly the columns the rule selects, nulls included |
-
-**Delivery is at least once.** After a restart the app may see a notification again. Dedupe on `notificationId`.
+- **Delivery is at least once:** deduplicate on `notificationId`.
+- **Act only on the `(subscriptionId, revision)` pairs your last declare returned.** Anything else is backlog from an
+  earlier revision.
+- **`payload`** holds exactly the columns the rule selects, nulls included.
 
 ## Errors
 
-| HTTP | `code` | Meaning |
-|---|---|---|
-| 401 | `UNAUTHENTICATED` | No verified caller: the token is missing or invalid |
-| 403 | `APP_NOT_ONBOARDED` | The service principal isn't an onboarded subscriber app |
-| 422 | Databricks' error class (`UNRESOLVED_COLUMN…`, `PARSE_SYNTAX_ERROR`, `TABLE_OR_VIEW_NOT_FOUND`, …) | Databricks refused the SQL. Nothing applied. |
-| 422 | `SQL_NOT_ALLOWED` | Not one filter over one record: a join, a subquery, a window, or a function that reaches outside the record |
-| 422 | `INVALID_NAME`, `DUPLICATE_NAME` | Names are 1–63 lowercase letters, digits, or `-`, each used once |
-| 422 | `RULE_LIMIT_REACHED` | The hub runs at most 1,000 rules. Nothing applied. |
-| 404 | `NOT_FOUND_OR_INACCESSIBLE` | `DELETE` of a name with no active subscription |
-
-## The reference client (Java)
-
-`src/subscriber` implements every step above in 7 classes; see its README to build and run it.
-
-| Step | Class |
+| HTTP | `code` |
 |---|---|
-| The rules (name → SQL) | `MySubscriptions` |
-| 1, the SP's token | `App.signIn` (Databricks Java SDK, OAuth M2M profile) |
-| 2–3, declare and wait | `api/SubscriptionApi`, called from `App` |
-| 4, the Event Hubs token and consumer settings | `platform/EventHubs` |
-| Dedupe, current revisions only, commit after handling | `notifications/Listener`, `notifications/Notification` |
-| Checking an integration end to end | `e2e/E2E` (`--e2e`, 24 live checks) |
+| 401 | `UNAUTHENTICATED`: no valid token |
+| 403 | `APP_NOT_ONBOARDED`: the service principal isn't a subscriber app |
+| 422 | Databricks' error class (`UNRESOLVED_COLUMN…`, `PARSE_SYNTAX_ERROR`, …), `SQL_NOT_ALLOWED` (not one filter over one record), `INVALID_NAME`, `DUPLICATE_NAME`, `RULE_LIMIT_REACHED` (1,000 rules). Nothing applied. |
+| 404 | `NOT_FOUND_OR_INACCESSIBLE`: `DELETE` of a name with no active subscription |
+
+## The Java reference client
+
+`src/subscriber` maps one class to each step:
+- `MySubscriptions`: the rules;
+- `App`: steps 1–3;
+- `api/SubscriptionApi`: HTTP;
+- `platform/EventHubs`: step 4 and the Kafka settings;
+- `notifications/Listener`: dedupe and current revisions;
+- `e2e/E2E`: 24 live checks.
