@@ -346,7 +346,7 @@ tests/           unit tests (local Spark)
 docs/            integration guide + api/openapi.json (the contract), latency, subscriptions, scalability plan,
                  Epic JSON notes, story.html (deck), SPIKE docs; diagrams/ (draw.io + slides)
 examples/        clients and parked designs: subscribers/java/ (an example subscriber; its API client is generated
-                 from the contract), the earlier SQL-file subscriptions, the earlier AWS cross-cloud setup
+                 from the contract) and the earlier SQL-file subscriptions
 ```
 
 Contributors and coding agents: see [AGENTS.md](AGENTS.md).

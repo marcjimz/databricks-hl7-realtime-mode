@@ -49,4 +49,4 @@ Ruled out by measurement:
 - **The tail beyond p99** (seconds) is not addressed.
 
 The full history (AWS cross-cloud phases 0–5, the classic-compute investigation, driver-log breakdowns) is in
-[examples/aws-cross-cloud/latency-history.md](../examples/aws-cross-cloud/latency-history.md).
+[latency-history.md](https://github.com/marcjimz/databricks-hl7-realtime-mode/blob/de0fd16/examples/aws-cross-cloud/latency-history.md) (removed from the repo with the AWS setup; kept in git history).

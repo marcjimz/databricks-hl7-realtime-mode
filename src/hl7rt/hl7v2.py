@@ -114,7 +114,7 @@ def _observation(obx: Column) -> Column:
 # Working columns added by with_segments(). Each segment is split ONCE in its own projection; Spark won't
 # collapse a projection into the next if that would duplicate an expensive expression, so every field read
 # below is a cheap array lookup. (Inlining segments() per field produced a 379 KB plan with 290 split() calls
-# per record and starved the RTM driver in GC; see examples/aws-cross-cloud/latency-history.md, Phase 2.)
+# per record and starved the RTM driver in GC; see docs/latency.md's history link, Phase 2.)
 _SEGS = "_hl7_segs"
 _SEGMENT_COLS = {"MSH": "_hl7_msh", "PID": "_hl7_pid", "PV1": "_hl7_pv1", "OBR": "_hl7_obr", "TXA": "_hl7_txa"}
 _OBX = "_hl7_obx"

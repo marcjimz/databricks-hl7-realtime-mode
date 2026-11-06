@@ -69,7 +69,7 @@ src/subscription_api/ the Subscription API (Databricks App, FastAPI): the integr
 examples/             clients and parked designs, not part of the platform:
                       subscribers/java/ (an example subscriber: Maven, `java -jar`; its API client is generated from
                       docs/api/openapi.json; unit-tested by `make test`, not in the wheel or bundle sync);
-                      subscriptions/ (earlier SQL-file design) and aws-cross-cloud/ (not deployed, linted, or tested)
+                      subscriptions/ (earlier SQL-file design; not deployed, linted, or tested)
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
 docs/                 integration.md + api/openapi.json (the contract), latency, subscriptions, SCALABILITY test plan,
                       Epic JSON, story.html (interactive deck),
@@ -122,7 +122,7 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
     (`rtm_max_partitions`).
   - Several RTM flows per pipeline without slot contention, and adaptive source partitioning, exist only on the
     `PREVIEW` channel (Beta). Don't use them until they're GA.
-- **Classic compute (phases 0–5; examples/aws-cross-cloud/latency-history.md)** needed fixed workers, Photon off, and
+- **Classic compute (phases 0–5; latency history linked from docs/latency.md)** needed fixed workers, Photon off, and
   slots ≥ tasks across all stages plus ~20% headroom. With exactly as many slots as tasks, the epoch handoff failed with
   `CONCURRENT_SCHEDULER_INSUFFICIENT_SLOT`. It doesn't apply on serverless.
 - **Never use bundle `mode: development`** for RTM targets: it turns `continuous` off.
