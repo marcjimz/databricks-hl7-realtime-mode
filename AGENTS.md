@@ -187,7 +187,7 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
     overwrites a forged copy (verified live).
   - **Registry access:** app roles are NOLOGIN and granted only to `subscription_service` (the API's SP). The API writes
     with `SET LOCAL ROLE <app>`, so the owner trigger and RLS see the app.
-  - **No other path:** the Lakebase Data API is off, and old SP login roles are dropped. E2E check 6 and
+  - **No other path:** the Lakebase Data API is off, and old SP login roles are dropped. E2E check 7 and
     `tests/test_registry.py` guard this.
 - **Postgres 16+:** the role's creator doesn't get `SET` on it. Even the registry owner can't act as an app without an
   explicit `GRANT <app> TO <me> WITH SET TRUE`, which the perf seeding does and then revokes.
@@ -215,6 +215,9 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   no `additionalProperties`, so generated clients stay plain classes and ignore unknown fields. The proxy-set identity
   header isn't a client parameter. docs/integration.md is the language-neutral guide: handshake, Event Hubs
   token, Kafka settings, notification envelope, and errors. Keep it in step with the API.
+- **An app configures only its service principal and `api.url`.** `GET /api/v1/connection` returns the rest: its topic,
+  the Kafka bootstrap servers (from the App's `HL7_EVENTHUBS_NAMESPACE`), its UC credential (`apps.eventhubs_credential`,
+  written by `make registry`), and the token scope. Don't add client settings the API can answer.
 - **The Java client is deliberately small and contract-driven**, with packages by role so a reader starts at the top:
   - `App` (entry point) and `MySubscriptions` (name → SQL, the file developers edit) at the root;
   - `api/`: `SubscriptionsApi` and `api.model` are **generated** at build time from docs/api/openapi.json
@@ -254,7 +257,7 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   column's type. `tests/test_dashboard.py` keeps both dashboards portable.
 - **The Databricks SDK lets `DATABRICKS_*` environment variables override a profile.** The app pins
   `auth_type=oauth-m2m` from its profile and refuses to run as anything but a service principal.
-- **`--e2e` is the acceptance test** (24 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
+- **`--e2e` is the acceptance test** (25 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
   every new guarantee, and keep docs/subscriptions.md's table in step. Plans beyond one SP: docs/SCALABILITY.md.
 - **Serverless JAR tasks need environment_version 4+** (`java_dependencies`). Binding a job's `run_as` to an SP needs
   the deployer to have **Service Principal: User** on it, so the app's job is its own bundle (`examples/subscribers/java`):

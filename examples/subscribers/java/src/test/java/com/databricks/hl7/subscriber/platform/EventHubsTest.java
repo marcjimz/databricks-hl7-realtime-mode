@@ -57,11 +57,6 @@ class EventHubsTest {
     }
 
     @Test
-    void scopeIsTheNamespaceDefaultScope() {
-        assertEquals("https://ns1.servicebus.windows.net/.default", EventHubs.scope("ns1"));
-    }
-
-    @Test
     void answersKafkaWithTheCurrentUcToken() throws Exception {
         Instant expiry = Instant.parse("2026-11-03T13:00:00Z");
         Clock clock = Clock.fixed(Instant.parse("2026-11-03T12:00:00Z"), ZoneOffset.UTC);
@@ -79,7 +74,7 @@ class EventHubsTest {
 
     @Test
     void consumerUsesEntraOAuthBearerAndNoSecrets() {
-        var p = EventHubs.consumer("ns1", "app-a");
+        var p = EventHubs.consumer("ns1.servicebus.windows.net:9093", "app-a");  // as getConnection returns it
 
         assertEquals("ns1.servicebus.windows.net:9093", p.get("bootstrap.servers"));
         assertEquals("SASL_SSL", p.get("security.protocol"));
@@ -93,7 +88,7 @@ class EventHubsTest {
 
     @Test
     void followsMicrosoftsEventHubsClientGuidanceAndCommitsOnlyAfterHandling() {
-        var p = EventHubs.consumer("ns1", "app-a");
+        var p = EventHubs.consumer("ns1.servicebus.windows.net:9093", "app-a");
         assertTrue(Integer.parseInt((String) p.get("metadata.max.age.ms")) < 240_000, "Azure closes idle links at 240 s");
         assertTrue(Integer.parseInt((String) p.get("connections.max.idle.ms")) < 240_000);
         assertEquals("false", p.get("enable.auto.commit"));

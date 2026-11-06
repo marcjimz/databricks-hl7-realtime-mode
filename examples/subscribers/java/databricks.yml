@@ -22,12 +22,8 @@ variables:
     description: The app's name (its key in terraform subscriber_apps).
   app_id:
     description: The app's service principal (application ID); the job runs as it.
-  credential:
-    description: The app's UC service credential (sub_<app>_eventhubs).
   api_url:
     description: The Subscription API's URL.
-  eh_namespace:
-    description: Event Hubs namespace.
   forbidden_credential:
     description: A credential the app must not use (the hub's).
   forbidden_topic:
@@ -53,8 +49,6 @@ resources:
             parameters:
               - --e2e
               - api.url=${var.api_url}
-              - eventhubs.namespace=${var.eh_namespace}
-              - eventhubs.credential=${var.credential}
               - consumer.group=${var.app}
               - e2e.forbidden_credential=${var.forbidden_credential}
               - e2e.forbidden_topic=${var.forbidden_topic}

@@ -374,28 +374,28 @@
       <h3>Only its granted columns</h3>
       <p>Each app has Unity Catalog views (<code>sub_&lt;app&gt;.&lt;source&gt;</code>) with only its columns. Databricks compiles
         rules against those views, so an ungranted column gets <code>UNRESOLVED_COLUMN</code>.</p>
-      <div class="proof">E2E checks 7–8</div>
+      <div class="proof">E2E checks 8–9</div>
     </div>
     <div class="gcard reveal d2">
       <div class="q">What can a rule do?</div>
       <h3>Filter one record</h3>
       <p>The hub runs filters with its own permissions. Subqueries, joins, and functions that reach outside the record
         (network, secrets, JVM, UDFs) are refused before Databricks compiles the rule.</p>
-      <div class="proof">E2E checks 11–14 · unit tests</div>
+      <div class="proof">E2E checks 12–15 · unit tests</div>
     </div>
     <div class="gcard reveal d2">
       <div class="q">Who reads the results?</div>
       <h3>Only that app</h3>
       <p>Each app has its own Event Hub, readable only through its own Unity Catalog service credential. Only that app's
         service principal has ACCESS on the credential. Unity Catalog issues short-lived tokens, so the app holds no Azure secret.</p>
-      <div class="proof">E2E checks 2–5</div>
+      <div class="proof">E2E checks 2–6</div>
     </div>
     <div class="gcard reveal d3">
       <div class="q">Can an app bypass the API?</div>
       <h3>No</h3>
       <p>App roles in the operational store can't log in. Only the API acts as them, and row-level security keeps each app
         to its own rows. The store's Data API is off, and old login roles are dropped.</p>
-      <div class="proof">E2E check 6 · registry tests on Postgres</div>
+      <div class="proof">E2E check 7 · registry tests on Postgres</div>
     </div>
     <div class="gcard reveal d3">
       <div class="q">Where are the secrets?</div>
@@ -438,7 +438,7 @@
           <li>Under 200 ms p99 per real-time step, over soaks that span checkpoints</li>
           <li>Every step lands in a streaming table, with no duplicates after a restart</li>
           <li>Java walkthrough: add, change, remove, refuse, stopped hub (exit codes 0, 0, 0, 2, 4)</li>
-          <li>All 24 end-to-end checks pass, including no path around the API</li>
+          <li>All 25 end-to-end checks pass, including no path around the API</li>
           <li>Rebuilds after the weekly sandbox wipe with two commands</li>
         </ul>
       </div>
@@ -524,7 +524,7 @@ const ARCH = {
   hub: ["Subscription hub", "A micro-batch pipeline that reads the gold topics and re-checks every rule. It runs all of a source's rules in one pass and writes each match to that app's topic, with only the fields the rule selects.",
     ["1,000 rules: batch ~4 s, p99 7.1 s", "A rule that fails on bad data is marked FAILED; the others keep running"]],
   apptopic: ["The app's own topic", "<catalog>.subscribers.<app>. Only that app can read it, through its own access connector and Unity Catalog service credential. Each notification carries a stable ID and the source record's position.",
-    ["Isolation guarded by E2E checks 2–5"]],
+    ["Isolation guarded by E2E checks 2–6"]],
   uc: ["Unity Catalog", "One place for governance: service principals, per-app views with only the granted columns, Event Hubs service credentials, the streaming tables, and the registry for monitoring. Lineage and audit come with it.",
     ["No keys or connection strings anywhere"]],
 };
@@ -558,9 +558,9 @@ const CODE = {
 <span class="k">if</span> (!state.equals(<span class="s">"READY"</span>)) exit(state.equals(<span class="s">"FAILED"</span>) ? <span class="q">3</span> : <span class="q">4</span>, state);
 
 <span class="c">// 3. Read this app's own topic. Unity Catalog issues the token: no Azure secret.</span>
-EventHubs.useCredential(workspace, cfg.get(<span class="s">"eventhubs.credential"</span>), namespace);
-<span class="k">try</span> (<span class="k">var</span> consumer = <span class="k">new</span> KafkaConsumer&lt;&gt;(EventHubs.consumer(namespace, group))) {
-    consumer.subscribe(List.of(topic));
+EventHubs.useCredential(workspace, connection.getCredential(), connection.getTokenScope());
+<span class="k">try</span> (<span class="k">var</span> consumer = <span class="k">new</span> KafkaConsumer&lt;&gt;(EventHubs.consumer(connection.getBootstrapServers(), group))) {
+    consumer.subscribe(List.of(connection.getTopic()));
     <span class="k">new</span> Listener(current, group, System.out, Instant.now()).run(consumer, ...);
 }`,
   "SubscriptionApi.java": `<span class="c">// The whole client for the Subscription API: plain HTTPS with the SP's OAuth token.</span>

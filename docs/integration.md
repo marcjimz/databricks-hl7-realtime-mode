@@ -9,10 +9,15 @@ equal), with Swagger UI at `<api>/docs`. Generate a client from it in any langua
 
 ## What an app needs
 
-- **A Databricks service principal** (client ID and OAuth secret). It's the app's identity, and the secret is the app's own.
-- **Onboarding by the platform team:** the sources and columns it may read (docs/subscriptions.md, "Set up"). This
-  produces three settings, with no secrets in them: `api.url`, `eventhubs.namespace`, and `eventhubs.credential`.
-- **Network access:** HTTPS to the workspace and the API, and port 9093 to `<namespace>.servicebus.windows.net`.
+Two things to configure:
+1. **A Databricks service principal** (workspace URL, client ID, OAuth secret). It's the app's identity, and the
+   secret is the app's own.
+2. **The Subscription API's URL.**
+
+Everything else comes from the API (`GET /api/v1/connection`): the app's topic, the Kafka bootstrap servers, and its
+Unity Catalog credential for Event Hubs. Before that works, the platform team onboards the app: the sources and columns
+it may read (docs/subscriptions.md, "Set up"). The app needs network access to the workspace and the API (HTTPS), and
+to the bootstrap servers (port 9093).
 
 ## The handshake
 
@@ -23,19 +28,23 @@ equal), with Swagger UI at `<api>/docs`. Generate a client from it in any langua
 TOKEN=$(curl -s -u "$CLIENT_ID:$CLIENT_SECRET" "$WS/oidc/v1/token" \
   -d grant_type=client_credentials -d scope=all-apis | jq -r .access_token)
 
-# 2. Declare the whole set. Atomic: all accepted, or nothing applied. Undeclared rules are cancelled.
+# 2. Where to read, and with which credential (once; it doesn't change while the app is onboarded)
+curl -s "$API/api/v1/connection" -H "Authorization: Bearer $TOKEN"
+#   → {"topic", "bootstrapServers", "credential", "tokenScope"}
+
+# 3. Declare the whole set. Atomic: all accepted, or nothing applied. Undeclared rules are cancelled.
 curl -s -X PUT "$API/api/v1/subscriptions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"subscriptions": [{"name": "critical-potassium", "sql": "SELECT patient_id, value_num FROM gold_observations WHERE value_num >= 6.5"}]}'
 #   200 → {"applied": true, "accepted": [{"subscriptionId", "revision", "query", "destination", "unchanged"}], "cancelled": [...]}
 #   422 → {"applied": false, "refused": [{"name", "code", "message"}]}   (code: Databricks' error class, or ours)
 
-# 3. Wait, in short calls, until the hub runs exactly these revisions
+# 4. Wait, in short calls, until the hub runs exactly these revisions
 curl -s "$API/api/v1/subscriptions?wait=25" -H "Authorization: Bearer $TOKEN"
 #   state: READY (start reading) | PENDING (poll again) | FAILED (see problems) | HUB_STALE (the hub is stopped)
 
-# 4. An Event Hubs token for the app's topic, issued by Unity Catalog to this service principal only
+# 5. A Kafka token for the topic, issued by Unity Catalog to this service principal only (credential and tokenScope from 2)
 curl -s -X POST "$WS/api/2.1/unity-catalog/temporary-service-credentials" -H "Authorization: Bearer $TOKEN" \
-  -d '{"credential_name": "<eventhubs.credential>", "azure_options": {"resources": ["https://<eventhubs.namespace>.servicebus.windows.net/.default"]}}'
+  -d '{"credential_name": "<credential>", "azure_options": {"resources": ["<tokenScope>"]}}'
 #   → {"azure_aad": {"aad_token"}, "expiration_time"}   (refresh before it expires)
 ```
 
@@ -45,7 +54,7 @@ receive. `POST /api/v1/validate` runs every check without applying anything.
 ## Reading the topic
 
 Use any Kafka client on `destination`. Settings:
-- `bootstrap.servers`: `<namespace>.servicebus.windows.net:9093`
+- `bootstrap.servers`: `bootstrapServers` from the connection
 - `security.protocol`: `SASL_SSL`, with `sasl.mechanism` `OAUTHBEARER` (the token is `aad_token`)
 - **one stable `group.id` per app**, so it resumes where it stopped
 - `enable.auto.commit`: `false`; commit after handling
@@ -77,8 +86,8 @@ Each message is keyed by patient ID. The value is JSON:
 
 `examples/subscribers/java` maps one class to each step:
 - `MySubscriptions`: the rules;
-- `App`: steps 1–3;
+- `App`: steps 1–4;
 - `api/`: the client generated from `api/openapi.json` (`SubscriptionsApi` and its models);
-- `platform/EventHubs`: step 4 and the Kafka settings;
+- `platform/EventHubs`: step 5 and the Kafka settings;
 - `notifications/Listener`: dedupe and current revisions;
-- `e2e/E2E`: 24 live checks.
+- `e2e/E2E`: 25 live checks.

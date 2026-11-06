@@ -194,7 +194,7 @@ Sunday wipe.
 4. **Check it end to end:**
    ```bash
    mvn -q -f examples/subscribers/java package
-   java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e      # 24 checks, PASS/FAIL table, exit 1 on any failure
+   java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e      # 25 checks, PASS/FAIL table, exit 1 on any failure
    ```
 
 ## End-to-end checks
@@ -210,29 +210,30 @@ Sunday wipe.
 | # | Check | Input | Expected |
 |---|---|---|---|
 | 1 | Sign in | the profile (or the job's identity) | a service principal |
-| 2 | Own Event Hubs credential | `sub_<app>_eventhubs` | token issued |
-| 3 | Another credential | `<catalog>_eventhubs` (the hub's) | denied (no ACCESS) |
-| 4 | Read a hub that isn't this app's | a gold topic | not authorized |
-| 5 | Write to its own hub (forge a notification) | `<catalog>.subscribers.<app>` | not authorized (Receiver only) |
-| 6 | Skip the API | the registry's old Data API URL | not available |
-| 7 | Column not granted | `WHERE msg_sending_facility = 'NORTH'` | `UNRESOLVED_COLUMN` (Databricks) |
-| 8 | Source not granted | `FROM gold_encounters` | `TABLE_OR_VIEW_NOT_FOUND` (Databricks) |
-| 9 | Misspelled column | `WHERE value_numm > 6` | `UNRESOLVED_COLUMN` (Databricks) |
-| 10 | Syntax error | `WHER value_num > 6` | `PARSE_SYNTAX_ERROR` (Databricks) |
-| 11 | Subquery | `WHERE value_num > (SELECT max(...) ...)` | `SQL_NOT_ALLOWED` |
-| 12 | Join | `... JOIN gold_encounters ...` | `SQL_NOT_ALLOWED` |
-| 13 | Function that reaches outside the record | `http_request(...)` | `SQL_NOT_ALLOWED` |
-| 14 | Table outside this app's views | `FROM <catalog>.<schema>.gold_observations` | `SQL_NOT_ALLOWED` |
-| 15 | One refusal applies nothing | a valid and a misspelled rule together | 422, the valid one not registered |
-| 16 | Validate applies nothing | `POST /validate` | valid, not registered |
-| 17 | Register | potassium ≥ 6.5, fields `patient_id, value_num` | ACCEPTED, with the canonical SQL |
-| 18 | Hub runs it | that revision | ACTIVE |
-| 19 | Notification on its own hub | | exactly those fields, value ≥ 6.5 |
-| 20 | Same SQL again | identical rule | same revision, unchanged |
-| 21 | Change the rule | ≥ 7.0, add `units` | next revision, then ACTIVE |
-| 22 | Notification reflects the change | | new revision, new fields, value ≥ 7.0 |
-| 23 | Cancel | `DELETE` | CANCELLED by the hub |
-| 24 | Hub heartbeat | `gold_observations` | a batch within 2 minutes |
+| 2 | Connection from the API | `GET /api/v1/connection` | this app's own topic and credential |
+| 3 | Own Event Hubs credential | `sub_<app>_eventhubs` | token issued |
+| 4 | Another credential | `<catalog>_eventhubs` (the hub's) | denied (no ACCESS) |
+| 5 | Read a hub that isn't this app's | a gold topic | not authorized |
+| 6 | Write to its own hub (forge a notification) | `<catalog>.subscribers.<app>` | not authorized (Receiver only) |
+| 7 | Skip the API | the registry's old Data API URL | not available |
+| 8 | Column not granted | `WHERE msg_sending_facility = 'NORTH'` | `UNRESOLVED_COLUMN` (Databricks) |
+| 9 | Source not granted | `FROM gold_encounters` | `TABLE_OR_VIEW_NOT_FOUND` (Databricks) |
+| 10 | Misspelled column | `WHERE value_numm > 6` | `UNRESOLVED_COLUMN` (Databricks) |
+| 11 | Syntax error | `WHER value_num > 6` | `PARSE_SYNTAX_ERROR` (Databricks) |
+| 12 | Subquery | `WHERE value_num > (SELECT max(...) ...)` | `SQL_NOT_ALLOWED` |
+| 13 | Join | `... JOIN gold_encounters ...` | `SQL_NOT_ALLOWED` |
+| 14 | Function that reaches outside the record | `http_request(...)` | `SQL_NOT_ALLOWED` |
+| 15 | Table outside this app's views | `FROM <catalog>.<schema>.gold_observations` | `SQL_NOT_ALLOWED` |
+| 16 | One refusal applies nothing | a valid and a misspelled rule together | 422, the valid one not registered |
+| 17 | Validate applies nothing | `POST /validate` | valid, not registered |
+| 18 | Register | potassium ≥ 6.5, fields `patient_id, value_num` | ACCEPTED, with the canonical SQL |
+| 19 | Hub runs it | that revision | ACTIVE |
+| 20 | Notification on its own hub | | exactly those fields, value ≥ 6.5 |
+| 21 | Same SQL again | identical rule | same revision, unchanged |
+| 22 | Change the rule | ≥ 7.0, add `units` | next revision, then ACTIVE |
+| 23 | Notification reflects the change | | new revision, new fields, value ≥ 7.0 |
+| 24 | Cancel | `DELETE` | CANCELLED by the hub |
+| 25 | Hub heartbeat | `gold_observations` | a batch within 2 minutes |
 
 Cross-app cases need a second service principal live:
 - **Today:** they run against a real PostgreSQL in `tests/test_registry.py` (an app can't read, cancel, or claim another

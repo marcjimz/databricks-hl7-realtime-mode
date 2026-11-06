@@ -35,16 +35,17 @@ SUBSCRIPTIONS (seconds)
 ## Subscribe from any application
 
 The interface for external apps is the **Subscription API** (OpenAPI: [`docs/api/openapi.json`](docs/api/openapi.json),
-Swagger at `<api>/docs`) plus **the app's own Event Hubs topic**. Any language works. The app authenticates as its own
-Databricks service principal:
+Swagger at `<api>/docs`) plus **the app's own Event Hubs topic**. Any language works. An app configures only two things,
+its own Databricks service principal and the API's URL; the API tells it everything else:
 
 ```
+0. GET  <api>/api/v1/connection           → its topic, Kafka bootstrap servers, Unity Catalog credential, token scope
 1. PUT  <api>/api/v1/subscriptions        {"subscriptions": [{"name": "critical-potassium",
                                             "sql": "SELECT patient_id, value_num FROM gold_observations
                                                     WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"}]}
         → ACCEPTED (revision, destination topic), or Databricks' own error and nothing applied
 2. GET  <api>/api/v1/subscriptions?wait=25  → repeat until READY (the hub runs exactly these revisions, ~5 s)
-3. Read the destination topic with any Kafka client (OAUTHBEARER, token from Unity Catalog);
+3. Read the topic with any Kafka client (OAUTHBEARER, token from Unity Catalog for that credential);
    deduplicate on notificationId
 ```
 
@@ -138,17 +139,18 @@ Run every command below from the repo root.
 $ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e
 …
 | 1 | Sign in | profile sp-hl7-realtime-demo | a service principal | 38fafc55-… | PASS |
-| 6 | Skip the API (the registry's Data API) | list_subscriptions via https://… | not available | refused 503 | PASS |
-| 7 | Column not granted | SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
-| 11 | Subquery | SELECT patient_id FROM gold_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
+| 2 | Connection from the API | GET /api/v1/connection | this app's own topic and credential | hl7_rtm_demo.subscribers.sp-hl7-realtime-demo via sub_sp_hl7_realtime_demo_eventhubs @ hl7rtmaz-ehns.servicebus.windows.net:9093 | PASS |
+| 7 | Skip the API (the registry's Data API) | list_subscriptions via https://… | not available | refused 503 | PASS |
+| 8 | Column not granted | SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
+| 12 | Subquery | SELECT patient_id FROM gold_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
 …
-| 23 | Cancel | DELETE e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
-| 24 | Hub heartbeat | gold_observations | a batch within 2 minutes | 2026-11-05T04:40:05… | PASS |
+| 24 | Cancel | DELETE e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
+| 25 | Hub heartbeat | gold_observations | a batch within 2 minutes | 2026-11-06T01:36:22… | PASS |
 
-24 checks, 0 failed
+25 checks, 0 failed
 ```
 
-The 24 checks cover:
+The 25 checks cover:
 - sign-in, and credential and topic isolation;
 - no way around the API;
 - Databricks' own compile errors, and the shapes the hub won't run;

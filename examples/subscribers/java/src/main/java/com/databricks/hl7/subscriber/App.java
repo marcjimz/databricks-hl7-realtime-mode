@@ -5,6 +5,7 @@ import com.databricks.hl7.subscriber.api.SubscriptionsApi;
 import com.databricks.hl7.subscriber.api.client.ApiException;
 import com.databricks.hl7.subscriber.api.model.Accepted;
 import com.databricks.hl7.subscriber.api.model.Cancelled;
+import com.databricks.hl7.subscriber.api.model.Connection;
 import com.databricks.hl7.subscriber.api.model.DeclareResult;
 import com.databricks.hl7.subscriber.api.model.Refusal;
 import com.databricks.hl7.subscriber.api.model.Status;
@@ -41,8 +42,10 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
  *   java -jar hl7-subscriber.jar [file.properties] [key=value ...] [--duration=PT5M] [--e2e]
  * </pre>
  *
- * Settings: the file (default subscriber.properties, else the one file in apps/, which `make registry` writes; looked up
- * in the current directory, then next to the jar) plus key=value arguments. --e2e runs the end-to-end checks instead.
+ * Settings: only databricks.profile (the service principal) and api.url. Its topic, Kafka bootstrap servers, and Unity
+ * Catalog credential come from the API (getConnection). They're read from the file (default subscriber.properties,
+ * else the one file in apps/, which `make registry` writes; looked up in the current directory, then next to the jar)
+ * plus key=value arguments. --e2e runs the end-to-end checks instead.
  */
 public final class App {
     static final int WAIT_SECONDS = 120;
@@ -54,7 +57,17 @@ public final class App {
         Properties cfg = settings(argv);
         WorkspaceClient workspace = signIn(cfg);
         SubscriptionsApi api = Api.connect(required(cfg, "api.url"), () -> bearer(workspace));
-        if (argv.contains("--e2e")) System.exit(E2E.run(workspace, api, cfg));
+
+        // 0. Where this app's notifications arrive and how to read them: the API knows, so the app configures neither.
+        Connection connection;
+        try {
+            connection = api.getConnection();
+        } catch (ApiException e) {
+            exit(e.getCode() == 403 || e.getCode() == 503 ? 6 : 3, Api.problem(e).getCode() + ": "
+                    + Api.problem(e).getMessage() + (e.getCode() == 403 ? " (make registry onboards apps)" : ""));
+            return;
+        }
+        if (argv.contains("--e2e")) System.exit(E2E.run(workspace, api, connection, cfg));
         Duration runFor = argv.stream().filter(a -> a.startsWith("--duration=")).findFirst()
                 .map(a -> Duration.parse(a.substring("--duration=".length()))).orElse(null);
 
@@ -74,10 +87,8 @@ public final class App {
             return;
         }
         Map<String, Integer> current = new HashMap<>();  // subscriptionId -> revision
-        String topic = null;
         for (Accepted s : declared.getAccepted()) {
             current.put(s.getSubscriptionId(), s.getRevision());
-            topic = s.getDestination();
             System.out.printf("subscribed  %-22s revision %d ACCEPTED%s%n            %s%n", s.getName(), s.getRevision(),
                     Boolean.TRUE.equals(s.getUnchanged()) ? " (unchanged)" : "", s.getQuery());
         }
@@ -113,12 +124,12 @@ public final class App {
                     + " (is the subscription_hub pipeline running? make demo dev)");
         }
 
-        // 3. Consume this app's hub with a token Unity Catalog mints from its service credential (no Azure secret here).
-        EventHubs.useCredential(workspace, required(cfg, "eventhubs.credential"), required(cfg, "eventhubs.namespace"));
+        // 3. Consume this app's topic with a token Unity Catalog mints from its service credential (no Azure secret here).
+        EventHubs.useCredential(workspace, connection.getCredential(), connection.getTokenScope());
         String group = cfg.getProperty("consumer.group", cfg.getProperty("databricks.profile", "subscriber"));
-        try (var consumer = new KafkaConsumer<String, String>(EventHubs.consumer(required(cfg, "eventhubs.namespace"), group))) {
-            consumer.subscribe(List.of(topic));
-            System.out.printf("listening   on %s as consumer group %s (Ctrl-C to stop)%n", topic, group);
+        try (var consumer = new KafkaConsumer<String, String>(EventHubs.consumer(connection.getBootstrapServers(), group))) {
+            consumer.subscribe(List.of(connection.getTopic()));
+            System.out.printf("listening   on %s as consumer group %s (Ctrl-C to stop)%n", connection.getTopic(), group);
             new Listener(current, group, System.out, Instant.now()).run(consumer,
                     runFor == null ? Instant.MAX : Instant.now().plus(runFor), () -> healthCheck(api), HEALTH_CHECK_EVERY);
         }

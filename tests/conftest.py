@@ -114,8 +114,10 @@ def pg(tmp_path_factory):
     for role, (name, sp, topic, sources, fields) in APPS.items():
         owner.run(f"CREATE ROLE {role} LOGIN IN ROLE subscriber")  # NOLOGIN on Lakebase; LOGIN here to test it alone
         owner.run(f"GRANT {role} TO subscription_service")
-        owner.run("INSERT INTO subscription_registry.apps VALUES (:r, :n, :t, :s, :f, :sp)", r=role, n=name, t=topic,
-                  s=sources, f=fields, sp=sp)  # fmt: skip
+        owner.run("INSERT INTO subscription_registry.apps (app_role, app_name, destination_topic, allowed_sources, "
+                  "allowed_fields, service_principal, eventhubs_credential) VALUES (:r, :n, :t, :s, :f, :sp, :c)",
+                  r=role, n=name, t=topic, s=sources, f=fields, sp=sp,
+                  c=f"sub_{name.replace('-', '_')}_eventhubs")  # fmt: skip
     owner.run("CREATE ROLE stranger LOGIN IN ROLE subscriber")  # a subscriber role with no app binding
     yield lambda role="owner": pg8000.Connection(role, unix_sock=f"{sock}/.s.PGSQL.5432", database="postgres")
     owner.close()

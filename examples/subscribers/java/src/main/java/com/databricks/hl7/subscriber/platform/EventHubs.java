@@ -55,27 +55,26 @@ public final class EventHubs {
         }
     }
 
-    /** One token from Unity Catalog; PERMISSION_DENIED unless this identity has ACCESS on `credential`. */
-    public static Token mint(WorkspaceClient workspace, String credential, String namespace) {
+    /**
+     * One token from Unity Catalog for `scope`; PERMISSION_DENIED unless this identity has ACCESS on `credential`. Both
+     * come from the Subscription API (getConnection).
+     */
+    public static Token mint(WorkspaceClient workspace, String credential, String scope) {
         var c = workspace.credentials().generateTemporaryServiceCredential(new GenerateTemporaryServiceCredentialRequest()
                 .setCredentialName(credential)
-                .setAzureOptions(new GenerateTemporaryServiceCredentialAzureOptions().setResources(List.of(scope(namespace)))));
+                .setAzureOptions(new GenerateTemporaryServiceCredentialAzureOptions().setResources(List.of(scope))));
         return new Token(c.getAzureAad().getAadToken(), Instant.ofEpochMilli(c.getExpirationTime()));
     }
 
-    public static String scope(String namespace) {
-        return "https://" + namespace + ".servicebus.windows.net/.default";
-    }
-
     /** Use tokens for `credential` in every Kafka client this process creates. */
-    public static void useCredential(WorkspaceClient workspace, String credential, String namespace) {
-        Handler.tokens = new Tokens(() -> mint(workspace, credential, namespace), Clock.systemUTC());
+    public static void useCredential(WorkspaceClient workspace, String credential, String scope) {
+        Handler.tokens = new Tokens(() -> mint(workspace, credential, scope), Clock.systemUTC());
     }
 
     /** Kafka consumer settings: Entra OAUTHBEARER (no keys) plus Microsoft's Event Hubs client guidance. */
-    public static Properties consumer(String namespace, String groupId) {
+    public static Properties consumer(String bootstrapServers, String groupId) {
         var p = new Properties();
-        p.put("bootstrap.servers", namespace + ".servicebus.windows.net:9093");
+        p.put("bootstrap.servers", bootstrapServers);
         p.put("security.protocol", "SASL_SSL");
         p.put("sasl.mechanism", "OAUTHBEARER");
         p.put("sasl.jaas.config", "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;");

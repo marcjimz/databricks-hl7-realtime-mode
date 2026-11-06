@@ -5,6 +5,7 @@ import com.databricks.hl7.subscriber.api.Api;
 import com.databricks.hl7.subscriber.api.SubscriptionsApi;
 import com.databricks.hl7.subscriber.api.client.ApiException;
 import com.databricks.hl7.subscriber.api.model.Accepted;
+import com.databricks.hl7.subscriber.api.model.Connection;
 import com.databricks.hl7.subscriber.api.model.Notification;
 import com.databricks.hl7.subscriber.api.model.One;
 import com.databricks.hl7.subscriber.api.model.Refusal;
@@ -54,16 +55,18 @@ public final class E2E {
     private final List<Check> checks = new ArrayList<>();
     private final WorkspaceClient workspace;
     private final SubscriptionsApi api;
+    private final Connection connection;
     private final Properties cfg;
 
-    private E2E(WorkspaceClient workspace, SubscriptionsApi api, Properties cfg) {
+    private E2E(WorkspaceClient workspace, SubscriptionsApi api, Connection connection, Properties cfg) {
         this.workspace = workspace;
         this.api = api;
+        this.connection = connection;
         this.cfg = cfg;
     }
 
-    public static int run(WorkspaceClient workspace, SubscriptionsApi api, Properties cfg) {
-        var e2e = new E2E(workspace, api, cfg);
+    public static int run(WorkspaceClient workspace, SubscriptionsApi api, Connection connection, Properties cfg) {
+        var e2e = new E2E(workspace, api, connection, cfg);
         try {
             e2e.all();
         } catch (Exception e) {
@@ -92,28 +95,29 @@ public final class E2E {
                 App.isServicePrincipal(me));
 
         // Isolation on Event Hubs and the registry: only this app's own credential and hub, read-only; no way around the API.
-        String ns = App.required(cfg, "eventhubs.namespace");
-        record("Own Event Hubs credential", App.required(cfg, "eventhubs.credential"), "token issued", attempt(() ->
-                "token, expires " + EventHubs.mint(workspace, App.required(cfg, "eventhubs.credential"), ns).expiresAt()),
+        String own = setting("e2e.own_topic");
+        record("Connection from the API", "GET /api/v1/connection", "this app's own topic and credential",
+                connection.getTopic() + " via " + connection.getCredential() + " @ " + connection.getBootstrapServers(),
+                (own == null || own.equals(connection.getTopic())) && connection.getCredential() != null);
+        String bootstrap = connection.getBootstrapServers(), scope = connection.getTokenScope();
+        record("Own Event Hubs credential", connection.getCredential(), "token issued", attempt(() ->
+                "token, expires " + EventHubs.mint(workspace, connection.getCredential(), scope).expiresAt()),
                 s -> s.startsWith("token"));
         String forbiddenCredential = setting("e2e.forbidden_credential");
         if (forbiddenCredential != null) {
             record("Another credential", forbiddenCredential, "denied (no ACCESS)", attempt(() -> {
-                EventHubs.mint(workspace, forbiddenCredential, ns);
+                EventHubs.mint(workspace, forbiddenCredential, scope);
                 return "token issued";
             }), s -> s.contains("ACCESS") || s.contains("PERMISSION_DENIED") || s.contains("does not have"));
         }
-        EventHubs.useCredential(workspace, App.required(cfg, "eventhubs.credential"), ns);
+        EventHubs.useCredential(workspace, connection.getCredential(), scope);
         String forbiddenTopic = setting("e2e.forbidden_topic");
         if (forbiddenTopic != null) {
-            record("Read a hub that isn't this app's", forbiddenTopic, "not authorized", readOnce(forbiddenTopic, ns),
+            record("Read a hub that isn't this app's", forbiddenTopic, "not authorized", readOnce(forbiddenTopic, bootstrap),
                     s -> s.contains("not authorized"));
         }
-        String ownHub = setting("e2e.own_topic");
-        if (ownHub != null) {
-            record("Write to its own hub (forge a notification)", ownHub, "not authorized (Receiver only)",
-                    writeOnce(ownHub, ns), s -> s.contains("not authorized"));
-        }
+        record("Write to its own hub (forge a notification)", connection.getTopic(), "not authorized (Receiver only)",
+                writeOnce(connection.getTopic(), bootstrap), s -> s.contains("not authorized"));
         String dataApi = setting("e2e.data_api_url");
         if (dataApi != null) {
             record("Skip the API (the registry's Data API)", "list_subscriptions via " + dataApi, "not available",
@@ -165,7 +169,7 @@ public final class E2E {
 
         // Register, receive, change, receive the change, cancel.
         String group = cfg.getProperty("databricks.profile", "subscriber") + "-e2e-" + UUID.randomUUID();
-        try (var consumer = new KafkaConsumer<String, String>(EventHubs.consumer(ns, group))) {
+        try (var consumer = new KafkaConsumer<String, String>(EventHubs.consumer(bootstrap, group))) {
             Accepted r1 = api.putSubscription("e2e-potassium", new One().sql(GOOD));
             record("Register", GOOD, "ACCEPTED, canonical SQL", r1.getState() + " revision " + r1.getRevision() + ": "
                     + r1.getQuery(), r1.getState() == Accepted.StateEnum.ACCEPTED);
@@ -246,8 +250,9 @@ public final class E2E {
         return null;
     }
 
-    private String readOnce(String topic, String ns) {
-        try (var consumer = new KafkaConsumer<String, String>(EventHubs.consumer(ns, "e2e-forbidden-" + UUID.randomUUID()))) {
+    private String readOnce(String topic, String bootstrap) {
+        try (var consumer = new KafkaConsumer<String, String>(EventHubs.consumer(bootstrap,
+                "e2e-forbidden-" + UUID.randomUUID()))) {
             consumer.subscribe(List.of(topic));
             Instant deadline = Instant.now().plusSeconds(60);
             while (Instant.now().isBefore(deadline)) {
@@ -261,8 +266,8 @@ public final class E2E {
         }
     }
 
-    private String writeOnce(String topic, String ns) {
-        var p = EventHubs.consumer(ns, "unused");
+    private String writeOnce(String topic, String bootstrap) {
+        var p = EventHubs.consumer(bootstrap, "unused");
         for (String k : List.of("group.id", "enable.auto.commit", "auto.offset.reset", "key.deserializer",
                 "value.deserializer", "session.timeout.ms")) {
             p.remove(k);

@@ -54,6 +54,11 @@ def role(app: str) -> str:
     return "app_" + app.replace("-", "_")
 
 
+def credential(app: str) -> str:
+    """The app's UC service credential for its hub (infra/uc.sh creates it with this name)."""
+    return f"sub_{app.replace('-', '_')}_eventhubs"
+
+
 def sql(w, warehouse_id: str, statement: str):
     r = w.statement_execution.execute_statement(warehouse_id=warehouse_id, statement=statement, wait_timeout="50s")
     while r.status.state.value in ("PENDING", "RUNNING"):
@@ -166,11 +171,13 @@ def main():
         db.run(f"GRANT {r} TO subscription_service")
         db.run(
             "INSERT INTO subscription_registry.apps (app_role, app_name, destination_topic, allowed_sources, "
-            "allowed_fields, service_principal) VALUES (:r, :n, :t, CAST(:s AS text[]), CAST(:f AS text[]), :sp) "
+            "allowed_fields, service_principal, eventhubs_credential) "
+            "VALUES (:r, :n, :t, CAST(:s AS text[]), CAST(:f AS text[]), :sp, :c) "
             "ON CONFLICT (app_role) DO UPDATE SET app_name = excluded.app_name, "
             "destination_topic = excluded.destination_topic, allowed_sources = excluded.allowed_sources, "
-            "allowed_fields = excluded.allowed_fields, service_principal = excluded.service_principal",
-            r=r, n=name, t=a["hub"], s=a["sources"], f=a["fields"], sp=a["application_id"],
+            "allowed_fields = excluded.allowed_fields, service_principal = excluded.service_principal, "
+            "eventhubs_credential = excluded.eventhubs_credential",
+            r=r, n=name, t=a["hub"], s=a["sources"], f=a["fields"], sp=a["application_id"], c=credential(name),
         )  # fmt: skip
 
         views = f"{catalog}.sub_{name.replace('-', '_')}"
@@ -186,7 +193,6 @@ def main():
                 service_principal_name=a["application_id"], permission_level=AppPermissionLevel.CAN_USE)])  # fmt: skip
         print(f"ok       app {name} ({a['application_id']}) -> {a['hub']}; views {views}")
 
-    ns = tf_output("eh_namespace")
     data_api_url = f"https://{host}/api/2.0/workspace/{tf_output('workspace_id')}/rest/{DATABASE}"  # the old bypass
     api_url = api_app.url if api_app else ""
     out = ROOT / "examples/subscribers/java/apps"
@@ -194,10 +200,9 @@ def main():
     for name in apps:
         (out / f"{name}.properties").write_text(
             "# Written by `make registry` (rewritten every run). No secrets: the profile holds the SP's credentials.\n"
+            "# The app needs only these two: it gets its topic and Event Hubs connection from the API.\n"
             f"databricks.profile   = {name}\n"
             f"api.url              = {api_url}\n"
-            f"eventhubs.namespace  = {ns}\n"
-            f"eventhubs.credential = sub_{name.replace('-', '_')}_eventhubs\n"
             "# E2E checks (--e2e): all must be refused to this app.\n"
             f"e2e.forbidden_credential = {catalog}_eventhubs\n"
             f"e2e.forbidden_topic      = {catalog}.{schema}.gold_observations\n"
@@ -212,9 +217,9 @@ def main():
         overrides = ROOT / "examples/subscribers/java/.databricks/bundle/dev/variable-overrides.json"
         overrides.parent.mkdir(parents=True, exist_ok=True)
         overrides.write_text(json.dumps({
-            "app": name, "app_id": a["application_id"], "credential": f"sub_{name.replace('-', '_')}_eventhubs",
-            "api_url": api_url, "eh_namespace": ns, "forbidden_credential": f"{catalog}_eventhubs",
-            "forbidden_topic": f"{catalog}.{schema}.gold_observations", "own_topic": a["hub"],
+            "app": name, "app_id": a["application_id"], "api_url": api_url,
+            "forbidden_credential": f"{catalog}_eventhubs", "forbidden_topic": f"{catalog}.{schema}.gold_observations",
+            "own_topic": a["hub"],
             "base_schema": f"{catalog}.{schema}", "data_api_url": data_api_url,
         }, indent=2))  # fmt: skip
         print(f"wrote    examples/subscribers/java/.databricks/bundle/dev/variable-overrides.json ({name})")

@@ -40,6 +40,7 @@ CATALOG = os.environ.get("HL7_CATALOG", "hl7_rtm_demo")
 ENDPOINT = os.environ.get("HL7_REGISTRY_ENDPOINT", "")
 DATABASE = os.environ.get("HL7_REGISTRY_DATABASE", "databricks_postgres")
 WAREHOUSE = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
+EVENTHUBS_NAMESPACE = os.environ.get("HL7_EVENTHUBS_NAMESPACE", "")  # where every app's hub lives
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # = the registry's CHECK on subscriptions.name
 HUB_STALE_AFTER = 120  # seconds without a hub batch for a source
 MAX_WAIT = 60  # per call; clients poll (a proxy in between may cut long requests)
@@ -52,14 +53,17 @@ examples: docs/integration.md in the repo.
 OAuth token (machine-to-machine, from `https://<workspace>/oidc/v1/token`). The Databricks Apps proxy verifies it and
 tells the API who is calling. The service principal must be an onboarded subscriber app.
 
-**The handshake.**
+**The handshake.** An app needs only its service principal and this API's URL.
+0. `GET /api/v1/connection`: your topic and how to read it (Kafka bootstrap servers, your Unity Catalog credential, and
+   the token scope to request).
 1. `PUT /api/v1/subscriptions` with the app's whole set of `{name, sql}`. Databricks compiles every rule in that call.
    Either all are accepted (each with a `revision` and your `destination` topic), or nothing is applied and each refusal
    carries Databricks' own error.
 2. `GET /api/v1/subscriptions?wait=25`, repeated until `state` is `READY`: the hub is running exactly those revisions.
    `FAILED` and `HUB_STALE` are final answers too. Keep each call short (≤ 25 s): a proxy in between may cut long
    requests.
-3. Read your `destination` topic (Kafka protocol on Azure Event Hubs, OAUTHBEARER with a token from Unity Catalog).
+3. Read your topic (Kafka protocol on Azure Event Hubs, OAUTHBEARER with a token Unity Catalog issues for your
+   credential: `POST /api/2.1/unity-catalog/temporary-service-credentials` on the workspace).
    Deduplicate on `notificationId`, and act only on the `(subscriptionId, revision)` pairs you registered.
 
 A rule is `SELECT <columns> FROM <gold source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The same
@@ -181,6 +185,23 @@ class Health(_Open):
     ok: bool
 
 
+class Connection(_Open):
+    """Everything an app needs to read its notifications, so it configures only its service principal and the API."""
+
+    app: str
+    topic: str = Field(description="Your topic: the Kafka topic your notifications arrive on (same as `destination`)")
+    bootstrapServers: str = Field(description="Kafka bootstrap servers (SASL_SSL, OAUTHBEARER)",
+                                  examples=["hl7rtmaz-ehns.servicebus.windows.net:9093"])  # fmt: skip
+    credential: str = Field(
+        description="Your Unity Catalog service credential. Mint the Kafka token with it, as your service principal: "
+        "POST <workspace>/api/2.1/unity-catalog/temporary-service-credentials "
+        '{"credential_name": credential, "azure_options": {"resources": [tokenScope]}} -> azure_aad.aad_token',
+        examples=["sub_my_app_eventhubs"],
+    )
+    tokenScope: str = Field(description="The resource to request the Kafka token for",
+                            examples=["https://hl7rtmaz-ehns.servicebus.windows.net/.default"])  # fmt: skip
+
+
 class Notification(_Open):
     """The JSON value of each message on your destination topic. Its Kafka key is the patient ID. Not returned by any
     call: published here so clients can generate it with the API's own models."""
@@ -261,14 +282,15 @@ def _caller(email: str | None) -> dict:
         raise Refused(401, {"code": "UNAUTHENTICATED", "message": "no verified caller"})
     conn, opened = pool.get()
     try:
-        rows = conn.run("SELECT app_role, app_name FROM subscription_registry.apps WHERE service_principal = :sp",
-                        sp=email)  # fmt: skip
+        rows = conn.run("SELECT app_role, app_name, destination_topic, eventhubs_credential "
+                        "FROM subscription_registry.apps WHERE service_principal = :sp", sp=email)  # fmt: skip
     finally:
         pool.put(conn, opened)
     if not rows:
         raise Refused(403, {"code": "APP_NOT_ONBOARDED", "message": f"{email} isn't an onboarded subscriber app"})
-    role, name = rows[0]
-    return {"role": role, "name": name, "schema": f"{CATALOG}.sub_{name.replace('-', '_')}"}
+    role, name, topic, credential = rows[0]
+    return {"role": role, "name": name, "schema": f"{CATALOG}.sub_{name.replace('-', '_')}", "topic": topic,
+            "credential": credential}  # fmt: skip
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -364,6 +386,24 @@ def _refusals(checked):
 @app.get("/api/v1/health", operation_id="health", tags=["service"], response_model=Health, summary="Liveness")
 def health():
     return {"ok": True}
+
+
+@app.get(
+    "/api/v1/connection",
+    operation_id="getConnection",
+    tags=["subscriptions"],
+    response_model=Connection,
+    responses=_ERRORS | {503: {"model": Error, "description": "The platform hasn't finished onboarding this app"}},
+    summary="Your topic and how to read it (Kafka bootstrap, Unity Catalog credential, token scope)",
+)
+def connection(x_forwarded_email: str | None = _VERIFIED_CALLER):
+    who = _caller(x_forwarded_email)
+    if not (EVENTHUBS_NAMESPACE and who["credential"] and who["topic"]):
+        raise Refused(503, {"code": "NOT_CONFIGURED", "message": f"{who['name']}'s connection isn't set up yet "
+                            "(the platform runs make registry)"})  # fmt: skip
+    return {"app": who["name"], "topic": who["topic"],
+            "bootstrapServers": f"{EVENTHUBS_NAMESPACE}.servicebus.windows.net:9093", "credential": who["credential"],
+            "tokenScope": f"https://{EVENTHUBS_NAMESPACE}.servicebus.windows.net/.default"}  # fmt: skip
 
 
 @app.post(
