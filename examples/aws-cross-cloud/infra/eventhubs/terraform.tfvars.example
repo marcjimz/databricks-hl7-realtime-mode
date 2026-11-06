@@ -1,8 +1,0 @@
-# Copy to terraform.tfvars (gitignored) and fill in.
-subscription_id = "00000000-0000-0000-0000-000000000000"
-owner           = "you@example.com"
-prefix          = "hl7rtm"
-location        = "eastus" # closest Azure region to the Databricks workspace
-sku             = "Premium"
-processing_units = 1           # Premium capacity
-catalog         = "my_catalog" # hubs are named <catalog>.<schema>.<table>
