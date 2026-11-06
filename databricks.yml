@@ -7,12 +7,11 @@ bundle:
 include:
   - resources/**/*.yml
 
-# Pipelines only need src/; parked examples, Terraform, and the local Java subscriber stay local.
+# Pipelines only need src/; examples (including the Java subscriber) and Terraform stay local.
 sync:
   exclude:
     - examples/**
     - infra/**
-    - src/subscriber/**
 
 artifacts:
   hl7rt:

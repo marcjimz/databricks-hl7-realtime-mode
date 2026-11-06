@@ -114,6 +114,33 @@ def test_the_caller_is_the_verified_identity_only(client):
     assert r.status_code == 403 and r.json()["code"] == "APP_NOT_ONBOARDED"
 
 
+def test_the_connection_is_everything_an_app_needs_to_read_its_own_topic(client, monkeypatch):
+    """An app configures only its service principal and the API: its topic and Kafka connection come from here."""
+    monkeypatch.setattr(api, "EVENTHUBS_NAMESPACE", "ns1")
+    a = client.get("/api/v1/connection", headers=A).json()
+    assert a == {
+        "app": "app-a",
+        "topic": "cat.subscribers.app-a",
+        "bootstrapServers": "ns1.servicebus.windows.net:9093",
+        "credential": "sub_app_a_eventhubs",
+        "tokenScope": "https://ns1.servicebus.windows.net/.default",
+    }
+    b = client.get("/api/v1/connection", headers=B).json()
+    assert (b["topic"], b["credential"]) == ("cat.subscribers.app-b", "sub_app_b_eventhubs"), (
+        "each app gets only its own"
+    )
+    assert declare(client, [("k", POTASSIUM)]).json()["accepted"][0]["destination"] == a["topic"], "= declare's topic"
+    assert client.get("/api/v1/connection").status_code == 401
+    r = client.get("/api/v1/connection", headers={"X-Forwarded-Email": "not-onboarded"})
+    assert r.status_code == 403 and r.json()["code"] == "APP_NOT_ONBOARDED"
+
+
+def test_the_connection_says_so_when_onboarding_is_unfinished(client, monkeypatch):
+    monkeypatch.setattr(api, "EVENTHUBS_NAMESPACE", "")
+    r = client.get("/api/v1/connection", headers=A)
+    assert r.status_code == 503 and r.json()["code"] == "NOT_CONFIGURED"
+
+
 def test_apps_only_see_and_cancel_their_own(client):
     declare(client, [("mine", POTASSIUM)])
     assert "mine" not in [s["name"] for s in client.get("/api/v1/subscriptions", headers=B).json()["subscriptions"]]

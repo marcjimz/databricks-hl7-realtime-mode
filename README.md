@@ -35,21 +35,22 @@ SUBSCRIPTIONS (seconds)
 ## Subscribe from any application
 
 The interface for external apps is the **Subscription API** (OpenAPI: [`docs/api/openapi.json`](docs/api/openapi.json),
-Swagger at `<api>/docs`) plus **the app's own Event Hubs topic**. Any language works. The app authenticates as its own
-Databricks service principal:
+Swagger at `<api>/docs`) plus **the app's own Event Hubs topic**. Any language works. An app configures only two things,
+its own Databricks service principal and the API's URL; the API tells it everything else:
 
 ```
+0. GET  <api>/api/v1/connection           → its topic, Kafka bootstrap servers, Unity Catalog credential, token scope
 1. PUT  <api>/api/v1/subscriptions        {"subscriptions": [{"name": "critical-potassium",
                                             "sql": "SELECT patient_id, value_num FROM gold_observations
                                                     WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"}]}
         → ACCEPTED (revision, destination topic), or Databricks' own error and nothing applied
 2. GET  <api>/api/v1/subscriptions?wait=25  → repeat until READY (the hub runs exactly these revisions, ~5 s)
-3. Read the destination topic with any Kafka client (OAUTHBEARER, token from Unity Catalog);
+3. Read the topic with any Kafka client (OAUTHBEARER, token from Unity Catalog for that credential);
    deduplicate on notificationId
 ```
 
 Change the SQL and declare again: the new filter is live within seconds. The full handshake, notification format, and
-errors: [docs/integration.md](docs/integration.md). The Java app in `src/subscriber` is one reference client, not part
+errors: [docs/integration.md](docs/integration.md). The Java app in `examples/subscribers/java` is one example client, not part
 of the platform.
 
 ## Results
@@ -116,7 +117,8 @@ returns the records the hub delivers.
 - **How it works and its security model:** [docs/subscriptions.md](docs/subscriptions.md).
 - **The story as an interactive deck:** [docs/story.html](docs/story.html).
 
-This walkthrough uses the **Java reference client** (`src/subscriber`) to drive that contract.
+This walkthrough uses the **Java example** (`examples/subscribers/java`, prerequisites in its
+[README](examples/subscribers/java/README.md#prerequisites)) to drive that contract.
 
 ### Before you start
 
@@ -124,7 +126,7 @@ This walkthrough uses the **Java reference client** (`src/subscriber`) to drive 
    at a mirror in `~/.m2/settings.xml`.
 2. **An onboarded app:** a service principal in `subscriber_apps` (`infra/azure/terraform.tfvars`), then `make up`.
    That creates its views, its hub, and its credential, and writes its settings (no secrets) to
-   `src/subscriber/apps/<app>.properties`. One-time setup:
+   `examples/subscribers/java/apps/<app>.properties`. One-time setup:
    [docs/subscriptions.md](docs/subscriptions.md#set-up-bring-your-own-service-principal).
 3. **Its profile:** `[<app>]` in `~/.databrickscfg` with the SP's `client_id` and `client_secret`.
 4. **Everything running:** `make demo dev`, which includes the subscription hub and the Subscription API.
@@ -134,20 +136,21 @@ Run every command below from the repo root.
 ### 0. Check everything end to end
 
 ```
-$ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar --e2e
+$ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e
 …
 | 1 | Sign in | profile sp-hl7-realtime-demo | a service principal | 38fafc55-… | PASS |
-| 6 | Skip the API (the registry's Data API) | list_subscriptions via https://… | not available | refused 503 | PASS |
-| 7 | Column not granted | SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
-| 11 | Subquery | SELECT patient_id FROM gold_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
+| 2 | Connection from the API | GET /api/v1/connection | this app's own topic and credential | hl7_rtm_demo.subscribers.sp-hl7-realtime-demo via sub_sp_hl7_realtime_demo_eventhubs @ hl7rtmaz-ehns.servicebus.windows.net:9093 | PASS |
+| 7 | Skip the API (the registry's Data API) | list_subscriptions via https://… | not available | refused 503 | PASS |
+| 8 | Column not granted | SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
+| 12 | Subquery | SELECT patient_id FROM gold_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
 …
-| 23 | Cancel | DELETE e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
-| 24 | Hub heartbeat | gold_observations | a batch within 2 minutes | 2026-11-05T04:40:05… | PASS |
+| 24 | Cancel | DELETE e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
+| 25 | Hub heartbeat | gold_observations | a batch within 2 minutes | 2026-11-06T01:36:22… | PASS |
 
-24 checks, 0 failed
+25 checks, 0 failed
 ```
 
-The 24 checks cover:
+The 25 checks cover:
 - sign-in, and credential and topic isolation;
 - no way around the API;
 - Databricks' own compile errors, and the shapes the hub won't run;
@@ -159,7 +162,7 @@ it first: if it passes, the steps below will work.
 
 ### 1. Run the app
 
-It declares what `src/subscriber/src/main/java/com/databricks/hl7/subscriber/MySubscriptions.java` holds, waits for the
+It declares what `examples/subscribers/java/src/main/java/com/databricks/hl7/subscriber/MySubscriptions.java` holds, waits for the
 hub to confirm, and prints matches as they arrive:
 
 ```java
@@ -169,7 +172,7 @@ rules.put("critical-potassium", """
 ```
 
 ```
-$ java -jar src/subscriber/target/hl7-subscriber.jar
+$ java -jar examples/subscribers/java/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 1 ACCEPTED
             SELECT patient_id, value_num, units FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5
@@ -207,7 +210,7 @@ rules.put("low-hemoglobin", """
 ```
 
 ```
-$ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar
+$ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 2 ACCEPTED
             SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0
@@ -229,7 +232,7 @@ Delete `low-hemoglobin` from `MySubscriptions` (or `git checkout` the file, whic
 rebuild and run. The code is the source of truth, so the API cancels what it no longer declares:
 
 ```
-$ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar
+$ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 3 ACCEPTED
             SELECT patient_id, value_num, units FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5
@@ -254,7 +257,7 @@ rules.put("with-labs", "SELECT patient_id FROM gold_observations WHERE patient_i
 ```
 
 ```
-$ mvn -q -f src/subscriber package && java -jar src/subscriber/target/hl7-subscriber.jar
+$ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 refused     typo                   UNRESOLVED_COLUMN.WITH_SUGGESTION: [UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `value_numm` cannot be resolved. Did you mean one of the following? [`value_num`, `value`, `units`, `visit_id`, `patient_id`]. …
 refused     by-facility            UNRESOLVED_COLUMN.WITH_SUGGESTION: … with name `msg_sending_facility` cannot be resolved. …
@@ -283,7 +286,7 @@ The app doesn't listen silently to a stopped hub. Stop the hub pipeline:
 Wait two minutes, then run the app. The API waits up to two more minutes for the hub, then the app exits with code 4:
 
 ```
-$ java -jar src/subscriber/target/hl7-subscriber.jar
+$ java -jar examples/subscribers/java/target/hl7-subscriber.jar
 …
 hub         critical-potassium     revision 2 ACTIVE
 hub         low-hemoglobin         revision 1 ACTIVE
@@ -300,7 +303,7 @@ hub's heartbeat change ([details](docs/subscriptions.md#monitoring)).
 
 ### Clean up
 
-- `git checkout src/subscriber/src/main/java/com/databricks/hl7/subscriber/MySubscriptions.java` restores the
+- `git checkout examples/subscribers/java/src/main/java/com/databricks/hl7/subscriber/MySubscriptions.java` restores the
   original rule.
 - `make stop dev` stops the pipelines, the feeds, and the Subscription API.
 
@@ -312,8 +315,8 @@ Permissions). Then:
 
 ```bash
 export DATABRICKS_HOST=$(terraform -chdir=infra/azure output -raw workspace_url) DATABRICKS_AUTH_TYPE=azure-cli
-DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle deploy
-DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle run e2e
+DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle deploy
+DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle run e2e
 ```
 
 ## Configure
@@ -335,11 +338,11 @@ src/hl7rt/       the logic: HL7 parsing, gold, Event Hubs wiring, generators
 src/pipelines/   thin pipeline definitions (including the subscription hub)
 src/registry/    the subscription registry's schema, owner trigger, RLS, and API (Lakebase Postgres)
 src/subscription_api/  the Subscription API (Databricks App): the integration contract; Swagger at <api>/docs
-src/subscriber/  a reference client in Java (any language can integrate: docs/integration.md)
 tests/           unit tests (local Spark)
 docs/            integration guide + api/openapi.json (the contract), latency, subscriptions, scalability plan,
                  Epic JSON notes, story.html (deck), SPIKE docs; diagrams/ (draw.io + slides)
-examples/        not deployed: the earlier SQL-file subscriptions, the earlier AWS cross-cloud setup
+examples/        clients and parked designs: subscribers/java/ (an example subscriber; its API client is generated
+                 from the contract), the earlier SQL-file subscriptions, the earlier AWS cross-cloud setup
 ```
 
 Contributors and coding agents: see [AGENTS.md](AGENTS.md).

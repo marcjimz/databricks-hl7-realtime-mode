@@ -16,6 +16,8 @@ resources:
         env:
           - name: HL7_CATALOG
             value: ${var.catalog}
+          - name: HL7_EVENTHUBS_NAMESPACE
+            value: ${var.eh_namespace}
           - name: HL7_REGISTRY_ENDPOINT
             value: ${var.registry_endpoint}
           - name: HL7_REGISTRY_DATABASE

@@ -25,6 +25,9 @@ CREATE TABLE IF NOT EXISTS subscription_registry.apps (
   allowed_fields    text[] NOT NULL    -- readable and filterable columns (also the columns of its UC views)
 );
 ALTER TABLE subscription_registry.apps ADD COLUMN IF NOT EXISTS service_principal text UNIQUE;  -- application ID
+-- The app's Unity Catalog service credential for its hub (sub_<app>_eventhubs): the Subscription API hands it out in
+-- GET /api/v1/connection, so apps don't configure it.
+ALTER TABLE subscription_registry.apps ADD COLUMN IF NOT EXISTS eventhubs_credential text;
 
 CREATE SEQUENCE IF NOT EXISTS subscription_registry.generation;
 

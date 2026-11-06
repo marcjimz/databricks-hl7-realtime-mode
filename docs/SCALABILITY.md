@@ -4,7 +4,7 @@ This plan is for showing that runtime subscriptions hold up with many apps, many
 and that apps stay isolated from each other while that happens.
 
 Today's evidence:
-- one live app, with 24/24 end-to-end checks through the Subscription API;
+- one live app, with 25/25 end-to-end checks through the Subscription API;
 - registry and API tests against a real PostgreSQL;
 - a first hub measurement at 1, 100, and 1,000 rules (below). It shows the hub's batch time growing with the rule
   count.
@@ -175,7 +175,7 @@ sets must be equal: no missing match, no extra one, nothing for a cancelled or s
 | E6 | Database token expiry (hourly) during a long run | hub reconnects; no gap in heartbeat > 2 min |
 | E7 | App crash between poll and commit | replays its uncommitted records; app dedupes |
 | E8 | Event Hubs throttling (exceed PU) | hub backs off; the heartbeat keeps advancing; app warns if not |
-| E9 | Rebuild (`make up` after a wipe) | E2E 24/24 PASS on the new environment |
+| E9 | Rebuild (`make up` after a wipe) | E2E 25/25 PASS on the new environment |
 
 ## How elastic scaling works, per component
 

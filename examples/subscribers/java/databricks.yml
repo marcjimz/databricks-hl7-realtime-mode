@@ -1,0 +1,67 @@
+# The subscriber app as a workspace job: the same jar runs its end-to-end checks (--e2e) on serverless, as the app's
+# own service principal, so no secret is involved. Its own bundle, separate from the platform's: it belongs to the app,
+# and binding a job's run_as to an SP needs the deployer to hold "Service Principal: User" on that SP.
+#
+#   DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle deploy      (from the repo root; then: bundle run e2e)
+#
+# Variables come from .databricks/bundle/dev/variable-overrides.json, which `make registry` writes (gitignored).
+
+bundle:
+  name: hl7_subscriber
+
+artifacts:
+  app:
+    type: jar
+    build: mvn -q package -DskipTests
+    path: .
+    files:
+      - source: target/hl7-subscriber.jar
+
+variables:
+  app:
+    description: The app's name (its key in terraform subscriber_apps).
+  app_id:
+    description: The app's service principal (application ID); the job runs as it.
+  api_url:
+    description: The Subscription API's URL.
+  forbidden_credential:
+    description: A credential the app must not use (the hub's).
+  forbidden_topic:
+    description: A topic the app must not read (a gold topic).
+  own_topic:
+    description: The app's own hub, which it must not write to.
+  base_schema:
+    description: The platform's gold schema; rules must use the app's own views instead.
+  data_api_url:
+    description: The Lakebase Data API URL apps used before the Subscription API; it must be gone.
+
+resources:
+  jobs:
+    e2e:
+      name: ${var.app}-e2e
+      run_as:
+        service_principal_name: ${var.app_id}
+      tasks:
+        - task_key: e2e
+          environment_key: java
+          spark_jar_task:
+            main_class_name: com.databricks.hl7.subscriber.App
+            parameters:
+              - --e2e
+              - api.url=${var.api_url}
+              - consumer.group=${var.app}
+              - e2e.forbidden_credential=${var.forbidden_credential}
+              - e2e.forbidden_topic=${var.forbidden_topic}
+              - e2e.own_topic=${var.own_topic}
+              - e2e.base_schema=${var.base_schema}
+              - e2e.data_api_url=${var.data_api_url}
+      environments:
+        - environment_key: java
+          spec:
+            environment_version: "4"  # serverless JAR tasks need 4+
+            java_dependencies:
+              - ./target/hl7-subscriber.jar
+
+targets:
+  dev:
+    default: true
