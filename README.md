@@ -281,7 +281,7 @@ The app doesn't listen silently to a stopped hub. Stop the hub pipeline:
 ```bash
 (export DATABRICKS_HOST=$(terraform -chdir=infra/azure output -raw workspace_url) DATABRICKS_AUTH_TYPE=azure-cli
  databricks pipelines stop $(databricks pipelines list-pipelines --filter "name LIKE 'hl7rt-dev-subscription-hub'" \
-   -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["pipeline_id"])'))
+   -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["pipeline_id"])') >/dev/null)
 ```
 
 Wait two minutes, then run the app. The API waits up to two more minutes for the hub, then the app exits with code 4:
@@ -290,10 +290,14 @@ Wait two minutes, then run the app. The API waits up to two more minutes for the
 $ java -jar examples/subscribers/java/target/hl7-subscriber.jar
 …
 hub         critical-potassium     revision 3 ACTIVE
-ERROR       HUB_STALE: ["the hub hasn't processed gold_observations for 120 s"] (is the subscription_hub pipeline running? make demo dev)
+ERROR       HUB_STALE: [the hub hasn't processed gold_observations for 120 s] (is the subscription_hub pipeline running? make demo dev)
 ```
 
-Start the hub again with `make demo dev`. It resumes from its checkpoint, so no gold record is skipped.
+An app that's already listening when the hub stops keeps running and prints `WARNING … the hub hasn't processed …`
+every 30 s until the hub is back.
+
+Start the hub again with `make demo dev`. It resumes from its checkpoint, so no gold record is skipped: the next run
+of the app catches up on the matches from the stopped period first.
 
 ### Watch it on the dashboard
 
