@@ -215,8 +215,9 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   no `additionalProperties`, so generated clients stay plain classes and ignore unknown fields. The proxy-set identity
   header isn't a client parameter. docs/integration.md is the language-neutral guide: handshake, Event Hubs
   token, Kafka settings, notification envelope, and errors. Keep it in step with the API.
-- **An app configures only its service principal and `api.url`.** `GET /api/v1/connection` returns the rest: its topic,
-  the Kafka bootstrap servers (from the App's `HL7_EVENTHUBS_NAMESPACE`), its UC credential (`apps.eventhubs_credential`,
+- **An app configures only its service principal and `api.app`** (the API's App name; it looks up the URL with
+  `apps.get`, which CAN_USE allows, so a rebuilt workspace needs no change). `GET /api/v1/connection` returns the
+  rest: its topic, the Kafka bootstrap servers (from the App's `HL7_EVENTHUBS_NAMESPACE`), its UC credential (`apps.eventhubs_credential`,
   written by `make registry`), and the token scope. Don't add client settings the API can answer.
 - **The Java client is deliberately small and contract-driven**, with packages by role so a reader starts at the top:
   - `App` (entry point) and `MySubscriptions` (name → SQL, the file developers edit) at the root;

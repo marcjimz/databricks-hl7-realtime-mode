@@ -16,6 +16,7 @@ import com.databricks.hl7.subscriber.notifications.Listener;
 import com.databricks.hl7.subscriber.platform.EventHubs;
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.core.DatabricksConfig;
+import com.databricks.sdk.core.DatabricksError;
 import com.databricks.sdk.service.iam.MeRequest;
 import java.io.IOException;
 import java.io.InputStream;
@@ -42,8 +43,9 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
  *   java -jar hl7-subscriber.jar [file.properties] [key=value ...] [--duration=PT5M] [--e2e]
  * </pre>
  *
- * Settings: only databricks.profile (the service principal) and api.url. Its topic, Kafka bootstrap servers, and Unity
- * Catalog credential come from the API (getConnection). They're read from the file (default subscriber.properties,
+ * Settings: only databricks.profile (the service principal) and api.app (the Subscription API's Databricks App name;
+ * its URL is looked up, so a rebuilt workspace needs no change; api.url overrides it). Its topic, Kafka bootstrap
+ * servers, and Unity Catalog credential come from the API (getConnection). They're read from the file (default subscriber.properties,
  * else the one file in apps/, which `make registry` writes; looked up in the current directory, then next to the jar)
  * plus key=value arguments. --e2e runs the end-to-end checks instead.
  */
@@ -56,7 +58,7 @@ public final class App {
         List<String> argv = List.of(args);
         Properties cfg = settings(argv);
         WorkspaceClient workspace = signIn(cfg);
-        SubscriptionsApi api = Api.connect(required(cfg, "api.url"), () -> bearer(workspace));
+        SubscriptionsApi api = Api.connect(apiUrl(workspace, cfg), () -> bearer(workspace));
 
         // 0. Where this app's notifications arrive and how to read them: the API knows, so the app configures neither.
         Connection connection;
@@ -222,6 +224,21 @@ public final class App {
             }
         }
         return null;
+    }
+
+    /** The Subscription API's URL: api.url if set, else the URL of the Databricks App named api.app (CAN_USE can read it). */
+    static String apiUrl(WorkspaceClient workspace, Properties cfg) {
+        String url = cfg.getProperty("api.url", "").trim();
+        if (!url.isEmpty()) return url;
+        String name = required(cfg, "api.app");
+        try {
+            url = workspace.apps().get(name).getUrl();
+        } catch (DatabricksError e) {
+            exit(6, "can't find the Subscription API app " + name + ": " + firstLine(e.getMessage())
+                    + " (make registry grants CAN_USE)");
+        }
+        if (url == null || url.isBlank()) exit(4, "the Subscription API app " + name + " has no URL yet (not deployed?)");
+        return url;
     }
 
     public static String required(Properties p, String key) {

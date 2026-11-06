@@ -17,7 +17,7 @@ The app configures **two things**:
 | # | What | Setting | Where it comes from |
 |---|---|---|---|
 | 1 | **A Databricks service principal** (the app's identity): host, client ID, OAuth secret | Profile `[<app>]` in `~/.databrickscfg` (`databricks.profile`, default: the app's name) | The app's team creates it. The secret stays in the profile, never in a settings file. |
-| 2 | **The Subscription API's URL** | `api.url` | `make registry` |
+| 2 | **The Subscription API's app name** (the app looks up its URL, so a rebuilt workspace needs no change) | `api.app` (or `api.url` to set the URL directly) | `make registry` |
 
 **Everything else comes from the API** (`getConnection`, at start-up):
 
@@ -33,7 +33,7 @@ sources and columns it may read), then `make up`. To build it you need Java 17+ 
 Maven Central, point Maven at a mirror in `~/.m2/settings.xml`.
 
 `make registry` writes both settings to `apps/<app>.properties`. That file is gitignored, holds no secrets, and is
-rewritten on every run, because URLs change when the workspace is rebuilt. Any setting can also be passed as
+rewritten on every run (the `e2e.*` URLs change when the workspace is rebuilt). Any setting can also be passed as
 `key=value`. `consumer.group` is optional and defaults to the profile name. The `e2e.*` lines are only for `--e2e`.
 
 ## Run
