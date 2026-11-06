@@ -5,12 +5,11 @@
 # The app's service principal profile in ~/.databrickscfg (host, client_id, client_secret).
 databricks.profile = sp-my-app
 
-# The Subscription API (a Databricks App): the one way to register subscriptions.
-api.url = https://hl7-subscriptions-dev-<workspace-id>.<n>.azure.databricksapps.com
+# The Subscription API (a Databricks App): the one way to register subscriptions. The app looks up its URL by name;
+# set api.url instead to point at it directly.
+api.app = hl7-subscriptions-dev
 
-# Event Hubs: the namespace and this app's own UC service credential (Data Receiver on its hub only).
-eventhubs.namespace  = <namespace>
-eventhubs.credential = sub_my_app_eventhubs
+# Everything else (this app's topic, Kafka bootstrap servers, UC credential) comes from GET /api/v1/connection.
 
 # Optional: consumer group (defaults to the profile name).
 # consumer.group = my-app

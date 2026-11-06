@@ -194,15 +194,15 @@ def main():
         print(f"ok       app {name} ({a['application_id']}) -> {a['hub']}; views {views}")
 
     data_api_url = f"https://{host}/api/2.0/workspace/{tf_output('workspace_id')}/rest/{DATABASE}"  # the old bypass
-    api_url = api_app.url if api_app else ""
     out = ROOT / "examples/subscribers/java/apps"
     out.mkdir(exist_ok=True)
     for name in apps:
         (out / f"{name}.properties").write_text(
             "# Written by `make registry` (rewritten every run). No secrets: the profile holds the SP's credentials.\n"
-            "# The app needs only these two: it gets its topic and Event Hubs connection from the API.\n"
+            "# The app needs only these two: it looks up the API's URL by app name, then gets its topic and\n"
+            "# Event Hubs connection from the API.\n"
             f"databricks.profile   = {name}\n"
-            f"api.url              = {api_url}\n"
+            f"api.app              = {API_APP}\n"
             "# E2E checks (--e2e): all must be refused to this app.\n"
             f"e2e.forbidden_credential = {catalog}_eventhubs\n"
             f"e2e.forbidden_topic      = {catalog}.{schema}.gold_observations\n"
@@ -217,7 +217,7 @@ def main():
         overrides = ROOT / "examples/subscribers/java/.databricks/bundle/dev/variable-overrides.json"
         overrides.parent.mkdir(parents=True, exist_ok=True)
         overrides.write_text(json.dumps({
-            "app": name, "app_id": a["application_id"], "api_url": api_url,
+            "app": name, "app_id": a["application_id"], "api_app": API_APP,
             "forbidden_credential": f"{catalog}_eventhubs", "forbidden_topic": f"{catalog}.{schema}.gold_observations",
             "own_topic": a["hub"],
             "base_schema": f"{catalog}.{schema}", "data_api_url": data_api_url,

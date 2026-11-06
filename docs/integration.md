@@ -12,7 +12,8 @@ equal), with Swagger UI at `<api>/docs`. Generate a client from it in any langua
 Two things to configure:
 1. **A Databricks service principal** (workspace URL, client ID, OAuth secret). It's the app's identity, and the
    secret is the app's own.
-2. **The Subscription API's URL.**
+2. **The Subscription API's app name** (a Databricks App, e.g. `hl7-subscriptions-dev`). Its URL changes when the
+   workspace is rebuilt, so look it up: `GET $WS/api/2.0/apps/<name>` returns `url` to any caller with CAN_USE on it.
 
 Everything else comes from the API (`GET /api/v1/connection`): the app's topic, the Kafka bootstrap servers, and its
 Unity Catalog credential for Event Hubs. Before that works, the platform team onboards the app: the sources and columns
@@ -21,12 +22,13 @@ to the bootstrap servers (port 9093).
 
 ## The handshake
 
-`$WS` is the workspace URL and `$API` is `api.url`.
+`$WS` is the workspace URL.
 
 ```bash
-# 1. The service principal's token (OAuth M2M; any Databricks SDK can do this)
+# 1. The service principal's token (OAuth M2M; any Databricks SDK can do this), and the API's URL
 TOKEN=$(curl -s -u "$CLIENT_ID:$CLIENT_SECRET" "$WS/oidc/v1/token" \
   -d grant_type=client_credentials -d scope=all-apis | jq -r .access_token)
+API=$(curl -s "$WS/api/2.0/apps/hl7-subscriptions-dev" -H "Authorization: Bearer $TOKEN" | jq -r .url)
 
 # 2. Where to read, and with which credential (once; it doesn't change while the app is onboarded)
 curl -s "$API/api/v1/connection" -H "Authorization: Bearer $TOKEN"

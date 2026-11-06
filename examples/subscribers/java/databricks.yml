@@ -22,8 +22,8 @@ variables:
     description: The app's name (its key in terraform subscriber_apps).
   app_id:
     description: The app's service principal (application ID); the job runs as it.
-  api_url:
-    description: The Subscription API's URL.
+  api_app:
+    description: The Subscription API's Databricks App name (the app looks up its URL).
   forbidden_credential:
     description: A credential the app must not use (the hub's).
   forbidden_topic:
@@ -48,7 +48,7 @@ resources:
             main_class_name: com.databricks.hl7.subscriber.App
             parameters:
               - --e2e
-              - api.url=${var.api_url}
+              - api.app=${var.api_app}
               - consumer.group=${var.app}
               - e2e.forbidden_credential=${var.forbidden_credential}
               - e2e.forbidden_topic=${var.forbidden_topic}

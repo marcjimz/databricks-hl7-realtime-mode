@@ -46,6 +46,14 @@ class AppTest {
     }
 
     @Test
+    void theApiIsFoundByAppNameUnlessItsUrlIsSet() {
+        var p = new java.util.Properties();
+        p.setProperty("api.url", " https://api ");
+        assertEquals("https://api", App.apiUrl(null, p), "api.url wins: no lookup");
+        assertThrows(IllegalArgumentException.class, () -> App.apiUrl(null, new java.util.Properties()), "needs api.app");
+    }
+
+    @Test
     void onlyAServicePrincipalMayRunTheApp() {
         assertTrue(App.isServicePrincipal("38fafc55-d28b-4f48-8d17-299f8d2698ee"));
         assertFalse(App.isServicePrincipal("someone@example.com"));
