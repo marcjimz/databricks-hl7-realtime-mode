@@ -36,7 +36,8 @@ SUBSCRIPTIONS (seconds)
 
 The interface for external apps is the **Subscription API** (OpenAPI: [`docs/api/openapi.json`](docs/api/openapi.json),
 Swagger at `<api>/docs`) plus **the app's own Event Hubs topic**. Any language works. An app configures only two things,
-its own Databricks service principal and the API's URL; the API tells it everything else:
+its own Databricks service principal and the API's Databricks App name (it looks up the URL, so a rebuilt workspace
+needs no change); the API tells it everything else:
 
 ```
 0. GET  <api>/api/v1/connection           → its topic, Kafka bootstrap servers, Unity Catalog credential, token scope
@@ -125,8 +126,8 @@ This walkthrough uses the **Java example** (`examples/subscribers/java`, prerequ
 1. **Tools:** Java 17+ and Maven 3.9+ (`java -version`, `mvn -v`). If your network blocks Maven Central, point Maven
    at a mirror in `~/.m2/settings.xml`.
 2. **An onboarded app:** a service principal in `subscriber_apps` (`infra/azure/terraform.tfvars`), then `make up`.
-   That creates its views, its hub, and its credential, and writes its settings (no secrets) to
-   `examples/subscribers/java/apps/<app>.properties`. One-time setup:
+   That creates its views, its hub, and its credential, and writes its two settings (its profile and `api.app`; no
+   secrets) to `examples/subscribers/java/apps/<app>.properties`. One-time setup:
    [docs/subscriptions.md](docs/subscriptions.md#set-up-bring-your-own-service-principal).
 3. **Its profile:** `[<app>]` in `~/.databrickscfg` with the SP's `client_id` and `client_secret`.
 4. **Everything running:** `make demo dev`, which includes the subscription hub and the Subscription API.
@@ -288,8 +289,7 @@ Wait two minutes, then run the app. The API waits up to two more minutes for the
 ```
 $ java -jar examples/subscribers/java/target/hl7-subscriber.jar
 …
-hub         critical-potassium     revision 2 ACTIVE
-hub         low-hemoglobin         revision 1 ACTIVE
+hub         critical-potassium     revision 3 ACTIVE
 ERROR       HUB_STALE: ["the hub hasn't processed gold_observations for 120 s"] (is the subscription_hub pipeline running? make demo dev)
 ```
 

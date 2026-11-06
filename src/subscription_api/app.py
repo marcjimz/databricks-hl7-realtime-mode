@@ -53,7 +53,8 @@ examples: docs/integration.md in the repo.
 OAuth token (machine-to-machine, from `https://<workspace>/oidc/v1/token`). The Databricks Apps proxy verifies it and
 tells the API who is calling. The service principal must be an onboarded subscriber app.
 
-**The handshake.** An app needs only its service principal and this API's URL.
+**The handshake.** An app needs only its service principal and this API's Databricks App name (its URL is
+`GET https://<workspace>/api/2.0/apps/<name>` → `url`, which your CAN_USE grant allows).
 0. `GET /api/v1/connection`: your topic and how to read it (Kafka bootstrap servers, your Unity Catalog credential, and
    the token scope to request).
 1. `PUT /api/v1/subscriptions` with the app's whole set of `{name, sql}`. Databricks compiles every rule in that call.
