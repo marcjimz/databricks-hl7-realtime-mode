@@ -1,12 +1,18 @@
 package com.databricks.hl7.subscriber.e2e;
 
 import com.databricks.hl7.subscriber.App;
-import com.databricks.hl7.subscriber.api.SubscriptionApi;
-import com.databricks.hl7.subscriber.notifications.Notification;
+import com.databricks.hl7.subscriber.api.Api;
+import com.databricks.hl7.subscriber.api.SubscriptionsApi;
+import com.databricks.hl7.subscriber.api.client.ApiException;
+import com.databricks.hl7.subscriber.api.model.Accepted;
+import com.databricks.hl7.subscriber.api.model.Notification;
+import com.databricks.hl7.subscriber.api.model.One;
+import com.databricks.hl7.subscriber.api.model.Refusal;
+import com.databricks.hl7.subscriber.api.model.Subscription;
+import com.databricks.hl7.subscriber.notifications.Listener;
 import com.databricks.hl7.subscriber.platform.EventHubs;
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.iam.MeRequest;
-import com.fasterxml.jackson.databind.JsonNode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -28,8 +34,8 @@ import org.apache.kafka.common.errors.AuthorizationException;
  * check has an input, an expected result, and the actual result; the run prints them as a table and exits 1 if any fails.
  *
  * <pre>
- *   java -jar src/subscriber/target/hl7-subscriber.jar --e2e                  (local, with the SP's profile)
- *   DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle run e2e   (workspace job, run as the SP)
+ *   java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e                  (local, with the SP's profile)
+ *   DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle run e2e   (workspace job, run as the SP)
  * </pre>
  *
  * It only uses subscriptions named e2e-* (one at a time, cancelled at the end) and its own consumer group, so it leaves
@@ -47,23 +53,29 @@ public final class E2E {
 
     private final List<Check> checks = new ArrayList<>();
     private final WorkspaceClient workspace;
-    private final SubscriptionApi api;
+    private final SubscriptionsApi api;
     private final Properties cfg;
 
-    private E2E(WorkspaceClient workspace, SubscriptionApi api, Properties cfg) {
+    private E2E(WorkspaceClient workspace, SubscriptionsApi api, Properties cfg) {
         this.workspace = workspace;
         this.api = api;
         this.cfg = cfg;
     }
 
-    public static int run(WorkspaceClient workspace, SubscriptionApi api, Properties cfg) {
+    public static int run(WorkspaceClient workspace, SubscriptionsApi api, Properties cfg) {
         var e2e = new E2E(workspace, api, cfg);
         try {
             e2e.all();
         } catch (Exception e) {
             e2e.record("run", "-", "completes", "aborted: " + e, false);
         } finally {
-            for (String name : List.of("e2e-potassium", "e2e-ok")) api.cancel(name);
+            for (String name : List.of("e2e-potassium", "e2e-ok")) {
+                try {
+                    api.cancel(name);
+                } catch (ApiException alreadyGone) {
+                    // 404: nothing to clean up
+                }
+            }
         }
         e2e.print();
         return e2e.checks.stream().allMatch(Check::pass) ? 0 : 1;
@@ -136,75 +148,85 @@ public final class E2E {
         var mixed = new LinkedHashMap<String, String>();
         mixed.put("e2e-ok", GOOD);
         mixed.put("e2e-bad", "SELECT patient_id FROM gold_observations WHERE value_numm > 6");
-        var atomic = api.declare(mixed);
+        int atomic;
+        try {
+            api.declare(Api.declared(mixed));
+            atomic = 200;
+        } catch (ApiException e) {
+            atomic = e.getCode();
+        }
         record("One refusal applies nothing", "declare e2e-ok (valid) + e2e-bad", "422, e2e-ok not registered",
-                atomic.status() + ", e2e-ok " + (registered("e2e-ok") ? "registered" : "not registered"),
-                atomic.status() == 422 && !registered("e2e-ok"));
-        var dry = api.validate(Map.of("e2e-ok", GOOD));
+                atomic + ", e2e-ok " + (registered("e2e-ok") ? "registered" : "not registered"),
+                atomic == 422 && !registered("e2e-ok"));
+        boolean valid = Boolean.TRUE.equals(api.validate(Api.declared(Map.of("e2e-ok", GOOD))).getValid());
         record("Validate applies nothing", "validate e2e-ok", "valid, not registered",
-                (dry.body().path("valid").asBoolean() ? "valid" : "invalid") + ", " + (registered("e2e-ok") ? "registered" : "not registered"),
-                dry.body().path("valid").asBoolean() && !registered("e2e-ok"));
+                (valid ? "valid" : "invalid") + ", " + (registered("e2e-ok") ? "registered" : "not registered"),
+                valid && !registered("e2e-ok"));
 
         // Register, receive, change, receive the change, cancel.
         String group = cfg.getProperty("databricks.profile", "subscriber") + "-e2e-" + UUID.randomUUID();
         try (var consumer = new KafkaConsumer<String, String>(EventHubs.consumer(ns, group))) {
-            var r1 = api.put("e2e-potassium", GOOD).body();
-            record("Register", GOOD, "ACCEPTED, canonical SQL", r1.path("state").asText() + " revision "
-                    + r1.path("revision").asInt() + ": " + r1.path("query").asText(), "ACCEPTED".equals(r1.path("state").asText()));
-            record("Hub runs it", "e2e-potassium revision " + r1.path("revision").asInt(), "ACTIVE", awaitState(r1, "ACTIVE"),
-                    s -> s.equals("ACTIVE"));
-            consumer.subscribe(List.of(r1.path("destination").asText()));
+            Accepted r1 = api.putSubscription("e2e-potassium", new One().sql(GOOD));
+            record("Register", GOOD, "ACCEPTED, canonical SQL", r1.getState() + " revision " + r1.getRevision() + ": "
+                    + r1.getQuery(), r1.getState() == Accepted.StateEnum.ACCEPTED);
+            record("Hub runs it", "e2e-potassium revision " + r1.getRevision(), "ACTIVE",
+                    awaitState(r1.getSubscriptionId(), r1.getRevision(), "ACTIVE"), s -> s.equals("ACTIVE"));
+            consumer.subscribe(List.of(r1.getDestination()));
             var n1 = awaitNotification(consumer, r1);
-            record("Notification on this app's hub", r1.path("destination").asText(),
+            record("Notification on this app's hub", r1.getDestination(),
                     "payload {patient_id, value_num}, value_num >= 6.5", describe(n1),
-                    n1 != null && keys(n1).equals(Set.of("patient_id", "value_num")) && n1.payload().get("value_num").asDouble() >= 6.5);
+                    n1 != null && keys(n1).equals(Set.of("patient_id", "value_num")) && number(n1, "value_num") >= 6.5);
 
-            var again = api.put("e2e-potassium", GOOD).body();
-            record("Same SQL again", GOOD, "same revision, unchanged", "revision " + again.path("revision").asInt()
-                    + (again.path("unchanged").asBoolean() ? ", unchanged" : ", changed"),
-                    again.path("revision").asInt() == r1.path("revision").asInt() && again.path("unchanged").asBoolean());
+            Accepted again = api.putSubscription("e2e-potassium", new One().sql(GOOD));
+            record("Same SQL again", GOOD, "same revision, unchanged", "revision " + again.getRevision()
+                    + (Boolean.TRUE.equals(again.getUnchanged()) ? ", unchanged" : ", changed"),
+                    again.getRevision().equals(r1.getRevision()) && Boolean.TRUE.equals(again.getUnchanged()));
 
-            var r2 = api.put("e2e-potassium", CHANGED).body();
-            record("Change the rule", CHANGED, "next revision, then ACTIVE", "revision " + r2.path("revision").asInt()
-                    + ", then " + awaitState(r2, "ACTIVE"), r2.path("revision").asInt() == r1.path("revision").asInt() + 1);
+            Accepted r2 = api.putSubscription("e2e-potassium", new One().sql(CHANGED));
+            record("Change the rule", CHANGED, "next revision, then ACTIVE", "revision " + r2.getRevision()
+                    + ", then " + awaitState(r2.getSubscriptionId(), r2.getRevision(), "ACTIVE"),
+                    r2.getRevision() == r1.getRevision() + 1);
             var n2 = awaitNotification(consumer, r2);
-            record("Notification reflects the change", r2.path("destination").asText(),
-                    "revision " + r2.path("revision").asInt() + ", payload {patient_id, value_num, units}, value_num >= 7.0",
+            record("Notification reflects the change", r2.getDestination(),
+                    "revision " + r2.getRevision() + ", payload {patient_id, value_num, units}, value_num >= 7.0",
                     describe(n2), n2 != null && keys(n2).equals(Set.of("patient_id", "value_num", "units"))
-                            && n2.payload().get("value_num").asDouble() >= 7.0);
+                            && number(n2, "value_num") >= 7.0);
 
-            var cancel = api.cancel("e2e-potassium").body();
-            record("Cancel", "DELETE e2e-potassium", "CANCELLED by the hub", awaitState(cancel, "CANCELLED"),
-                    s -> s.equals("CANCELLED"));
+            var cancel = api.cancel("e2e-potassium");
+            record("Cancel", "DELETE e2e-potassium", "CANCELLED by the hub",
+                    awaitState(cancel.getSubscriptionId(), cancel.getRevision(), "CANCELLED"), s -> s.equals("CANCELLED"));
         }
-        JsonNode hub = api.status(0).body().path("hub");
-        record("Hub heartbeat", "gold_observations", "a batch within 2 minutes", hub.path("gold_observations").asText("never"),
+        Map<String, String> hub = api.getStatus(0).getHub();
+        record("Hub heartbeat", "gold_observations", "a batch within 2 minutes", hub.getOrDefault("gold_observations", "never"),
                 s -> !s.equals("never") && Instant.parse(s.replace("+00:00", "Z")).isAfter(Instant.now().minusSeconds(120)));
     }
 
     private void refused(String name, String sql, String code) {
-        var r = api.put("e2e-refused", sql);
-        JsonNode first = r.body().path("refused").path(0);
-        String actual = r.ok() ? "ACCEPTED" : first.path("code").asText() + ": " + App.firstLine(first.path("message").asText());
+        String actual;
+        try {
+            api.putSubscription("e2e-refused", new One().sql(sql));
+            actual = "ACCEPTED";
+        } catch (ApiException e) {
+            List<Refusal> refusals = Api.refusals(e);
+            Refusal first = refusals.isEmpty() ? Api.problem(e) : refusals.get(0);
+            actual = first.getCode() + ": " + App.firstLine(first.getMessage());
+        }
         record(name, sql, code, actual, actual.startsWith(code));
     }
 
-    private boolean registered(String name) {
-        for (JsonNode s : api.status(0).body().path("subscriptions")) {
-            if (s.path("name").asText().equals(name) && s.path("enabled").asBoolean()) return true;
+    private boolean registered(String name) throws ApiException {
+        for (Subscription s : api.getStatus(0).getSubscriptions()) {
+            if (s.getName().equals(name) && Boolean.TRUE.equals(s.getEnabled())) return true;
         }
         return false;
     }
 
-    private String awaitState(JsonNode receipt, String wanted) throws InterruptedException {
+    private String awaitState(String subscriptionId, int revision, String wanted) throws Exception {
         Instant deadline = Instant.now().plus(WAIT);
         String last = "PENDING";
         while (Instant.now().isBefore(deadline)) {
-            for (JsonNode s : api.status(0).body().path("subscriptions")) {
-                if (s.path("subscriptionId").asText().equals(receipt.path("subscriptionId").asText())
-                        && s.path("revision").asInt() == receipt.path("revision").asInt()) {
-                    last = s.path("state").asText();
-                }
+            for (Subscription s : api.getStatus(0).getSubscriptions()) {
+                if (s.getSubscriptionId().equals(subscriptionId) && s.getRevision() == revision) last = s.getState();
             }
             if (last.equals(wanted) || last.equals("FAILED")) return last;
             Thread.sleep(1000);
@@ -212,13 +234,13 @@ public final class E2E {
         return last + " after " + WAIT.toMinutes() + " min";
     }
 
-    private static Notification awaitNotification(KafkaConsumer<String, String> consumer, JsonNode receipt) {
+    private static Notification awaitNotification(KafkaConsumer<String, String> consumer, Accepted receipt) {
         Instant deadline = Instant.now().plus(WAIT);
-        var current = Map.of(receipt.path("subscriptionId").asText(), receipt.path("revision").asInt());
+        var current = Map.of(receipt.getSubscriptionId(), receipt.getRevision());
         while (Instant.now().isBefore(deadline)) {
             for (var rec : consumer.poll(Duration.ofSeconds(1))) {
-                Notification n = Notification.parse(rec.value());
-                if (n.isCurrent(current)) return n;
+                Notification n = Listener.parse(rec.value());
+                if (Listener.isCurrent(n, current)) return n;
             }
         }
         return null;
@@ -286,13 +308,15 @@ public final class E2E {
     }
 
     private static Set<String> keys(Notification n) {
-        Set<String> k = new TreeSet<>();
-        n.payload().fieldNames().forEachRemaining(k::add);
-        return k;
+        return new TreeSet<>(n.getPayload().keySet());
+    }
+
+    private static double number(Notification n, String field) {
+        return n.getPayload().get(field) instanceof Number v ? v.doubleValue() : Double.NaN;
     }
 
     private static String describe(Notification n) {
-        return n == null ? "none within " + WAIT.toMinutes() + " min" : "revision " + n.revision() + " " + n.payload();
+        return n == null ? "none within " + WAIT.toMinutes() + " min" : "revision " + n.getRevision() + " " + Listener.payloadJson(n);
     }
 
     private void print() {

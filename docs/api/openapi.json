@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HL7 Subscription API",
-    "description": "\nThe contract any application uses to receive gold HL7 records it chooses with Databricks SQL. The full guide, with\nexamples: docs/integration.md in the repo.\n\n**Authentication.** Call with `Authorization: Bearer <token>`. The token is your app's Databricks service principal's\nOAuth token (machine-to-machine, from `https://<workspace>/oidc/v1/token`). The Databricks Apps proxy verifies it and\ntells the API who is calling. The service principal must be an onboarded subscriber app.\n\n**The handshake.**\n1. `PUT /api/v1/subscriptions` with the app's whole set of `{name, sql}`. Databricks compiles every rule in that call.\n   Either all are accepted (each with a `revision` and your `destination` topic), or nothing is applied and each refusal\n   carries Databricks' own error.\n2. `GET /api/v1/subscriptions?wait=25`, repeated until `state` is `READY`: the hub is running exactly those revisions.\n   `FAILED` and `HUB_STALE` are final answers too. Keep each call short (\u2264 25 s): a proxy in between may cut long\n   requests.\n3. Read your `destination` topic (Kafka protocol on Azure Event Hubs, OAUTHBEARER with a token from Unity Catalog).\n   Deduplicate on `notificationId`, and act only on the `(subscriptionId, revision)` pairs you registered.\n\nA rule is `SELECT <columns> FROM <gold source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The same\nSQL against your views in the SQL editor returns the records you'll receive.\n",
+    "description": "\nThe contract any application uses to receive gold HL7 records it chooses with Databricks SQL. The full guide, with\nexamples: docs/integration.md in the repo.\n\n**Authentication.** Call with `Authorization: Bearer <token>`. The token is your app's Databricks service principal's\nOAuth token (machine-to-machine, from `https://<workspace>/oidc/v1/token`). The Databricks Apps proxy verifies it and\ntells the API who is calling. The service principal must be an onboarded subscriber app.\n\n**The handshake.**\n1. `PUT /api/v1/subscriptions` with the app's whole set of `{name, sql}`. Databricks compiles every rule in that call.\n   Either all are accepted (each with a `revision` and your `destination` topic), or nothing is applied and each refusal\n   carries Databricks' own error.\n2. `GET /api/v1/subscriptions?wait=25`, repeated until `state` is `READY`: the hub is running exactly those revisions.\n   `FAILED` and `HUB_STALE` are final answers too. Keep each call short (\u2264 25 s): a proxy in between may cut long\n   requests.\n3. Read your `destination` topic (Kafka protocol on Azure Event Hubs, OAUTHBEARER with a token from Unity Catalog).\n   Deduplicate on `notificationId`, and act only on the `(subscriptionId, revision)` pairs you registered.\n\nA rule is `SELECT <columns> FROM <gold source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The same\nSQL against your views in the SQL editor returns the records you'll receive.\n\n**Compatibility.** Version 1 only adds fields: clients must ignore fields they don't know.\n",
     "version": "1"
   },
   "paths": {
@@ -12,7 +12,7 @@
           "service"
         ],
         "summary": "Liveness",
-        "operationId": "health_api_v1_health_get",
+        "operationId": "health",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -33,7 +33,7 @@
           "subscriptions"
         ],
         "summary": "Check rules without applying anything",
-        "operationId": "validate_api_v1_validate_post",
+        "operationId": "validate",
         "requestBody": {
           "content": {
             "application/json": {
@@ -94,7 +94,7 @@
           "subscriptions"
         ],
         "summary": "Declare your whole set (atomic; cancels what you no longer declare)",
-        "operationId": "declare_api_v1_subscriptions_put",
+        "operationId": "declare",
         "requestBody": {
           "required": true,
           "content": {
@@ -153,7 +153,7 @@
           "subscriptions"
         ],
         "summary": "Your subscriptions and whether the hub runs them (optionally wait)",
-        "operationId": "status_api_v1_subscriptions_get",
+        "operationId": "getStatus",
         "parameters": [
           {
             "name": "wait",
@@ -218,7 +218,7 @@
           "subscriptions"
         ],
         "summary": "Create or change one subscription",
-        "operationId": "put_one_api_v1_subscriptions__name__put",
+        "operationId": "putSubscription",
         "parameters": [
           {
             "name": "name",
@@ -288,7 +288,7 @@
           "subscriptions"
         ],
         "summary": "Cancel one subscription",
-        "operationId": "cancel_api_v1_subscriptions__name__delete",
+        "operationId": "cancel",
         "parameters": [
           {
             "name": "name",
@@ -401,7 +401,6 @@
             "description": "True when the rule was already active as is"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "subscriptionId",
@@ -434,7 +433,6 @@
             "description": "The hub stops it at its next batch (then CANCELLED)"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "subscriptionId",
@@ -455,7 +453,6 @@
             "title": "Query"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "name",
@@ -486,7 +483,6 @@
             "description": "Subscriptions you no longer declare"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "applied",
@@ -524,7 +520,6 @@
             "title": "Message"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "code",
@@ -552,7 +547,6 @@
             "title": "Ok"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "ok"
@@ -622,7 +616,6 @@
             "title": "Message"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "code",
@@ -645,7 +638,6 @@
             "title": "Refused"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "applied",
@@ -693,7 +685,6 @@
             "description": "Source -> the hub's last batch time (ISO 8601)"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "app",
@@ -755,7 +746,6 @@
             "description": "Spark's error when FAILED"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "subscriptionId",
@@ -790,7 +780,6 @@
             "title": "Accepted"
           }
         },
-        "additionalProperties": true,
         "type": "object",
         "required": [
           "valid",
@@ -838,6 +827,68 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "Notification": {
+        "description": "The JSON value of each message on your destination topic. Its Kafka key is the patient ID. Not returned by any\ncall: published here so clients can generate it with the API's own models.",
+        "properties": {
+          "notificationId": {
+            "description": "Stable across redeliveries (at-least-once delivery): deduplicate on it",
+            "title": "Notificationid",
+            "type": "string"
+          },
+          "subscriptionId": {
+            "title": "Subscriptionid",
+            "type": "string"
+          },
+          "subscription": {
+            "description": "The subscription's name",
+            "title": "Subscription",
+            "type": "string"
+          },
+          "revision": {
+            "description": "Act only on the (subscriptionId, revision) pairs your last declare returned",
+            "title": "Revision",
+            "type": "integer"
+          },
+          "source": {
+            "description": "The gold source the record came from",
+            "title": "Source",
+            "type": "string"
+          },
+          "sourcePartition": {
+            "title": "Sourcepartition",
+            "type": "integer"
+          },
+          "sourceOffset": {
+            "format": "int64",
+            "title": "Sourceoffset",
+            "type": "integer"
+          },
+          "gold_ts": {
+            "description": "When the gold record was produced (ISO 8601, broker time)",
+            "title": "Gold Ts",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "description": "Exactly the columns the rule selects, nulls included",
+            "title": "Payload",
+            "type": "object"
+          }
+        },
+        "required": [
+          "notificationId",
+          "subscriptionId",
+          "subscription",
+          "revision",
+          "source",
+          "sourcePartition",
+          "sourceOffset",
+          "gold_ts",
+          "payload"
+        ],
+        "title": "Notification",
+        "type": "object"
       }
     }
   },

@@ -6,7 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.databricks.hl7.subscriber.api.SubscriptionApi;
+import com.databricks.hl7.subscriber.api.Api;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,12 +19,12 @@ class AppTest {
     @Test
     void findsTheSettingsFromTheRepoRootThroughTheAppsOwnDirectory(@TempDir Path tmp) throws IOException {
         var root = Files.createDirectories(tmp.resolve("repo"));
-        var apps = Files.createDirectories(root.resolve("src/subscriber/apps"));
+        var apps = Files.createDirectories(root.resolve("examples/subscribers/java/apps"));
         var file = Files.writeString(apps.resolve("sp-app-a.properties"), "");
-        var home = root.resolve("src/subscriber");
+        var home = root.resolve("examples/subscribers/java");
 
         assertEquals(file, App.settingsFile(null, List.of(root, home)), "run from the repo root");
-        assertEquals(file, App.settingsFile(null, List.of(home, home)), "run from src/subscriber");
+        assertEquals(file, App.settingsFile(null, List.of(home, home)), "run from examples/subscribers/java");
         var own = Files.writeString(root.resolve("subscriber.properties"), "");
         assertEquals(own, App.settingsFile(null, List.of(root, home)), "the current directory wins");
         assertNull(App.settingsFile(null, List.of(tmp)), "none: all settings as arguments");
@@ -54,6 +54,6 @@ class AppTest {
 
     @Test
     void theApiIsHttpsOnly() {
-        assertThrows(IllegalArgumentException.class, () -> new SubscriptionApi("http://example.com", () -> "t"));
+        assertThrows(IllegalArgumentException.class, () -> Api.connect("http://example.com", () -> "t"));
     }
 }

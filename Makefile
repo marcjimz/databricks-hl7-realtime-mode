@@ -11,7 +11,7 @@
 #   make clear-data dev   empty the Delta tables and refill from live data (~2 min; RTM keeps running)
 #   make stop dev         stop the feeds, every pipeline, and the Subscription API (stops Databricks billing)
 #
-# The Java subscriber app runs on its own (java -jar; its workspace E2E job is its own bundle): src/subscriber/README.md.
+# The Java subscriber app runs on its own (java -jar; its workspace E2E job is its own bundle): examples/subscribers/java/README.md.
 #
 # Your environment lives in infra/azure/terraform.tfvars (gitignored). Auth is the Azure CLI (`az login`) against the
 # workspace in Terraform's outputs, so a rebuilt workspace needs no login or config.
@@ -47,7 +47,7 @@ install:
 
 test:
 	uv run pytest
-	mvn -q -f src/subscriber/pom.xml test
+	mvn -q -f examples/subscribers/java/pom.xml test
 
 lint:
 	uv run ruff check src tests infra

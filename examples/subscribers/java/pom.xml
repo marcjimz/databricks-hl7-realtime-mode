@@ -4,14 +4,16 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
 
-  <!-- A subscriber app: declares its subscriptions in code, registers them with the hub (Lakebase Data API), and
-       consumes its own Event Hub. Authenticates only as its Databricks service principal. -->
+  <!-- An example subscriber app: declares its subscriptions in code through the Subscription API, and consumes its own
+       Event Hub. Authenticates only as its Databricks service principal. The API client and its models are generated at
+       build time from the platform's published contract (docs/api/openapi.json), so they can't drift from it. -->
   <groupId>com.databricks.hl7</groupId>
   <artifactId>hl7-subscriber</artifactId>
   <version>0.1.0</version>
 
   <properties>
     <maven.compiler.release>17</maven.compiler.release>
+    <contract>${project.basedir}/../../../docs/api/openapi.json</contract>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
 
@@ -31,6 +33,17 @@
       <artifactId>jackson-databind</artifactId>
       <version>2.20.0</version>
     </dependency>
+    <!-- What the generated API client needs (Java's built-in HttpClient + Jackson) -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+      <version>2.20.0</version>
+    </dependency>
+    <dependency>
+      <groupId>jakarta.annotation</groupId>
+      <artifactId>jakarta.annotation-api</artifactId>
+      <version>3.0.0</version>
+    </dependency>
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-simple</artifactId>
@@ -48,6 +61,36 @@
     <!-- java -jar target/hl7-subscriber.jar -->
     <finalName>hl7-subscriber</finalName>
     <plugins>
+      <!-- The Subscription API client and models, generated from the contract into target/generated-sources -->
+      <plugin>
+        <groupId>org.openapitools</groupId>
+        <artifactId>openapi-generator-maven-plugin</artifactId>
+        <version>7.26.0</version>
+        <executions>
+          <execution>
+            <goals><goal>generate</goal></goals>
+            <configuration>
+              <inputSpec>${contract}</inputSpec>
+              <generatorName>java</generatorName>
+              <library>native</library>
+              <apiPackage>com.databricks.hl7.subscriber.api</apiPackage>
+              <modelPackage>com.databricks.hl7.subscriber.api.model</modelPackage>
+              <invokerPackage>com.databricks.hl7.subscriber.api.client</invokerPackage>
+              <generateApiTests>false</generateApiTests>
+              <generateModelTests>false</generateModelTests>
+              <generateApiDocumentation>false</generateApiDocumentation>
+              <generateModelDocumentation>false</generateModelDocumentation>
+              <generateSupportingFiles>true</generateSupportingFiles>
+              <configOptions>
+                <openApiNullable>false</openApiNullable>
+                <useJakartaEe>true</useJakartaEe>
+                <hideGenerationTimestamp>true</hideGenerationTimestamp>
+                <sourceFolder>src/main/java</sourceFolder>
+              </configOptions>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>

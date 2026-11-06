@@ -1,13 +1,21 @@
 package com.databricks.hl7.subscriber;
 
-import com.databricks.hl7.subscriber.api.SubscriptionApi;
+import com.databricks.hl7.subscriber.api.Api;
+import com.databricks.hl7.subscriber.api.SubscriptionsApi;
+import com.databricks.hl7.subscriber.api.client.ApiException;
+import com.databricks.hl7.subscriber.api.model.Accepted;
+import com.databricks.hl7.subscriber.api.model.Cancelled;
+import com.databricks.hl7.subscriber.api.model.DeclareResult;
+import com.databricks.hl7.subscriber.api.model.Refusal;
+import com.databricks.hl7.subscriber.api.model.Status;
+import com.databricks.hl7.subscriber.api.model.Status.StateEnum;
+import com.databricks.hl7.subscriber.api.model.Subscription;
 import com.databricks.hl7.subscriber.e2e.E2E;
 import com.databricks.hl7.subscriber.notifications.Listener;
 import com.databricks.hl7.subscriber.platform.EventHubs;
 import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.core.DatabricksConfig;
 import com.databricks.sdk.service.iam.MeRequest;
-import com.fasterxml.jackson.databind.JsonNode;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
@@ -21,8 +29,8 @@ import java.util.Properties;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 
 /**
- * Subscriber app. Signs in as its own Databricks service principal, declares {@link MySubscriptions} to the Subscription
- * API, waits until the hub runs exactly those revisions, then prints the notifications that arrive on its own Event Hub.
+ * An example subscriber app. Signs in as its own Databricks service principal, declares {@link MySubscriptions} to the
+ * Subscription API (through the client generated from its contract, docs/api/openapi.json), waits until the hub runs exactly those revisions, then prints the notifications that arrive on its own Event Hub.
  * The API does the rest: Databricks compiles each rule, the registry keeps it, the hub runs it.
  *
  * <p>Nothing is silent. Exit 2: a rule was refused (Databricks' error, or a shape the hub won't run). 3: the hub can't run
@@ -45,57 +53,63 @@ public final class App {
         List<String> argv = List.of(args);
         Properties cfg = settings(argv);
         WorkspaceClient workspace = signIn(cfg);
-        var api = new SubscriptionApi(required(cfg, "api.url"), () -> bearer(workspace));
+        SubscriptionsApi api = Api.connect(required(cfg, "api.url"), () -> bearer(workspace));
         if (argv.contains("--e2e")) System.exit(E2E.run(workspace, api, cfg));
         Duration runFor = argv.stream().filter(a -> a.startsWith("--duration=")).findFirst()
                 .map(a -> Duration.parse(a.substring("--duration=".length()))).orElse(null);
 
         // 1. Declare what the code says. Databricks compiles each rule in this call: ACCEPTED, or refused with its error.
-        var declared = api.declare(MySubscriptions.all());
-        if (declared.status() == 403) exit(6, declared.body().path("message").asText() + " (make registry onboards apps)");
-        if (declared.status() == 422) {
-            for (JsonNode r : declared.body().path("refused")) {
-                System.out.printf("refused     %-22s %s: %s%n", r.path("name").asText(), r.path("code").asText(),
-                        firstLine(r.path("message").asText()));
+        DeclareResult declared;
+        try {
+            declared = api.declare(Api.declared(MySubscriptions.all()));
+        } catch (ApiException e) {
+            if (e.getCode() == 403) exit(6, Api.problem(e).getMessage() + " (make registry onboards apps)");
+            if (e.getCode() != 422) exit(3, "the Subscription API answered " + e.getCode() + ": " + Api.problem(e).getMessage());
+            List<Refusal> refused = Api.refusals(e);
+            for (Refusal r : refused) {
+                System.out.printf("refused     %-22s %s: %s%n", r.getName() == null ? "" : r.getName(), r.getCode(),
+                        firstLine(r.getMessage()));
             }
-            exit(2, declared.body().path("refused").size() + " subscription(s) refused; fix MySubscriptions.java");
+            exit(2, refused.size() + " subscription(s) refused; fix MySubscriptions.java");
+            return;
         }
-        if (!declared.ok()) exit(3, "the Subscription API answered " + declared.status() + ": " + declared.body());
         Map<String, Integer> current = new HashMap<>();  // subscriptionId -> revision
         String topic = null;
-        for (JsonNode s : declared.body().path("accepted")) {
-            current.put(s.path("subscriptionId").asText(), s.path("revision").asInt());
-            topic = s.path("destination").asText();
-            System.out.printf("subscribed  %-22s revision %d ACCEPTED%s%n            %s%n", s.path("name").asText(),
-                    s.path("revision").asInt(), s.path("unchanged").asBoolean() ? " (unchanged)" : "", s.path("query").asText());
+        for (Accepted s : declared.getAccepted()) {
+            current.put(s.getSubscriptionId(), s.getRevision());
+            topic = s.getDestination();
+            System.out.printf("subscribed  %-22s revision %d ACCEPTED%s%n            %s%n", s.getName(), s.getRevision(),
+                    Boolean.TRUE.equals(s.getUnchanged()) ? " (unchanged)" : "", s.getQuery());
         }
-        for (JsonNode s : declared.body().path("cancelled")) {
-            System.out.printf("cancelled   %-22s (no longer in MySubscriptions)%n", s.path("name").asText());
+        for (Cancelled s : declared.getCancelled()) {
+            System.out.printf("cancelled   %-22s (no longer in MySubscriptions)%n", s.getName());
         }
         if (current.isEmpty()) exit(0, "no subscriptions declared in MySubscriptions.java");
 
         // 2. Wait until the hub runs exactly these revisions: READY, FAILED, or not within WAIT_SECONDS. The API holds
         //    each call for up to POLL_SECONDS (short, so no proxy in between cuts it off).
         Instant deadline = Instant.now().plusSeconds(WAIT_SECONDS);
-        JsonNode status;
+        Status status;
         while (true) {
             long left = Math.max(1, Duration.between(Instant.now(), deadline).getSeconds());
-            var r = api.status((int) Math.min(POLL_SECONDS, left));
-            if (!r.ok()) exit(4, "the Subscription API answered " + r.status() + ": " + r.body());
-            status = r.body();
-            String state = status.path("state").asText();
-            if (state.equals("READY") || state.equals("FAILED") || !Instant.now().isBefore(deadline)) break;
+            try {
+                status = api.getStatus((int) Math.min(POLL_SECONDS, left));
+            } catch (ApiException e) {
+                exit(4, "the Subscription API answered " + e.getCode() + ": " + Api.problem(e).getMessage());
+                return;
+            }
+            if (status.getState() == StateEnum.READY || status.getState() == StateEnum.FAILED
+                    || !Instant.now().isBefore(deadline)) break;
         }
-        for (JsonNode s : status.path("subscriptions")) {
-            if (s.path("enabled").asBoolean() && !"PENDING".equals(s.path("state").asText())) {
-                System.out.printf("hub         %-22s revision %d %s%n", s.path("name").asText(), s.path("revision").asInt(),
-                        s.path("state").asText());
+        for (Subscription s : status.getSubscriptions()) {
+            if (Boolean.TRUE.equals(s.getEnabled()) && !"PENDING".equals(s.getState())) {
+                System.out.printf("hub         %-22s revision %d %s%n", s.getName(), s.getRevision(), s.getState());
             }
         }
-        switch (status.path("state").asText()) {
-            case "READY" -> { }
-            case "FAILED" -> exit(3, "the hub can't run " + status.path("problems"));
-            default -> exit(4, status.path("state").asText() + ": " + status.path("problems")
+        switch (status.getState()) {
+            case READY -> { }
+            case FAILED -> exit(3, "the hub can't run " + status.getProblems());
+            default -> exit(4, status.getState() + ": " + status.getProblems()
                     + " (is the subscription_hub pipeline running? make demo dev)");
         }
 
@@ -106,15 +120,21 @@ public final class App {
             consumer.subscribe(List.of(topic));
             System.out.printf("listening   on %s as consumer group %s (Ctrl-C to stop)%n", topic, group);
             new Listener(current, group, System.out, Instant.now()).run(consumer,
-                    runFor == null ? Instant.MAX : Instant.now().plus(runFor), () -> {
-                        JsonNode now = api.status(0).body();
-                        if ("HUB_STALE".equals(now.path("state").asText())) {
-                            System.out.printf("WARNING     %s: is the subscription_hub pipeline running?%n",
-                                    now.path("problems"));
-                        }
-                    }, HEALTH_CHECK_EVERY);
+                    runFor == null ? Instant.MAX : Instant.now().plus(runFor), () -> healthCheck(api), HEALTH_CHECK_EVERY);
         }
         exit(0, "ran for " + runFor);
+    }
+
+    /** While listening: warn (don't stop) if the hub has stopped, or the API can't be reached for a moment. */
+    static void healthCheck(SubscriptionsApi api) {
+        try {
+            Status now = api.getStatus(0);
+            if (now.getState() == StateEnum.HUB_STALE) {
+                System.out.printf("WARNING     %s: is the subscription_hub pipeline running?%n", now.getProblems());
+            }
+        } catch (ApiException | RuntimeException e) {
+            System.out.printf("WARNING     health check failed (%s); still listening%n", e.getMessage());
+        }
     }
 
     static void exit(int code, String message) {
@@ -199,7 +219,7 @@ public final class App {
         return v.trim();
     }
 
-    /** The directory above the jar's target/ (src/subscriber), or null when it isn't a local build (e.g. a job). */
+    /** The directory above the jar's target/ (examples/subscribers/java), or null when it isn't a local build (e.g. a job). */
     private static Path appHome() {
         try {
             Path jar = Path.of(App.class.getProtectionDomain().getCodeSource().getLocation().toURI());

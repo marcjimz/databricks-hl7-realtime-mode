@@ -2,7 +2,7 @@
 # own service principal, so no secret is involved. Its own bundle, separate from the platform's: it belongs to the app,
 # and binding a job's run_as to an SP needs the deployer to hold "Service Principal: User" on that SP.
 #
-#   DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle deploy      (from the repo root; then: bundle run e2e)
+#   DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle deploy      (from the repo root; then: bundle run e2e)
 #
 # Variables come from .databricks/bundle/dev/variable-overrides.json, which `make registry` writes (gitignored).
 

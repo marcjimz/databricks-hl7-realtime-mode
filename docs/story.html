@@ -278,7 +278,7 @@
       <div class="codetabs" id="codetabs"></div>
       <div class="code grow" id="code"></div>
       <p class="muted" style="font-size:.82rem; margin:.5rem 0 0">Shortened from the real files in the jar
-        (<code>src/subscriber</code>, 7 classes). Settings come from <code>make registry</code>, and the secret stays in the CLI profile.</p>
+        (<code>examples/subscribers/java</code>, 7 classes). Settings come from <code>make registry</code>, and the secret stays in the CLI profile.</p>
     </div>
     <div class="col" style="display:flex; flex-direction:column; min-height:0">
       <div style="display:flex; gap:.5rem; margin-bottom:.5rem">
@@ -585,7 +585,7 @@ Object.keys(CODE).forEach((k, i) => {
 
 // Terminal ----------------------------------------------------------------------------------------------------------
 const TERM = [
-  ["dim", "$ java -jar src/subscriber/target/hl7-subscriber.jar"],
+  ["dim", "$ java -jar examples/subscribers/java/target/hl7-subscriber.jar"],
   ["", "signed in   as sp-hl7-realtime-demo (38fafc55-…)"],
   ["ok", "subscribed  critical-potassium     revision 1 ACCEPTED"],
   ["dim", "            SELECT patient_id, value_num, units FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"],

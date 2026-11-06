@@ -107,6 +107,19 @@ def test_nulls_are_kept_in_the_payload(observations):
     assert out[0]["payload"] == {"patient_id": "P2", "abnormal_flag": None}
 
 
+def test_notifications_follow_the_published_contract(spark, observations):
+    """What the hub writes is the Notification schema in docs/api/openapi.json, field for field, on both paths."""
+    from subscription_api.app import Notification
+
+    sql = "SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Potassium'"
+    records = subscriptions.events(observations, "gold_observations")
+    for compiled in (subscriptions.compile_rules([rule(sql)]), subscriptions.compile_rules([rule(sql)], spark=spark)):
+        for x in subscriptions.notifications(records, "gold_observations", compiled).collect():
+            value = json.loads(x.value)
+            assert set(value) == set(Notification.model_fields)
+            Notification.model_validate(value)
+
+
 def test_notification_ids_are_stable_per_revision_and_source_record(observations):
     sql = "SELECT patient_id FROM gold_observations WHERE value_num < 8"
 

@@ -30,7 +30,7 @@ Java app (as its own SP) ──PUT [{name, sql}]──► Subscription API (Data
     source's rules in one projection.
   - It writes the matches to each app's hub.
   - A rule that fails on the data is reported FAILED on its own; the other rules keep running.
-- **App** (`src/subscriber`, Java 17): declares its subscriptions in code, sends them to the API, and consumes its hub.
+- **App** (`examples/subscribers/java`, Java 17): declares its subscriptions in code, sends them to the API, and consumes its hub.
 
 The hub runs micro-batches (seconds, not milliseconds). It needs `foreachBatch` to apply a rule set that changes at
 runtime, and Real-Time Mode doesn't support `foreachBatch`. `foreach_batch_sink` is Public Preview, so the hub runs on
@@ -182,7 +182,7 @@ Sunday wipe.
      - the app's NOLOGIN registry role and its binding;
      - its views `<catalog>.sub_my_app.<source>`;
      - CAN_USE on the Subscription API, and the API's read on those views.
-     - It also writes the app's settings to `src/subscriber/apps/my-app.properties` (gitignored, no secrets),
+     - It also writes the app's settings to `examples/subscribers/java/apps/my-app.properties` (gitignored, no secrets),
        rewritten every run because URLs change when the workspace is rebuilt.
 3. **Add the SP's profile** to `~/.databrickscfg`, named after the app, then `chmod 600 ~/.databrickscfg`:
    ```ini
@@ -193,8 +193,8 @@ Sunday wipe.
    ```
 4. **Check it end to end:**
    ```bash
-   mvn -q -f src/subscriber package
-   java -jar src/subscriber/target/hl7-subscriber.jar --e2e      # 24 checks, PASS/FAIL table, exit 1 on any failure
+   mvn -q -f examples/subscribers/java package
+   java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e      # 24 checks, PASS/FAIL table, exit 1 on any failure
    ```
 
 ## End-to-end checks
@@ -204,7 +204,7 @@ Sunday wipe.
   group, and it cleans up after itself.
 - **Exit code:** it exits 1 if any check fails.
 - **In the workspace:** the same jar runs as a serverless job, as the same service principal, with no secret. Run
-  `DATABRICKS_BUNDLE_ROOT=src/subscriber databricks bundle deploy`, then the same with `bundle run e2e`. The deployer
+  `DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle deploy`, then the same with `bundle run e2e`. The deployer
   needs the **Service Principal: User** role on that SP to bind the job's `run_as`.
 
 | # | Check | Input | Expected |

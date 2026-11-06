@@ -73,12 +73,12 @@ Each message is keyed by patient ID. The value is JSON:
 | 422 | Databricks' error class (`UNRESOLVED_COLUMN…`, `PARSE_SYNTAX_ERROR`, …), `SQL_NOT_ALLOWED` (not one filter over one record), `INVALID_NAME`, `DUPLICATE_NAME`, `RULE_LIMIT_REACHED` (1,000 rules). Nothing applied. |
 | 404 | `NOT_FOUND_OR_INACCESSIBLE`: `DELETE` of a name with no active subscription |
 
-## The Java reference client
+## The Java example
 
-`src/subscriber` maps one class to each step:
+`examples/subscribers/java` maps one class to each step:
 - `MySubscriptions`: the rules;
 - `App`: steps 1–3;
-- `api/SubscriptionApi`: HTTP;
+- `api/`: the client generated from `api/openapi.json` (`SubscriptionsApi` and its models);
 - `platform/EventHubs`: step 4 and the Kafka settings;
 - `notifications/Listener`: dedupe and current revisions;
 - `e2e/E2E`: 24 live checks.

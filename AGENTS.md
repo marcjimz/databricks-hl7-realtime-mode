@@ -20,7 +20,7 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
 - Layers are **raw → bronze → silver → gold**, each both an RTM Kafka topic and an SDP streaming table.
 - **Subscriptions** over gold: apps register Databricks SQL rules at runtime through the Subscription API (a Databricks
   App; the rules live in a Lakebase registry), a micro-batch hub pipeline
-  delivers matches to each app's own hub, and a Java app (`src/subscriber`) shows the client side. See
+  delivers matches to each app's own hub, and a Java app (`examples/subscribers/java`) shows the client side. See
   "Subscription rules" and docs/subscriptions.md. The earlier SQL-file design is in `examples/subscriptions/`.
 - Phases 0–5 were built on an AWS workspace (cross-cloud to Event Hubs); the repo now targets one Azure region end
   to end. New work: one branch + one PR per unit, verified on dev before merging.
@@ -66,19 +66,21 @@ infra/registry.py     idempotent registry bootstrap (`make registry`): Lakebase 
 src/registry/         the subscription registry: schema, owner trigger, RLS, API functions, grants (registry.sql)
 src/subscription_api/ the Subscription API (Databricks App, FastAPI): the integration contract (OpenAPI), caller, shape
                       check, Databricks compiles, store, wait
-src/subscriber/       the Java 17 subscriber app (Maven; `java -jar`), 7 classes in role packages, JUnit tests. Not in the
-                      wheel or bundle sync.
-examples/             not deployed, linted, or tested: subscriptions/ (earlier SQL-file design), aws-cross-cloud/
+examples/             clients and parked designs, not part of the platform:
+                      subscribers/java/ (an example subscriber: Maven, `java -jar`; its API client is generated from
+                      docs/api/openapi.json; unit-tested by `make test`, not in the wheel or bundle sync);
+                      subscriptions/ (earlier SQL-file design) and aws-cross-cloud/ (not deployed, linted, or tested)
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
-docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON, story.html (interactive deck),
+docs/                 integration.md + api/openapi.json (the contract), latency, subscriptions, SCALABILITY test plan,
+                      Epic JSON, story.html (interactive deck),
                       SPIKE-sql-channels (full-SQL design spike, not built);
                       diagrams/ (.drawio + PNG + slides)
 ```
 
 - Put logic in `src/hl7rt` as functions of DataFrames, so it's testable without a cluster. Keep
   `src/pipelines/*` to decorators + wiring.
-- **Keep the repo to what's deployed or tested.** Anything else goes to `examples/` with a README. Throwaway experiments
-  stay outside the repo folder.
+- **Keep the repo to what's deployed or tested.** `src/` is the framework only. Clients of it (the Java subscriber) and
+  parked designs go to `examples/` with a README. Throwaway experiments stay outside the repo folder.
 - Generators are console scripts in the `hl7rt` wheel. The bundle `artifacts:` block builds it into
   `.build/` (gitignored), and it runs as serverless `python_wheel_task` jobs with
   `environment_version: "3"` (Python 3.12).
@@ -207,13 +209,18 @@ docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON, 
   - **Library logs are at WARN** (`simplelogger.properties`), so the demo output stays readable.
 - **The platform's integration point is the API contract, not the Java app.** `docs/api/openapi.json` is generated from
   the API, and `tests/test_openapi.py` fails if they differ: regenerate it with `uv run python tests/test_openapi.py`
-  after any API change. Every response has a typed model (extra fields allowed, so the contract can grow). The proxy-set
-  identity header isn't a client parameter. docs/integration.md is the language-neutral guide: handshake, Event Hubs
+  after any API change. Every operation has an `operationId` (clients' method names: declare, getStatus,
+  putSubscription, cancel, validate, health) and a typed response. The Kafka message is in it too (`Notification`), and
+  `tests/test_subscriptions.py` checks the hub writes exactly that schema. Version 1 only adds fields: the schemas carry
+  no `additionalProperties`, so generated clients stay plain classes and ignore unknown fields. The proxy-set identity
+  header isn't a client parameter. docs/integration.md is the language-neutral guide: handshake, Event Hubs
   token, Kafka settings, notification envelope, and errors. Keep it in step with the API.
-- **The Java client is deliberately small**, with packages by role so a reader starts at the top:
+- **The Java client is deliberately small and contract-driven**, with packages by role so a reader starts at the top:
   - `App` (entry point) and `MySubscriptions` (name → SQL, the file developers edit) at the root;
-  - `api/SubscriptionApi` (HTTP);
-  - `notifications/Listener` and `Notification` (the delivery contract);
+  - `api/`: `SubscriptionsApi` and `api.model` are **generated** at build time from docs/api/openapi.json
+    (openapi-generator, `native` library). `api/Api.java` only wires it: URL, the SP's token per call, reading refusals.
+    Never hand-write a request or response class;
+  - `notifications/Listener` (the delivery contract, on the generated `Notification`);
   - `platform/EventHubs` (UC token, OAUTHBEARER, consumer settings);
   - `e2e/E2E`.
 
@@ -250,7 +257,7 @@ docs/                 latency, subscriptions, SCALABILITY test plan, Epic JSON, 
 - **`--e2e` is the acceptance test** (24 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
   every new guarantee, and keep docs/subscriptions.md's table in step. Plans beyond one SP: docs/SCALABILITY.md.
 - **Serverless JAR tasks need environment_version 4+** (`java_dependencies`). Binding a job's `run_as` to an SP needs
-  the deployer to have **Service Principal: User** on it, so the app's job is its own bundle (`src/subscriber`):
+  the deployer to have **Service Principal: User** on it, so the app's job is its own bundle (`examples/subscribers/java`):
   in the platform bundle it made every `make demo` fail for deployers without that role.
 - **Maven Central is blocked on the Databricks network.** Use the internal mirror in `~/.m2/settings.xml`
   (`maven-proxy.dev.databricks.com`). Keep it out of the repo: customers won't have it.

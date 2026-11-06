@@ -22,10 +22,11 @@ import os
 import re
 import threading
 import time
-from typing import Literal
+from typing import Any, Literal
 
 from databricks.sdk import WorkspaceClient
 from fastapi import FastAPI, Header, Query, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -63,6 +64,8 @@ tells the API who is calling. The service principal must be an onboarded subscri
 
 A rule is `SELECT <columns> FROM <gold source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The same
 SQL against your views in the SQL editor returns the records you'll receive.
+
+**Compatibility.** Version 1 only adds fields: clients must ignore fields they don't know.
 """
 
 app = FastAPI(
@@ -176,6 +179,21 @@ class Status(_Open):
 
 class Health(_Open):
     ok: bool
+
+
+class Notification(_Open):
+    """The JSON value of each message on your destination topic. Its Kafka key is the patient ID. Not returned by any
+    call: published here so clients can generate it with the API's own models."""
+
+    notificationId: str = Field(description="Stable across redeliveries (at-least-once delivery): deduplicate on it")
+    subscriptionId: str
+    subscription: str = Field(description="The subscription's name")
+    revision: int = Field(description="Act only on the (subscriptionId, revision) pairs your last declare returned")
+    source: str = Field(description="The gold source the record came from")
+    sourcePartition: int
+    sourceOffset: int = Field(json_schema_extra={"format": "int64"})
+    gold_ts: str = Field(description="When the gold record was produced (ISO 8601, broker time)")
+    payload: dict[str, Any] = Field(description="Exactly the columns the rule selects, nulls included")
 
 
 _ERRORS = {
@@ -343,13 +361,14 @@ def _refusals(checked):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-@app.get("/api/v1/health", tags=["service"], response_model=Health, summary="Liveness")
+@app.get("/api/v1/health", operation_id="health", tags=["service"], response_model=Health, summary="Liveness")
 def health():
     return {"ok": True}
 
 
 @app.post(
     "/api/v1/validate",
+    operation_id="validate",
     tags=["subscriptions"],
     response_model=ValidateResult,
     responses=_ERRORS,
@@ -365,6 +384,7 @@ def validate(body: Declared, x_forwarded_email: str | None = _VERIFIED_CALLER):
 
 @app.put(
     "/api/v1/subscriptions",
+    operation_id="declare",
     tags=["subscriptions"],
     response_model=DeclareResult,
     responses=_ERRORS | _REFUSED,
@@ -388,6 +408,7 @@ def declare(body: Declared, x_forwarded_email: str | None = _VERIFIED_CALLER):
 
 @app.put(
     "/api/v1/subscriptions/{name}",
+    operation_id="putSubscription",
     tags=["subscriptions"],
     response_model=Accepted,
     responses=_ERRORS | _REFUSED,
@@ -405,6 +426,7 @@ def put_one(name: str, body: One, x_forwarded_email: str | None = _VERIFIED_CALL
 
 @app.delete(
     "/api/v1/subscriptions/{name}",
+    operation_id="cancel",
     tags=["subscriptions"],
     response_model=Cancelled,
     responses=_ERRORS | {404: {"model": Error, "description": "No active subscription with that name"}},
@@ -447,6 +469,7 @@ def _epoch(ts: str) -> float:
 
 @app.get(
     "/api/v1/subscriptions",
+    operation_id="getStatus",
     tags=["subscriptions"],
     response_model=Status,
     responses=_ERRORS,
@@ -465,6 +488,23 @@ def status(
         if state["state"] in ("READY", "FAILED") or time.time() >= deadline:
             return {"app": who["name"], **state, **listing}
         time.sleep(1)
+
+
+def _openapi() -> dict:
+    """The served contract, plus the Notification message clients receive on their topic."""
+    if app.openapi_schema is None:
+        schema = get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes,
+                             tags=app.openapi_tags)  # fmt: skip
+        schema["components"]["schemas"]["Notification"] = Notification.model_json_schema(
+            ref_template="#/components/schemas/{model}"
+        )
+        for model in schema["components"]["schemas"].values():  # the contract: clients ignore fields they don't know
+            model.pop("additionalProperties", None)
+        app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = _openapi
 
 
 if __name__ == "__main__":
