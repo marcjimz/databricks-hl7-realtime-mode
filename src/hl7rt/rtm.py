@@ -11,10 +11,8 @@ from hl7rt.config import conf
 # Latency over batching on the producer side; Event Hubs Premium acks quickly.
 _SINK_TUNING = {"kafka.linger.ms": "0", "kafka.acks": "1"}
 
-# On Azure, an Event Hubs connection occasionally stops answering: in-flight requests sit until request.timeout.ms
-# (60 s per Microsoft's guidance) and the RTM hop stalls that long. Normal acks and fetches take milliseconds, so the
-# hot path gives up after 5 s and retries on a new connection (at-least-once; the mirror upserts). See docs/latency.md.
-HUNG_REQUEST_GUARD = {"kafka.request.timeout.ms": "5000"}
+# The hot path gives up on a hung Event Hubs request after 5 s (eventhubs.HUNG_REQUEST_GUARD). See docs/latency.md.
+HUNG_REQUEST_GUARD = eventhubs.HUNG_REQUEST_GUARD
 _SINK_DELIVERY = {"kafka.delivery.timeout.ms": "30000"}  # must be >= linger.ms + request.timeout.ms
 
 

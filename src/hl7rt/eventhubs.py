@@ -16,6 +16,11 @@ _JAVA_CLIENT = {
     "kafka.request.timeout.ms": "60000",
     "kafka.max.request.size": "1000000",
 }
+# On Azure, an Event Hubs connection occasionally stops answering: in-flight requests sit until request.timeout.ms
+# (60 s above) and whatever waits on them stalls that long. Normal acks and fetches take milliseconds, so the RTM hops
+# and the subscription hub's writes give up after 5 s and retry on a new connection (at-least-once).
+HUNG_REQUEST_GUARD = {"kafka.request.timeout.ms": "5000"}
+
 _LIBRDKAFKA = {"socket.keepalive.enable": True, "metadata.max.age.ms": 180000, "request.timeout.ms": 60000}
 
 

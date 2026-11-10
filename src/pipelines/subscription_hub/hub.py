@@ -66,7 +66,10 @@ class _RuleSet:
 def _write(records, source, rule_set):
     out = subscriptions.notifications(records, source, rule_set)
     if out is not None:
-        out.write.format("kafka").options(**eventhubs.kafka_options_from_conf(spark)).save()
+        # A hung Event Hubs connection would hold the write until the delivery timeout (2 min) and fail the batch;
+        # give up on a request after 5 s and retry on a new connection, as the RTM sinks do.
+        options = {**eventhubs.kafka_options_from_conf(spark), **eventhubs.HUNG_REQUEST_GUARD}
+        out.write.format("kafka").options(**options).save()
 
 
 def _hub(source: str, topic: str):
