@@ -114,6 +114,18 @@ def test_the_caller_is_the_verified_identity_only(client):
     assert r.status_code == 403 and r.json()["code"] == "APP_NOT_ONBOARDED"
 
 
+def test_a_dropped_registry_connection_is_replaced_not_reused(client, pg):
+    """Lakebase closes idle connections (and suspends when idle): the next call must open a new one, not fail on the
+    dead one, and a connection that failed must never go back to the pool."""
+    assert declare(client, [("critical-k", POTASSIUM)]).status_code == 200
+    pg().run("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'api'")
+
+    for _ in range(3):
+        assert client.get("/api/v1/subscriptions", headers=A).status_code == 200
+        assert client.get("/api/v1/connection", headers=A).status_code in (200, 503)
+    assert declare(client, [("critical-k", POTASSIUM)]).json()["accepted"][0]["unchanged"]
+
+
 def test_the_connection_is_everything_an_app_needs_to_read_its_own_topic(client, monkeypatch):
     """An app configures only its service principal and the API: its topic and Kafka connection come from here."""
     monkeypatch.setattr(api, "EVENTHUBS_NAMESPACE", "ns1")

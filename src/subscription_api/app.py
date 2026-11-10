@@ -18,6 +18,7 @@ trigger and row-level security apply as if the app wrote them itself.
 Stateless: the registry is the only state, so any instance can serve any call (horizontal scaling).
 """
 
+import contextlib
 import os
 import re
 import threading
@@ -28,6 +29,7 @@ from databricks.sdk import WorkspaceClient
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+from pg8000.exceptions import InterfaceError
 from pydantic import BaseModel, ConfigDict, Field
 
 try:
@@ -236,7 +238,10 @@ def _refused(_: Request, e: Refused):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Registry connections: a small pool per instance, renewed before the database credential expires.
+# Registry connections: a small pool per instance, renewed before the database credential expires. Lakebase closes
+# idle connections (and suspends when idle), so a pooled one may be dead: if its first statement hits a network error
+# (nothing has happened on it yet), it's closed and the statement runs on a new connection. A connection that failed
+# is never pooled, or every later request would fail on it.
 class Pool:
     def __init__(self, connect):
         self._connect, self._idle, self._lock = connect, [], threading.Lock()
@@ -247,12 +252,31 @@ class Pool:
                 conn, opened = self._idle.pop()
                 if time.time() - opened < db.TOKEN_SECONDS:
                     return conn, opened
-                conn.close()
+                _close(conn)
         return self._connect(), time.time()
+
+    def open(self, first: str, **params):
+        """A connection, its open time, and its first statement's result."""
+        conn, opened = self.get()
+        try:
+            return conn, opened, conn.run(first, **params)
+        except InterfaceError:
+            _close(conn)
+        conn, opened = self._connect(), time.time()
+        try:
+            return conn, opened, conn.run(first, **params)
+        except Exception:
+            _close(conn)
+            raise
 
     def put(self, conn, opened):
         with self._lock:
             self._idle.append((conn, opened))
+
+
+def _close(conn):
+    with contextlib.suppress(Exception):  # already gone
+        conn.close()
 
 
 pool = Pool(lambda: db.connect(ENDPOINT, DATABASE))
@@ -265,8 +289,7 @@ class Session:
         self.role = role
 
     def __enter__(self):
-        self.conn, self.opened = pool.get()
-        self.conn.run("BEGIN")
+        self.conn, self.opened, _ = pool.open("BEGIN")
         self.conn.run(f'SET LOCAL ROLE "{self.role}"')
         return self.conn
 
@@ -275,18 +298,18 @@ class Session:
             self.conn.run("ROLLBACK" if exc_type else "COMMIT")
             pool.put(self.conn, self.opened)
         except Exception:  # noqa: BLE001 - a broken connection isn't returned to the pool
-            self.conn.close()
+            _close(self.conn)
 
 
 def _caller(email: str | None) -> dict:
     if not email:
         raise Refused(401, {"code": "UNAUTHENTICATED", "message": "no verified caller"})
-    conn, opened = pool.get()
-    try:
-        rows = conn.run("SELECT app_role, app_name, destination_topic, eventhubs_credential "
-                        "FROM subscription_registry.apps WHERE service_principal = :sp", sp=email)  # fmt: skip
-    finally:
-        pool.put(conn, opened)
+    conn, opened, rows = pool.open(
+        "SELECT app_role, app_name, destination_topic, eventhubs_credential "
+        "FROM subscription_registry.apps WHERE service_principal = :sp",
+        sp=email,
+    )
+    pool.put(conn, opened)
     if not rows:
         raise Refused(403, {"code": "APP_NOT_ONBOARDED", "message": f"{email} isn't an onboarded subscriber app"})
     role, name, topic, credential = rows[0]

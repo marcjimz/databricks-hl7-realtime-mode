@@ -10,9 +10,12 @@ Authenticates as the pipeline's identity with a short-lived Lakebase database cr
 Python; psycopg[binary] aborted the serverless pipeline process (native library clash).
 """
 
+import contextlib
 import threading
 import time
 from functools import wraps
+
+from pg8000.exceptions import InterfaceError
 
 from hl7rt.subscriptions import Rule
 from subscription_api.db import TOKEN_SECONDS, connect
@@ -25,10 +28,17 @@ _RULES = (
 
 
 def _locked(method):
+    """Hold the lock; if Lakebase dropped the connection (idle close, compute restart), reopen it and retry once. Every
+    call is one idempotent statement (a read, or an upsert), so a retry can't apply anything twice."""
+
     @wraps(method)
     def call(self, *args, **kwargs):
         with self._lock:
-            return method(self, *args, **kwargs)
+            try:
+                return method(self, *args, **kwargs)
+            except InterfaceError:
+                self._drop()
+                return method(self, *args, **kwargs)
 
     return call
 
@@ -42,10 +52,15 @@ class Registry:
         self._reported: dict[str, tuple[int, str]] = {}
         self._lock = threading.RLock()
 
+    def _drop(self):
+        if self._conn is not None:
+            with contextlib.suppress(Exception):  # already gone
+                self._conn.close()
+        self._conn = None
+
     def _db(self):
         if self._conn is None or time.time() - self._opened > TOKEN_SECONDS:
-            if self._conn is not None:
-                self._conn.close()
+            self._drop()
             self._conn = connect(self._endpoint, self._database)
             self._opened = time.time()
         return self._conn

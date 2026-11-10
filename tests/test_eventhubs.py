@@ -64,3 +64,14 @@ def test_librdkafka_producer_follows_event_hubs_guidance():
     assert cfg["socket.keepalive.enable"] is True
     assert int(cfg["metadata.max.age.ms"]) < AZURE_IDLE_MS
     assert int(cfg["request.timeout.ms"]) >= 60_000
+
+
+def test_the_hub_gives_up_on_a_hung_send_quickly():
+    """Seen live: a hung Event Hubs connection held the hub's write for 2 minutes (delivery timeout) and failed the
+    flow; retried three times, that failed the whole update. Like the RTM sinks, the hub retries a hung request on a new
+    connection after 5 s, inside the same delivery timeout."""
+    from pathlib import Path
+
+    hub = (Path(__file__).parents[1] / "src/pipelines/subscription_hub/hub.py").read_text()
+    write = hub[hub.index("def _write") : hub.index("def _hub")]
+    assert "eventhubs.HUNG_REQUEST_GUARD" in write

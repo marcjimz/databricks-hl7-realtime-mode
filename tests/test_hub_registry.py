@@ -44,3 +44,33 @@ def test_concurrent_flows_never_share_the_connection_at_once():
     for t in threads:
         t.join()
     assert conn.overlaps == 0
+
+
+def test_a_dropped_connection_is_reopened_on_the_next_call(monkeypatch):
+    """Lakebase drops connections (idle close, compute restart). The hub must reconnect, not fail every batch until the
+    pipeline restarts (seen live: a "network error" failed the flow three times, then the whole update)."""
+    import pg8000.exceptions
+
+    from hl7rt import registry as registry_module
+
+    class Dropped:
+        def run(self, sql, **params):
+            raise pg8000.exceptions.InterfaceError("network error")
+
+        def close(self):
+            pass
+
+    class Fine:
+        def run(self, sql, **params):
+            return [[0]] if "max(generation)" in sql else []
+
+        def close(self):
+            pass
+
+    opened = [Dropped(), Fine()]
+    monkeypatch.setattr(registry_module, "connect", lambda endpoint, database: opened.pop(0))
+    registry = Registry("projects/p/branches/production/endpoints/primary", "db")
+
+    registry.refresh()
+    registry.heartbeat("gold_observations", 1, 0)
+    assert opened == [], "the dropped connection was replaced by a new one"

@@ -148,7 +148,8 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
 - **Hung Event Hubs connections (Azure).** A connection occasionally stops answering until `request.timeout.ms`
   expires; that took 18–77 s with Microsoft's 60 s setting. The RTM hop stalls for the whole time, and executor logs
   show `Cancelled in-flight PRODUCE request ... due to node N being disconnected`. `rtm.HUNG_REQUEST_GUARD` (5 s, RTM
-  readers and sinks only) caps it at ~5 s. Micro-batch pipelines keep 60 s.
+  readers and sinks, and the subscription hub's writes) caps it at ~5 s. Other micro-batch pipelines keep 60 s.
+  Without it the hub's write hung for the 2-minute delivery timeout and failed the flow (seen live, Nov 6–7).
 - **Entra auth isn't the latency cost.** An A/B on the same path measured new-connection setup with the service
   credential versus SAS: write 285 vs 291 ms, read 1315 vs 1211 ms. The token comes from cache. The logged
   `UnsupportedCallbackException` (`retrieveCustomExtensions`) is harmless.
@@ -229,6 +230,10 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   - `e2e/E2E`.
 
   Keep logic on the server. Add a package only for a new role, not per class.
+- **Lakebase drops connections** (idle close, suspend after 5 idle minutes, compute restarts). A pooled API
+  connection whose first statement hits a network error is replaced, and one that failed is never pooled (a dead one
+  once made every API call 500 for days); the hub's client reopens and retries its idempotent statement once.
+  `tests/test_subscription_api.py` and `tests/test_hub_registry.py` kill the connection to prove it.
 - **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). Its flows run
   batches concurrently, so the shared registry client serializes access (`tests/test_hub_registry.py`). Use pg8000:
   psycopg[binary] aborted the serverless Python process. Serverless has no `persist`/`cache`, so a failed batch is
