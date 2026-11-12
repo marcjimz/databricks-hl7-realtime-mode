@@ -1,6 +1,6 @@
 """The live Power BI dashboard, as data: a DirectQuery semantic model over the views in views.sql (one table per view)
-and a three-page report (Latency, Clinical, Subscriptions) that refreshes itself whenever the newest gold record
-changes. infra/powerbi.py (`make powerbi`) renders both into Fabric item definitions (TMDL and PBIR) and deploys them,
+and a three-page report (Latency, Clinical, Subscriptions) that re-queries itself every few seconds while it's
+open. infra/powerbi.py (`make powerbi`) renders both into Fabric item definitions (TMDL and PBIR) and deploys them,
 so nothing is built by hand in Power BI Desktop. Host, warehouse, catalog, and model ID are filled in at deploy time.
 """
 
@@ -37,7 +37,7 @@ MEASURES = {
         "Gold observations 15 min": ("MAX(headline[gold_observations])", "#,0"),
         "Quarantined 15 min": ("MAX(headline[quarantined])", "#,0"),
     },
-    "last_update": {"Last update": ("MAX(last_update[updated_at])", "General Date")},
+    "last_update": {"Last update": ("MAX(last_update[updated_at])", "hh:mm:ss")},
     "hop_p99_by_minute": {"p99 ms": ("MAX(hop_p99_by_minute[p99_ms])", "0")},
     "messages_by_minute": {"Parsed messages": ("SUM(messages_by_minute[messages])", "#,0")},
     "critical_labs_by_facility": {"Critical results": ("SUM(critical_labs_by_facility[results])", "#,0")},
@@ -46,21 +46,22 @@ MEASURES = {
     "hub": {"Stale hub sources": ('CALCULATE(COUNTROWS(hub), hub[status] = "STALE") + 0', "0")},
 }
 
-# Every page refreshes when this measure changes (Power BI allows one change-detection measure per model). It moves with
-# every new gold record, so with live data the pages refresh at the check interval.
-CHANGE_DETECTION = ("last_update", "Last update")
-CHECK_EVERY_SECONDS = 5
+# Every page re-queries on this fixed interval while it's open (automatic page refresh). The capacity admin's minimum
+# interval caps it (Admin portal -> Capacity settings -> Power BI workloads; a new capacity starts at 5 minutes). Change
+# detection would fire just as often (gold changes every second), and it can't be set up outside Power BI Desktop.
+REFRESH_SECONDS = 5
 
 # page -> visuals: (type, title, (x, y, width, height), {role: [(table, field)]}). A field is a measure if it's in
 # MEASURES, else a column. Roles: card Values; tableEx Values; lineChart / columnChart / clusteredBarChart Category, Y,
 # Series.
 PAGES = {
     "Latency": [
-        ("card", "Messages per second", (10, 10, 305, 110), {"Values": [("headline", "Messages per second")]}),
-        ("card", "Raw to gold p99 (ms)", (325, 10, 305, 110), {"Values": [("headline", "Raw to gold p99 ms")]}),
-        ("card", "Gold observations, 15 min", (640, 10, 305, 110),
+        ("card", "Newest gold record (UTC)", (10, 10, 242, 110), {"Values": [("last_update", "Last update")]}),
+        ("card", "Messages per second", (262, 10, 242, 110), {"Values": [("headline", "Messages per second")]}),
+        ("card", "Raw to gold p99 (ms)", (514, 10, 242, 110), {"Values": [("headline", "Raw to gold p99 ms")]}),
+        ("card", "Gold observations, 15 min", (766, 10, 242, 110),
          {"Values": [("headline", "Gold observations 15 min")]}),
-        ("card", "Quarantined, 15 min", (955, 10, 315, 110), {"Values": [("headline", "Quarantined 15 min")]}),
+        ("card", "Quarantined, 15 min", (1018, 10, 252, 110), {"Values": [("headline", "Quarantined 15 min")]}),
         ("tableEx", "Per-hop latency, last 15 minutes (target: p99 under 200 ms)", (10, 130, 1260, 170),
          {"Values": [("hop_latency", c) for c in TABLES["hop_latency"]]}),
         ("lineChart", "p99 by minute, last hour (ms)", (10, 310, 1260, 400),
@@ -182,12 +183,8 @@ def _page_id(page: str) -> str:
 
 def report_parts(model_id: str) -> list[dict]:
     """The report's PBIR definition, bound to the semantic model model_id."""
-    table, measure = CHANGE_DETECTION
-    refresh = {"pageRefresh": [{"properties": {
-        "show": _literal("true"),
-        "refreshType": _literal("'ChangeDetection'"),
-        "measure": {"expr": _field(table, measure)},
-        "checkEvery": _literal(f"{CHECK_EVERY_SECONDS}D"),
+    refresh = {"pageRefresh": [{"properties": {  # as Power BI itself saves it
+        "show": _literal("true"), "refreshType": _literal("'APR'"), "duration": _literal(f"'PT{REFRESH_SECONDS}S'"),
     }}]}  # fmt: skip
     parts = [
         _part("definition.pbir", {

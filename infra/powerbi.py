@@ -8,7 +8,7 @@
   Fabric (the tenant and capacity in infra/fabric's Terraform outputs; `make fabric-up` creates them)
     workspace       HL7_POWERBI_WORKSPACE (default hl7-realtime), on that capacity
     semantic model  DirectQuery over the views (definition.model_parts), created or updated in place
-    report          three pages refreshing on change detection (definition.report_parts), created or updated in place
+    report          three pages, automatic page refresh (definition.report_parts), created or updated in place
 
 Runs as you: the Databricks side like the rest of the Makefile (DATABRICKS_HOST + Azure CLI), the Fabric side with an
 Azure CLI token for the Fabric tenant (`az login --tenant <tenant_id>` once). The model reaches Databricks across
@@ -163,7 +163,10 @@ def main():
 
     model = fabric.upsert(ws["id"], "semanticModels", ITEM, "TMDL", definition.model_parts(host, http_path, catalog))
     report = fabric.upsert(ws["id"], "reports", ITEM, "PBIR", definition.report_parts(model))
-    print(f"report:  https://app.powerbi.com/groups/{ws['id']}/reports/{report}")
+    print(f"report:  https://app.powerbi.com/groups/{ws['id']}/reports/{report}  (re-queries every "
+          f"{definition.REFRESH_SECONDS} s if the capacity allows it: Admin portal -> Capacity settings -> "
+          f"{capacity_name} -> Power BI workloads -> Automatic page refresh minimum; a new capacity starts at "
+          "5 min)")  # fmt: skip
     print(f"model:   https://app.powerbi.com/groups/{ws['id']}/datasets/{model}/details  (first time: Settings -> "
           f"Data source credentials -> Databricks Client Credentials, as {SP})")  # fmt: skip
 

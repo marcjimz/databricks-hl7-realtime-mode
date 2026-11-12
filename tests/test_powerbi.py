@@ -64,8 +64,6 @@ def test_measures_read_their_own_tables_columns_and_names_are_unique():
             # DAX names are case-insensitive: a measure may not share a name with another measure or its table's columns
             assert name.lower() not in seen and name.lower() not in definition.TABLES[table], name
             seen.add(name.lower())
-    table, measure = definition.CHANGE_DETECTION
-    assert measure in definition.MEASURES[table]
 
 
 def test_every_visual_field_is_a_model_column_or_measure():
@@ -101,8 +99,9 @@ def test_rendering_is_deterministic_and_takes_its_environment_as_arguments():
     pages = [p for p in report if p.endswith("/page.json")]
     assert len(pages) == len(definition.PAGES)
     for p in pages:
-        refresh = json.loads(report[p])["objects"]["pageRefresh"][0]["properties"]
-        assert refresh["refreshType"]["expr"]["Literal"]["Value"] == "'ChangeDetection'"
+        refresh = json.loads(report[p])["objects"]["pageRefresh"][0]["properties"]  # Power BI's own encoding
+        assert refresh["refreshType"]["expr"]["Literal"]["Value"] == "'APR'"
+        assert refresh["duration"]["expr"]["Literal"]["Value"] == f"'PT{definition.REFRESH_SECONDS}S'"
     visuals = [p for p in report if p.endswith("/visual.json")]
     assert len(visuals) == sum(len(v) for v in definition.PAGES.values())
 
