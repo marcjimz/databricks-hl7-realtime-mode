@@ -84,9 +84,11 @@ Each message is keyed by patient ID. The value is JSON:
 | 422 | Databricks' error class (`UNRESOLVED_COLUMN…`, `PARSE_SYNTAX_ERROR`, …), `SQL_NOT_ALLOWED` (not one filter over one record), `INVALID_NAME`, `DUPLICATE_NAME`, `RULE_LIMIT_REACHED` (1,000 rules). Nothing applied. |
 | 404 | `NOT_FOUND_OR_INACCESSIBLE`: `DELETE` of a name with no active subscription |
 
-## The Java example
+## The example clients
 
-`examples/subscribers/java` maps one class to each step:
+Both are generated from `api/openapi.json` and do the same steps, with the same output and exit codes:
+`examples/subscribers/python` (run from the repo root with `uv`; its README maps each module to these steps) and
+`examples/subscribers/java`, which maps one class to each step:
 - `MySubscriptions`: the rules;
 - `App`: steps 1–4;
 - `api/`: the client generated from `api/openapi.json` (`SubscriptionsApi` and its models);

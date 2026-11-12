@@ -51,8 +51,8 @@ needs no change); the API tells it everything else:
 ```
 
 Change the SQL and declare again: the new filter is live within seconds. The full handshake, notification format, and
-errors: [docs/integration.md](docs/integration.md). The Java app in `examples/subscribers/java` is one example client, not part
-of the platform.
+errors: [docs/integration.md](docs/integration.md). The example clients in `examples/subscribers/` (Python and Java, both
+generated from the contract) aren't part of the platform.
 
 ## Results
 
@@ -119,7 +119,14 @@ returns the records the hub delivers.
 - **The story as an interactive deck:** [docs/story.html](docs/story.html).
 
 This walkthrough uses the **Java example** (`examples/subscribers/java`, prerequisites in its
-[README](examples/subscribers/java/README.md#prerequisites)) to drive that contract.
+[README](examples/subscribers/java/README.md#prerequisites)) to drive that contract. The **Python example** does the same
+from the repo root with no Java or Maven ([README](examples/subscribers/python/README.md)): same output and exit codes,
+and the same 25 checks.
+
+```bash
+uv run python examples/subscribers/python/subscriber.py --e2e     # the 25 checks
+uv run python examples/subscribers/python/subscriber.py           # declare my_subscriptions.py, then listen
+```
 
 ### Before you start
 
@@ -127,7 +134,7 @@ This walkthrough uses the **Java example** (`examples/subscribers/java`, prerequ
    at a mirror in `~/.m2/settings.xml`.
 2. **An onboarded app:** a service principal in `subscriber_apps` (`infra/azure/terraform.tfvars`), then `make up`.
    That creates its views, its hub, and its credential, and writes its two settings (its profile and `api.app`; no
-   secrets) to `examples/subscribers/java/apps/<app>.properties`. One-time setup:
+   secrets) to `examples/subscribers/apps/<app>.properties`. One-time setup:
    [docs/subscriptions.md](docs/subscriptions.md#set-up-bring-your-own-service-principal).
 3. **Its profile:** `[<app>]` in `~/.databrickscfg` with the SP's `client_id` and `client_secret`.
 4. **Everything running:** `make demo dev`, which includes the subscription hub and the Subscription API.

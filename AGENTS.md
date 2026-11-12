@@ -67,8 +67,10 @@ src/registry/         the subscription registry: schema, owner trigger, RLS, API
 src/subscription_api/ the Subscription API (Databricks App, FastAPI): the integration contract (OpenAPI), caller, shape
                       check, Databricks compiles, store, wait
 examples/             clients and parked designs, not part of the platform:
-                      subscribers/java/ (an example subscriber: Maven, `java -jar`; its API client is generated from
-                      docs/api/openapi.json; unit-tested by `make test`, not in the wheel or bundle sync);
+                      subscribers/python/ and subscribers/java/ (the same example subscriber twice: `uv run python ...`
+                      from the repo root, or Maven + `java -jar`; both API clients are generated from docs/api/openapi.json;
+                      unit-tested by `make test`, not in the wheel or bundle sync); subscribers/apps/ (their settings,
+                      written by `make registry`, gitignored);
                       subscriptions/ (earlier SQL-file design; not deployed, linted, or tested)
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
 docs/                 integration.md + api/openapi.json (the contract), latency, subscriptions, SCALABILITY test plan,
@@ -230,6 +232,13 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   - `e2e/E2E`.
 
   Keep logic on the server. Add a package only for a new role, not per class.
+- **The Python client mirrors the Java one, module for module** (`examples/subscribers/python`: subscriber, my_subscriptions,
+  api, notifications, eventhubs, e2e), with the same output, exit codes, and 25 checks. `build.py` generates its client
+  with openapi-python-client into `generated/` (gitignored) whenever the contract is newer; never hand-write a model there
+  either. `tests/test_python_subscriber.py` runs the generated client against the real API in-process, so an API change
+  that breaks clients fails `make test`. Keep both examples' `MySubscriptions` the same: they declare the SP's whole set.
+  - **librdkafka reports a topic it may not read only in the topic's metadata** (subscribing alone stays silent), so
+    the E2E read check asks for metadata first. Java's client raises it on subscribe.
 - **Lakebase drops connections** (idle close, suspend after 5 idle minutes, compute restarts). A pooled API
   connection whose first statement hits a network error is replaced, and one that failed is never pooled (a dead one
   once made every API call 500 for days); the hub's client reopens and retries its idempotent statement once.

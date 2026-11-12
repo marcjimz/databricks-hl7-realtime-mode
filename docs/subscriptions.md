@@ -182,7 +182,7 @@ Sunday wipe.
      - the app's NOLOGIN registry role and its binding;
      - its views `<catalog>.sub_my_app.<source>`;
      - CAN_USE on the Subscription API, and the API's read on those views.
-     - It also writes the app's settings to `examples/subscribers/java/apps/my-app.properties` (gitignored, no secrets),
+     - It also writes the app's settings to `examples/subscribers/apps/my-app.properties` (gitignored, no secrets),
        rewritten every run because URLs change when the workspace is rebuilt.
 3. **Add the SP's profile** to `~/.databrickscfg`, named after the app, then `chmod 600 ~/.databrickscfg`:
    ```ini

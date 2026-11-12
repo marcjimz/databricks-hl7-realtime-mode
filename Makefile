@@ -11,7 +11,9 @@
 #   make clear-data dev   empty the Delta tables and refill from live data (~2 min; RTM keeps running)
 #   make stop dev         stop the feeds, every pipeline, and the Subscription API (stops Databricks billing)
 #
-# The Java subscriber app runs on its own (java -jar; its workspace E2E job is its own bundle): examples/subscribers/java/README.md.
+# The subscriber examples run on their own, from the repo root:
+#   uv run python examples/subscribers/python/subscriber.py [--e2e]   (Python; make python-client regenerates its API client)
+#   java -jar examples/subscribers/java/target/hl7-subscriber.jar [--e2e]   (Java; its workspace E2E job is its own bundle)
 #
 # Your environment lives in infra/azure/terraform.tfvars (gitignored). Auth is the Azure CLI (`az login`) against the
 # workspace in Terraform's outputs, so a rebuilt workspace needs no login or config.
@@ -34,10 +36,10 @@ GENERATORS := hl7_generator epic_json_generator
 active_runs = $(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))'
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")
 
-.PHONY: help install test lint up uc registry demo clear-data stop guard-target $(ENVS)
+.PHONY: help install test lint python-client up uc registry demo clear-data stop guard-target $(ENVS)
 
 help:
-	@sed -n '3,17p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
+	@sed -n '3,19p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 
 guard-target:
 	@test -n "$(TARGET)" || { echo "error: name the environment, e.g. 'make demo dev' (one of: $(ENVS))"; exit 2; }
@@ -50,8 +52,8 @@ test:
 	mvn -q -f examples/subscribers/java/pom.xml test
 
 lint:
-	uv run ruff check src tests infra
-	uv run ruff format --check src tests infra
+	uv run ruff check src tests infra examples/subscribers/python
+	uv run ruff format --check src tests infra examples/subscribers/python
 	terraform fmt -check -recursive infra
 
 # The plan is applied only after you confirm it (never auto-approved).
@@ -62,6 +64,10 @@ up:
 	@read -p "Apply this plan? [y/N] " ok && [ "$$ok" = y ] || { echo "not applied"; rm -f infra/azure/tfplan; exit 1; }
 	@$(TF) apply -input=false tfplan && rm -f infra/azure/tfplan
 	@$(MAKE) --no-print-directory uc registry
+
+# The Python example's API client, generated from docs/api/openapi.json (it also regenerates itself when the contract changes).
+python-client:
+	@rm -rf examples/subscribers/python/generated && uv run python -c 'import sys; sys.path.insert(0, "examples/subscribers/python"); import build; build.ensure()' && echo "generated examples/subscribers/python/generated/hl7_subscriptions_client from docs/api/openapi.json"
 
 uc:
 	@DBX="$(DBX)" infra/uc.sh

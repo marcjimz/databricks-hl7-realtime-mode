@@ -12,7 +12,7 @@
                       - CAN_USE on the Subscription API app
   Subscription API  its service principal joins `subscription_service` (so it can act as each app) and may read the
                     apps' views; the Lakebase Data API is turned off, so the API is the only way in
-  app settings      examples/subscribers/java/apps/<app>.properties (gitignored) for the Java example, rewritten
+  app settings      examples/subscribers/apps/<app>.properties (gitignored) for the example apps, rewritten
                     every run (URLs change when the workspace is rebuilt). The profile name defaults to the app name.
 
 Runs as you (the project owner), authenticated like the rest of the Makefile (DATABRICKS_HOST + Azure CLI). The
@@ -194,7 +194,7 @@ def main():
         print(f"ok       app {name} ({a['application_id']}) -> {a['hub']}; views {views}")
 
     data_api_url = f"https://{host}/api/2.0/workspace/{tf_output('workspace_id')}/rest/{DATABASE}"  # the old bypass
-    out = ROOT / "examples/subscribers/java/apps"
+    out = ROOT / "examples/subscribers/apps"
     out.mkdir(exist_ok=True)
     for name in apps:
         (out / f"{name}.properties").write_text(
@@ -210,7 +210,7 @@ def main():
             f"e2e.base_schema          = {catalog}.{schema}\n"
             f"e2e.data_api_url         = {data_api_url}\n"
         )
-        print(f"wrote    examples/subscribers/java/apps/{name}.properties")
+        print(f"wrote    examples/subscribers/apps/{name}.properties")
     # The subscriber bundle (examples/subscribers/java/databricks.yml, the workspace E2E job) for the first app.
     if apps:
         name, a = sorted(apps.items())[0]
