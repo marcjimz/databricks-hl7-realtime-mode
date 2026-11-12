@@ -19,18 +19,20 @@ class AppTest {
     @Test
     void findsTheSettingsFromTheRepoRootThroughTheAppsOwnDirectory(@TempDir Path tmp) throws IOException {
         var root = Files.createDirectories(tmp.resolve("repo"));
-        var apps = Files.createDirectories(root.resolve("examples/subscribers/java/apps"));
+        var apps = Files.createDirectories(root.resolve("examples/subscribers/apps")); // shared with the Python example
         var file = Files.writeString(apps.resolve("sp-app-a.properties"), "");
-        var home = root.resolve("examples/subscribers/java");
+        var home = Files.createDirectories(root.resolve("examples/subscribers/java"));
+        var dirs = List.of(root, home, home.getParent());
 
-        assertEquals(file, App.settingsFile(null, List.of(root, home)), "run from the repo root");
-        assertEquals(file, App.settingsFile(null, List.of(home, home)), "run from examples/subscribers/java");
+        assertEquals(file, App.settingsFile(null, dirs), "run from the repo root");
+        assertEquals(file, App.settingsFile(null, List.of(home, home, home.getParent())), "run from examples/subscribers/java");
         var own = Files.writeString(root.resolve("subscriber.properties"), "");
-        assertEquals(own, App.settingsFile(null, List.of(root, home)), "the current directory wins");
+        assertEquals(own, App.settingsFile(null, dirs), "the current directory wins");
         assertNull(App.settingsFile(null, List.of(tmp)), "none: all settings as arguments");
 
         Files.writeString(apps.resolve("sp-app-b.properties"), "");
-        assertThrows(IllegalArgumentException.class, () -> App.settingsFile(null, List.of(home)), "several apps: name one");
+        assertThrows(IllegalArgumentException.class, () -> App.settingsFile(null, List.of(home.getParent())),
+                "several apps: name one");
     }
 
     @Test

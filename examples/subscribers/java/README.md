@@ -45,7 +45,7 @@ java -jar examples/subscribers/java/target/hl7-subscriber.jar         # declare 
 java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e   # 25 live checks: a PASS/FAIL table, exit 1 on any failure
 ```
 
-With more than one file in `apps/`, name the app: `java -jar … examples/subscribers/java/apps/<app>.properties`.
+With more than one file in `apps/`, name the app: `java -jar … examples/subscribers/apps/<app>.properties`.
 `--duration=PT5M` bounds a run. The walkthrough with expected output is in the
 [README](../../README.md#subscriptions-demo).
 

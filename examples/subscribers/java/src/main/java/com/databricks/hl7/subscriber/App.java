@@ -46,7 +46,8 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
  * Settings: only databricks.profile (the service principal) and api.app (the Subscription API's Databricks App name;
  * its URL is looked up, so a rebuilt workspace needs no change; api.url overrides it). Its topic, Kafka bootstrap
  * servers, and Unity Catalog credential come from the API (getConnection). They're read from the file (default subscriber.properties,
- * else the one file in apps/, which `make registry` writes; looked up in the current directory, then next to the jar)
+ * else the one file in apps/, which `make registry` writes to examples/subscribers/apps; looked up in the current directory,
+ * then the app's home and its parent)
  * plus key=value arguments. --e2e runs the end-to-end checks instead.
  */
 public final class App {
@@ -190,7 +191,8 @@ public final class App {
     /** The settings file plus key=value arguments (which win). Refuses secrets: they belong in the CLI profile. */
     static Properties settings(List<String> argv) throws IOException {
         Path named = argv.stream().filter(a -> a.endsWith(".properties")).map(Path::of).findFirst().orElse(null);
-        Path file = settingsFile(named, appHome() == null ? List.of(Path.of("")) : List.of(Path.of(""), appHome()));
+        Path file = settingsFile(named, appHome() == null ? List.of(Path.of(""))
+                : List.of(Path.of(""), appHome(), appHome().getParent()));
         var p = new Properties();
         if (file != null) {
             if (!Files.exists(file)) throw new IllegalArgumentException(file + " not found");
