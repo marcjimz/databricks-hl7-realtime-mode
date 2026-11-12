@@ -6,6 +6,9 @@
 #   make up               build or rebuild Azure (Terraform plan -> you confirm -> apply), then make uc + registry
 #   make uc               create or repair the Unity Catalog catalog and credentials (idempotent)
 #   make registry         create or repair the Lakebase subscription registry and onboard subscriber apps (idempotent)
+#   make fabric-up        our own Fabric capacity for the live Power BI dashboard (plan -> you confirm -> apply; it bills)
+#   make fabric-pause     stop its billing (fabric-resume to start again, fabric-down to destroy it)
+#   make powerbi          the dashboard's views, its read-only SP's grants, and the Power BI model + report (idempotent)
 #
 #   make demo dev         deploy, start every pipeline, both feeds, and the Subscription API; print the URLs
 #   make clear-data dev   empty the Delta tables and refill from live data (~2 min; RTM keeps running)
@@ -23,6 +26,7 @@ TARGET := $(filter $(ENVS),$(MAKECMDGOALS))
 DBX    := databricks
 BUNDLE := $(DBX) bundle
 TF     := terraform -chdir=infra/azure
+FAB    := terraform -chdir=infra/fabric
 
 # Workspace, catalog, and namespace come from Terraform outputs (they change when the sandbox is rebuilt).
 tf_out = $(shell $(TF) output -raw $(1) 2>/dev/null)
@@ -36,10 +40,11 @@ GENERATORS := hl7_generator epic_json_generator
 active_runs = $(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))'
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")
 
-.PHONY: help install test lint python-client up uc registry demo clear-data stop guard-target $(ENVS)
+.PHONY: help install test lint python-client up uc registry fabric-up fabric-pause fabric-resume fabric-down powerbi \
+	demo clear-data stop guard-target $(ENVS)
 
 help:
-	@sed -n '3,19p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
+	@sed -n '3,22p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 
 guard-target:
 	@test -n "$(TARGET)" || { echo "error: name the environment, e.g. 'make demo dev' (one of: $(ENVS))"; exit 2; }
@@ -74,6 +79,28 @@ uc:
 
 registry:
 	@uv run python infra/registry.py
+
+# The live Power BI dashboard's Fabric capacity (infra/fabric, its own tenant and subscription). It bills while Active.
+fabric_capacity = https://management.azure.com$$($(FAB) output -raw capacity_id)/$(1)?api-version=2023-11-01
+fabric-up:
+	@test -f infra/fabric/terraform.tfvars || { echo "error: cp infra/fabric/terraform.tfvars.example infra/fabric/terraform.tfvars"; exit 2; }
+	@$(FAB) init -input=false >/dev/null
+	@$(FAB) plan -input=false -out=tfplan
+	@read -p "Apply this plan? [y/N] " ok && [ "$$ok" = y ] || { echo "not applied"; rm -f infra/fabric/tfplan; exit 1; }
+	@$(FAB) apply -input=false tfplan && rm -f infra/fabric/tfplan
+
+fabric-pause:
+	@az rest --method post --url "$(call fabric_capacity,suspend)" 2>/dev/null && echo "paused Fabric capacity (no Fabric billing)"
+
+fabric-resume:
+	@az rest --method post --url "$(call fabric_capacity,resume)" 2>/dev/null && echo "resumed Fabric capacity (billing)"
+
+# Terraform asks you to confirm the destroy.
+fabric-down:
+	@$(FAB) destroy -input=false
+
+powerbi:
+	@uv run python infra/powerbi.py
 
 # Continuous pipelines start on deploy; `run` starts any that are stopped (running ones are left alone).
 demo: guard-target
