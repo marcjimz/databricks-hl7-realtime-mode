@@ -59,6 +59,7 @@ FABRIC = ROOT / "infra/fabric"
 def test_fabric_stack_is_tagged_and_hardcodes_no_tenant_or_subscription():
     tf = "".join(p.read_text() for p in FABRIC.glob("*.tf"))
     assert "owner = var.owner" in tf, "sandbox policy requires an owner tag"
+    assert "RemoveAfter = var.remove_after" in tf and "YYYY-MM-DD" in tf, "the subscription deletes untagged resources"
     assert "var.subscription_id" in tf and "var.tenant_id" in tf
     assert not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", tf), "no hardcoded IDs"
     assert "role_assignment" not in tf, "a capacity names its admins; no role assignments needed"

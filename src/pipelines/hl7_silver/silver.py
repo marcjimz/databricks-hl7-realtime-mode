@@ -22,5 +22,10 @@ dp.create_sink("silver_entities", "kafka", rtm.sink_options(spark))
 def hl7_silver():
     return silver.to_silver_records(
         rtm.read_topic(spark, conf(spark, "topics.bronze")),
-        **{entity: conf(spark, f"topics.{table}") for entity, table in silver.TABLES.items()},
+        messages=conf(spark, "topics.silver_messages"),
+        encounters=conf(spark, "topics.silver_encounters"),
+        observations=conf(spark, "topics.silver_observations"),
+        orders=conf(spark, "topics.silver_orders"),
+        diagnoses=conf(spark, "topics.silver_diagnoses"),
+        quarantine=conf(spark, "topics.quarantine"),
     )

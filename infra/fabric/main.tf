@@ -1,7 +1,7 @@
 # The live Power BI dashboard's own Fabric capacity: isolated, so its cost is its own and its page-refresh limits are
 # ours to set. No role assignments: a capacity names its administrators by user principal name.
 locals {
-  tags = merge(var.tags, { owner = var.owner })
+  tags = merge(var.tags, { owner = var.owner, RemoveAfter = var.remove_after })
 }
 
 resource "azurerm_resource_group" "this" {
