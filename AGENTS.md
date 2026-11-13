@@ -60,11 +60,14 @@ databricks.yml        variables + targets; include: resources/**
 resources/<type>/     bundle resources grouped by type: jobs/, pipelines/, schemas/, dashboards/
 src/hl7rt/            shared library: pure DataFrame transforms, Event Hubs helpers, generators (unit-tested)
 src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path = src/)
-src/dashboards/       the AI/BI dashboard definition (.lvdash.json)
+src/dashboards/       the AI/BI dashboard definitions (.lvdash.json); powerbi/: the live Power BI dashboard's views and
+                      its model + report as data (definition.py)
 infra/azure/          Terraform for everything Azure: workspace (+ metastore assignment), ADLS, access connector,
                       Event Hubs + hubs, RBAC. tfvars/state gitignored (local state).
 infra/uc.sh           idempotent Unity Catalog bootstrap (`make uc`): credentials, external location, catalog
 infra/registry.py     idempotent registry bootstrap (`make registry`): Lakebase project, schema, app roles, UC views, API grants
+infra/fabric/         Terraform for the Power BI dashboard's Fabric capacity (its own tenant + subscription; tfvars gitignored)
+infra/powerbi.py      idempotent Power BI deploy (`make powerbi`): views, read-only SP grants, Fabric workspace, model, report
 src/registry/         the subscription registry: schema, owner trigger, RLS, API functions, grants (registry.sql)
 src/subscription_api/ the Subscription API (Databricks App, FastAPI): the integration contract (OpenAPI), caller, shape
                       check, Databricks compiles, store, wait
@@ -393,9 +396,30 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
 - `map_from_entries` + `spark.sql.mapKeyDedupPolicy=LAST_WIN` over a reversed array = first occurrence
   wins. That conf is set via the table's `spark_conf` (`epic_json.SPARK_CONF`).
 - **Delta stats cover the first 32 columns only.** A `cluster_by` column past #32 fails with
-  `DELTA_CLUSTERING_COLUMN_MISSING_STATS`. Set `delta.dataSkippingStatsColumns` (see `silver_hl7`).
+  `DELTA_CLUSTERING_COLUMN_MISSING_STATS`. Set `delta.dataSkippingStatsColumns` (see the silver tables in `mirror.py`).
 - Tests run with `TZ=UTC` and `spark.sql.session.timeZone=UTC` (collected timestamps convert to the
   process zone).
+
+## Live Power BI dashboard (see docs/powerbi.md)
+
+- **DirectQuery on small views, never imports.** `src/dashboards/powerbi/views.sql` holds pre-aggregated views over a short
+  window in `<catalog>.powerbi`, and each visual runs one query per refresh. `tests/test_powerbi.py` keeps the views
+  reading only produced tables and monitor views, and the model and report consistent with them. `make powerbi` checks the
+  declared columns against Unity Catalog.
+- **The model and report are generated, not built in Desktop.** `definition.py` renders TMDL (model) and PBIR (report),
+  deployed through the Fabric REST API (create, then `updateDefinition` in place). Host, warehouse, catalog, and model ID
+  are filled in at deploy time.
+- **Learn PBIR encodings from what Power BI saves, not from the schema.** The schema accepted a hand-written
+  change-detection `pageRefresh` that the service ignored. Power BI saves a fixed refresh as `refreshType 'APR'`,
+  `duration 'PT5S'`. To find a setting's encoding, set it in the UI, `getDefinition`, and copy that.
+- **Live refresh needs our own capacity, and its admin minimum lowered by hand.** A new capacity caps automatic page
+  refresh at 5 minutes, and only the Admin portal sets it (no Power BI REST or ARM setting). Shared capacity's floor is 30 minutes.
+- **Cross-tenant auth is Databricks OAuth M2M.** That's a Databricks-managed SP's client ID and secret, entered as
+  "Databricks Client Credentials". Entra SSO doesn't cross tenants. The SP needs the `databricks-sql-access` entitlement,
+  or every call fails before any grant is checked. It gets SELECT on `<catalog>.powerbi` only, and views over the
+  Lakebase-registered catalog work through that grant alone.
+- **Each open report polls on its own** (~70 queries a minute per viewer at 5 s), so the warehouse stays up while anyone
+  watches. Measure before raising viewers or lowering the interval.
 
 ## Workflow
 
