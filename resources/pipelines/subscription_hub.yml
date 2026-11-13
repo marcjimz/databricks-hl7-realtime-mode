@@ -1,4 +1,4 @@
-# Subscription hub — gold topics -> each subscriber app's own topic, by rules registered at runtime in Lakebase.
+# Subscription hub — silver entity topics -> each subscriber app's own topic, by rules registered at runtime in Lakebase.
 # Micro-batch (NOT Real-Time Mode): it needs foreachBatch to apply a changing rule set, which RTM doesn't support.
 # foreach_batch_sink is Public Preview, so this pipeline (only) runs on the PREVIEW channel.
 resources:
@@ -24,8 +24,9 @@ resources:
         hl7.eh.service_credential: ${var.eh_service_credential}
         hl7.registry.endpoint: ${var.registry_endpoint}
         hl7.registry.database: ${var.registry_database}
-        hl7.topics.gold_encounters: ${var.hl7_gold_encounters_topic}
-        hl7.topics.gold_observations: ${var.hl7_gold_observations_topic}
-        hl7.topics.gold_orders: ${var.hl7_gold_orders_topic}
+        hl7.topics.silver_encounters: ${var.hl7_silver_encounters_topic}
+        hl7.topics.silver_observations: ${var.hl7_silver_observations_topic}
+        hl7.topics.silver_orders: ${var.hl7_silver_orders_topic}
+        hl7.topics.silver_diagnoses: ${var.hl7_silver_diagnoses_topic}
         hl7.subscriptions.chunk: ${var.hub_rules_per_projection}
         hl7.subscriptions.max_records_per_batch: ${var.hub_max_records_per_batch}

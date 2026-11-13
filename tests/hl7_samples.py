@@ -31,7 +31,14 @@ PV1 = segment("PV1", {1: "1", 2: "E", 3: "ED^01^A^FAC01", 19: "V000000042", 44: 
 
 def adt_a04(control_id: str = "CTRL0001") -> str:
     return message(
-        [segment("MSH", {**MSH, 9: "ADT^A04^ADT_A01", 10: control_id, 13: "42"}), segment("EVN", {1: "A04"}), PID, PV1]
+        [
+            segment("MSH", {**MSH, 9: "ADT^A04^ADT_A01", 10: control_id, 13: "42"}),
+            segment("EVN", {1: "A04"}),
+            PID,
+            PV1,
+            segment("DG1", {1: "1", 3: "J18.9^Pneumonia^ICD-10-CM", 5: "20261023080500", 6: "ADMITTING"}),
+            segment("DG1", {1: "2", 3: "B05.9^Measles without complication^ICD-10-CM", 6: "WORKING"}),
+        ]
     )
 
 

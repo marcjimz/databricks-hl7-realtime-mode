@@ -205,7 +205,7 @@ def main():
             f"api.app              = {API_APP}\n"
             "# E2E checks (--e2e): all must be refused to this app.\n"
             f"e2e.forbidden_credential = {catalog}_eventhubs\n"
-            f"e2e.forbidden_topic      = {catalog}.{schema}.gold_observations\n"
+            f"e2e.forbidden_topic      = {catalog}.{schema}.silver_observations\n"
             f"e2e.own_topic            = {apps[name]['hub']}\n"
             f"e2e.base_schema          = {catalog}.{schema}\n"
             f"e2e.data_api_url         = {data_api_url}\n"
@@ -218,7 +218,8 @@ def main():
         overrides.parent.mkdir(parents=True, exist_ok=True)
         overrides.write_text(json.dumps({
             "app": name, "app_id": a["application_id"], "api_app": API_APP,
-            "forbidden_credential": f"{catalog}_eventhubs", "forbidden_topic": f"{catalog}.{schema}.gold_observations",
+            "forbidden_credential": f"{catalog}_eventhubs",
+            "forbidden_topic": f"{catalog}.{schema}.silver_observations",
             "own_topic": a["hub"],
             "base_schema": f"{catalog}.{schema}", "data_api_url": data_api_url,
         }, indent=2))  # fmt: skip

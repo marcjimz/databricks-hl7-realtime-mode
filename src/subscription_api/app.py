@@ -48,7 +48,7 @@ HUB_STALE_AFTER = 120  # seconds without a hub batch for a source
 MAX_WAIT = 60  # per call; clients poll (a proxy in between may cut long requests)
 
 DESCRIPTION = """
-The contract any application uses to receive gold HL7 records it chooses with Databricks SQL. The full guide, with
+The contract any application uses to receive HL7 records it chooses with Databricks SQL. The full guide, with
 examples: docs/integration.md in the repo.
 
 **Authentication.** Call with `Authorization: Bearer <token>`. The token is your app's Databricks service principal's
@@ -69,8 +69,8 @@ tells the API who is calling. The service principal must be an onboarded subscri
    credential: `POST /api/2.1/unity-catalog/temporary-service-credentials` on the workspace).
    Deduplicate on `notificationId`, and act only on the `(subscriptionId, revision)` pairs you registered.
 
-A rule is `SELECT <columns> FROM <gold source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The same
-SQL against your views in the SQL editor returns the records you'll receive.
+A rule is `SELECT <columns> FROM <silver source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The
+same SQL against your views in the SQL editor returns the records you'll receive.
 
 **Compatibility.** Version 1 only adds fields: clients must ignore fields they don't know.
 """
@@ -91,8 +91,8 @@ class Item(BaseModel):
     name: str = Field(description="1-63 lowercase letters, digits, or '-'; unique within your app",
                       examples=["critical-potassium"])  # fmt: skip
     sql: str = Field(
-        description="SELECT <columns> FROM <gold source> WHERE <filter>, in Databricks SQL",
-        examples=["SELECT patient_id, value_num, units FROM gold_observations "
+        description="SELECT <columns> FROM <silver source> WHERE <filter>, in Databricks SQL",
+        examples=["SELECT patient_id, value_num, units FROM silver_observations "
                   "WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"],
     )  # fmt: skip
 
@@ -102,7 +102,7 @@ class Declared(BaseModel):
 
 
 class One(BaseModel):
-    sql: str = Field(description="SELECT <columns> FROM <gold source> WHERE <filter>, in Databricks SQL")
+    sql: str = Field(description="SELECT <columns> FROM <silver source> WHERE <filter>, in Databricks SQL")
 
 
 # Responses. Extra fields are kept, so the contract can grow without breaking clients.
@@ -213,10 +213,10 @@ class Notification(_Open):
     subscriptionId: str
     subscription: str = Field(description="The subscription's name")
     revision: int = Field(description="Act only on the (subscriptionId, revision) pairs your last declare returned")
-    source: str = Field(description="The gold source the record came from")
+    source: str = Field(description="The silver source the record came from")
     sourcePartition: int
     sourceOffset: int = Field(json_schema_extra={"format": "int64"})
-    gold_ts: str = Field(description="When the gold record was produced (ISO 8601, broker time)")
+    source_ts: str = Field(description="When the source record was produced (ISO 8601, broker time)")
     payload: dict[str, Any] = Field(description="Exactly the columns the rule selects, nulls included")
 
 

@@ -9,7 +9,7 @@ AUTO CDC upsert on lakehouse.KEYS: a re-sent record updates its row instead of a
 from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
-from hl7rt import eventhubs, gold, lakehouse
+from hl7rt import eventhubs, lakehouse
 from hl7rt.config import conf
 
 
@@ -41,23 +41,22 @@ def _layer(table: str, config_key: str, rows, comment: str, **table_options):
 _layer("raw_hl7", "topics.raw", lakehouse.raw_rows, "The raw HL7 topic as received, with producer -> broker latency.")
 _layer("bronze_hl7", "topics.bronze", lakehouse.bronze_rows,
        "Bronze: raw message + MSH envelope + raw-topic lineage, hop latency.")  # fmt: skip
-_layer(
-    "silver_hl7",
-    "topics.silver",
-    lakehouse.silver_rows,
-    "Silver: parsed HL7 in the Epic silver column contract, plus observations (one per OBX), lineage, and hop / "
-    "end-to-end latency.",
-    # Delta collects stats on the first 32 columns by default; the contract puts kafka_timestamp at #36.
-    table_properties={
-        "delta.dataSkippingStatsColumns": "kafka_timestamp,msg_dt_tm,msg_control_id,msg_type,patient_id,e2e_ms,"
-        "raw_partition,raw_offset"
-    },
-)
 _layer("quarantine_hl7", "topics.quarantine", lakehouse.quarantine_rows,
-       "Quarantine: messages that could not be silvered, with the reason.")  # fmt: skip
-_layer("gold_encounters", "topics.gold_encounters", lambda df: lakehouse.gold_rows(df, gold.ENCOUNTER_SCHEMA),
-       "Gold encounters: one row per ADT event, with silver -> gold latency.")  # fmt: skip
-_layer("gold_observations", "topics.gold_observations", lambda df: lakehouse.gold_rows(df, gold.OBSERVATION_SCHEMA),
-       "Gold observations: one row per OBX result, with latency.")  # fmt: skip
-_layer("gold_orders", "topics.gold_orders", lambda df: lakehouse.gold_rows(df, gold.ORDER_SCHEMA),
-       "Gold orders: one row per ORM order, with latency.")  # fmt: skip
+       "Quarantine: messages that could not be parsed, with the reason.")  # fmt: skip
+# Silver: one table per entity, each row with its message's context, lineage, and bronze -> silver latency. Delta keeps
+# stats on the first 32 columns, and observations put kafka_timestamp past #32.
+_STATS = {
+    "delta.dataSkippingStatsColumns": "kafka_timestamp,msg_dt_tm,msg_type,patient_id,e2e_ms,raw_partition,raw_offset"
+}
+_layer("silver_messages", "topics.silver_messages", lambda df: lakehouse.silver_rows(df, "silver_messages"),
+       "Silver messages: one row per parsed message (header, patient, visit, raw payload).",
+       table_properties=_STATS)  # fmt: skip
+_layer("silver_encounters", "topics.silver_encounters", lambda df: lakehouse.silver_rows(df, "silver_encounters"),
+       "Silver encounters: one row per ADT event.", table_properties=_STATS)  # fmt: skip
+_layer("silver_observations", "topics.silver_observations",
+       lambda df: lakehouse.silver_rows(df, "silver_observations"),
+       "Silver observations: one row per OBX result.", table_properties=_STATS)  # fmt: skip
+_layer("silver_orders", "topics.silver_orders", lambda df: lakehouse.silver_rows(df, "silver_orders"),
+       "Silver orders: one row per ORM order.", table_properties=_STATS)  # fmt: skip
+_layer("silver_diagnoses", "topics.silver_diagnoses", lambda df: lakehouse.silver_rows(df, "silver_diagnoses"),
+       "Silver diagnoses: one row per DG1 diagnosis.", table_properties=_STATS)  # fmt: skip

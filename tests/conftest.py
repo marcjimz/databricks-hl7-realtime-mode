@@ -80,9 +80,9 @@ def bronze_df(spark):
 # A throwaway PostgreSQL with the registry applied: two onboarded apps (NOLOGIN on Lakebase; LOGIN here so tests can
 # act as one directly), a `stranger` with no binding, and `api`, the Subscription API's role.
 APPS = {
-    "app_a": ("app-a", "sp-a", "cat.subscribers.app-a", ["gold_observations"],
+    "app_a": ("app-a", "sp-a", "cat.subscribers.app-a", ["silver_observations"],
               ["patient_id", "value_num", "observation_cd_desc"]),
-    "app_b": ("app-b", "sp-b", "cat.subscribers.app-b", ["gold_observations", "gold_encounters"], ["patient_id"]),
+    "app_b": ("app-b", "sp-b", "cat.subscribers.app-b", ["silver_observations", "silver_encounters"], ["patient_id"]),
 }  # fmt: skip
 
 

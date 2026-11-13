@@ -17,9 +17,9 @@ class ListenerTest {
     final Listener listener = new Listener(Map.of("s1", 3), "my-group",
             new PrintStream(bytes, true, StandardCharsets.UTF_8), NOW);
 
-    static String record(String id, String sid, int revision, Instant goldTs) {
+    static String record(String id, String sid, int revision, Instant sourceTs) {
         return "{\"notificationId\":\"" + id + "\",\"subscriptionId\":\"" + sid + "\",\"subscription\":\"critical-k\","
-                + "\"revision\":" + revision + ",\"gold_ts\":\"" + goldTs + "\",\"payload\":{\"value_num\":7.1}}";
+                + "\"revision\":" + revision + ",\"source_ts\":\"" + sourceTs + "\",\"payload\":{\"value_num\":7.1}}";
     }
 
     String out() {

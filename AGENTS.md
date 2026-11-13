@@ -12,13 +12,15 @@ Unity Catalog service credential. It has to **prove** low latency with measureme
 
 ```
 HOT PATH (RTM, Event Hubs topics between every layer)
-  raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_hl7 ─► gold ─► gold_*
+  raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_{messages,encounters,observations,orders,diagnoses} | quarantine_hl7
 LAKEHOUSE PATH (SDP micro-batch, off the hot path)
   every topic ─► the Delta streaming table of the same name (audit, replay, BI) + per-record latency telemetry
 ```
 
-- Layers are **raw → bronze → silver → gold**, each both an RTM Kafka topic and an SDP streaming table.
-- **Subscriptions** over gold: apps register Databricks SQL rules at runtime through the Subscription API (a Databricks
+- Layers are **raw → bronze → silver**, each both an RTM Kafka topic and an SDP streaming table. Silver is one topic and
+  table per entity. There's no gold layer on the hot path: nothing there needs a join, so silver writes the entity rows
+  itself (one hop less). `gold` is kept for future business views built off the hot path.
+- **Subscriptions** over silver: apps register Databricks SQL rules at runtime through the Subscription API (a Databricks
   App; the rules live in a Lakebase registry), a micro-batch hub pipeline
   delivers matches to each app's own hub, and a Java app (`examples/subscribers/java`) shows the client side. See
   "Subscription rules" and docs/subscriptions.md. The earlier SQL-file design is in `examples/subscriptions/`.
@@ -173,12 +175,12 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   case-sensitive grant check would fail a rule Databricks accepted.
 - **Rules are Databricks SQL, and Databricks compiles them.** The Subscription API (`src/subscription_api`, a Databricks
   App) runs `DESCRIBE QUERY` against the caller's own views and passes Databricks' errors through unchanged. The only
-  rule logic of our own is the shape check (`rules.py`): one SELECT of columns, from one gold source, with a WHERE. No
+  rule logic of our own is the shape check (`rules.py`): one SELECT of columns, from one silver source, with a WHERE. No
   joins, subqueries, CTEs, set operations, aggregates, parameters, or functions that reach outside the record.
   - **Why the shape check:** the hub evaluates the WHERE with its own permissions. In the spike, a `(SELECT ...)` inside
     app SQL ran with the hub's permissions.
   - **Keep it small.** Don't add custom validation that Databricks already does. Joins and cross-event logic become new
-    platform-built gold sources, not app rules.
+    platform-built sources, not app rules.
 - **The hub evaluates exactly what the SQL editor would.** It runs the stored WHERE with `F.expr` over the record.
   `tests/test_subscriptions.py` compares the hub with `spark.sql` for each operator, NULLs included. The hub re-checks
   each rule (shape plus granted columns) before running it, and a rule that fails on data is FAILED alone.
@@ -282,25 +284,35 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
 
 ## Data contracts
 
-- **Silver keeps the customer's Epic silver contract**: the same 34 fields, names, order, and types, then
-  `payload`, `kafka_timestamp`, `_ingested_at`, then lineage (`raw_ts`, `bronze_ts`, `raw_partition`, `raw_offset`).
-  Gold entities carry the same raw coordinates. Raw-HL7 silver (`hl7rt.hl7v2`) and the Epic JSON silver
-  (`hl7rt.epic_json`) produce the same shape. Extras (`observations`, lineage, latency) come **after** the contract.
-  The HL7 field → column mapping is documented at the top of `hl7rt/hl7v2.py`.
+- **Silver is one row per entity** (`hl7rt.silver`):
+  - `silver_messages`: one per message;
+  - `silver_encounters`: ADT;
+  - `silver_observations`: one per OBX, with the LOINC/alternate code;
+  - `silver_orders`: ORM;
+  - `silver_diagnoses`: one per DG1, with code, system, and type.
+
+  Every row starts its entity fields with `CONTEXT` (patient, visit, header) and ends with `LINEAGE` (`raw_ts`,
+  `bronze_ts`, `raw_partition`, `raw_offset`). So a rule on one entity needs no join: real criteria ("ADT A04 at
+  these points of care with this diagnosis") are one filter. Repeating segments carry `position` (1-based), the upsert
+  key with the raw coordinates. HL7 set IDs are optional, positions always exist.
+- **Column names are the Epic silver contract's** (the names real subscription criteria use, docs/examples/criteria.md).
+  The flat "first OBX/OBR" columns are gone: rules run on entity rows. The Epic JSON pipeline (`hl7rt.epic_json`) keeps
+  its own 34-column contract. The HL7 field → column mapping is documented at the top of `hl7rt/hl7v2.py`.
 - Build HL7 test messages by field number (`hl7rt.generators.hl7v2.segment`), never by hand-counting pipes.
   One hand-written golden message checks the builder.
-- **Gold** (`hl7rt.gold`) is one entity per topic: encounters (ADT), observations (one per OBX, `value_num` for
-  `NM`), orders (ORM). One flow writes all three: build an array of `(topic, value)` per silver record and
-  `explode` it. Gold JSON uses `to_json(..., {"ignoreNullFields": "false"})` so every record has the full shape
-  subscribers code against. (Spark's default drops null fields.) Change a gold schema only additively.
-- **Gold tables carry `_meta`** (record_id, gold_ts, raw_ts), a stable record identity for downstream consumers.
+- **One silver flow writes every entity topic.** It parses each message once, builds an array of `(topic, value)`, and
+  `explode`s it. The sink routes by `topic`. Entity JSON uses `to_json(..., {"ignoreNullFields": "false"})` so every
+  record has the full shape subscribers code against. (Spark's default drops null fields.) After going live, change an
+  entity schema only additively. The single flow's plan is about the size of the old silver flow's alone
+  (`tests/test_silver.py` guards it).
+- **Silver tables carry `_meta`** (record_id, source_ts, raw_ts), a stable record identity for downstream consumers.
 - Each hot-path record carries the upstream broker timestamps (`raw_ts`, `bronze_ts`, ...). The lakehouse mirror
   (`hl7rt.lakehouse`) turns them into `hop_ms` / `e2e_ms` columns.
 
 ## Measuring latency
 
 - Event Hubs stamps every record with **LogAppendTime** (`timestampType = 1`). Each layer carries the
-  upstream topic's broker timestamp forward (`raw_ts`, `bronze_ts`, `silver_ts`, `gold_ts`), so
+  upstream topic's broker timestamp forward (`raw_ts`, `bronze_ts`, `silver_ts`, `source_ts`), so
   `hop_ms = this_topic.timestamp - upstream_ts` uses broker clocks only, with no client clock skew.
 - **The producer → raw hop crosses clocks** (generator host vs broker), so it can read slightly negative.
   Every other hop compares broker timestamps only.
@@ -312,7 +324,7 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
 - **Always check the pipeline event log for flow `WARN`/`ERROR` before reading latency.** A crash and
   restart looks exactly like a latency spike.
 - **At-least-once, upserted.** The Kafka sink is at-least-once: a pipeline that restarts from its checkpoint
-  re-writes records sent since the last commit (Phase 5: ~17k gold records). Topics may carry repeats; Delta doesn't.
+  re-writes records sent since the last commit (Phase 5: ~17k records). Topics may carry repeats; Delta doesn't.
   Every table is an AUTO CDC (SCD 1) upsert keyed by the record's raw-topic coordinates (`lakehouse.KEYS`), so a repeat
   updates its row. Don't key on `msg_control_id`: generators and sources can reuse it.
 - **Exclude backlog replay:** after downtime, hops drain backlog at "minutes" of apparent latency.

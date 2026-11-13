@@ -3,7 +3,7 @@
 Read once per micro-batch: one indexed max(generation) query, and a full reload only when it moved. Writes the hub's
 verdict per revision (status) and a heartbeat per source, so apps can tell a quiet stream from a stopped hub.
 
-The hub's flows (one per gold source) run batches on concurrent threads and share this one connection, which pg8000
+The hub's flows (one per silver source) run batches on concurrent threads and share this one connection, which pg8000
 doesn't allow, so every call holds a lock (each is a single short query).
 
 Authenticates as the pipeline's identity with a short-lived Lakebase database credential (no password). pg8000 is pure

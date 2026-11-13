@@ -1,4 +1,4 @@
-"""Subscription hub (micro-batch, NOT Real-Time Mode): every gold topic -> each app's own topic, by its live rules.
+"""Subscription hub (micro-batch, NOT Real-Time Mode): every silver entity topic -> each app's own topic, by live rules.
 
 Rules are Databricks SQL registered at runtime through the Subscription API (src/subscription_api) and stored in the
 Lakebase registry; the pipeline graph never changes. Each micro-batch:

@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 from pyspark.sql import functions as F
 
 import hl7_samples as s
-from hl7rt import gold, hl7v2, lakehouse
-from test_epic_json import CUSTOMER_SILVER_COLUMNS
+from hl7rt import hl7v2, lakehouse, silver
+from test_silver import TOPICS
 
 T0 = datetime(2026, 10, 23, 12, 0, 0)
 
@@ -29,17 +29,13 @@ def _bronze_value(spark, msg, raw_ts):
     return hl7v2.to_bronze_records(raw).first().value
 
 
-def _silver_value(spark, msg, raw_ts, bronze_ts):
+def _silver_values(spark, msg, raw_ts, bronze_ts) -> dict[str, list[str]]:
+    """table -> the silver topic values for one raw message (raw at raw_ts, bronze at bronze_ts)."""
     bronze = _kafka(spark, [(_bronze_value(spark, msg, raw_ts), bronze_ts)])
-    return (
-        hl7v2.to_silver_records(
-            bronze,
-            "real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
-            "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
-        )
-        .first()
-        .value
-    )
+    out = {}
+    for r in silver.to_silver_records(bronze, **TOPICS).collect():
+        out.setdefault(r.topic.rsplit(".", 1)[1], []).append(r.value)
+    return out
 
 
 def test_raw_mirror_measures_producer_to_broker(spark):
@@ -56,23 +52,21 @@ def test_bronze_mirror_hop(spark):
     assert (row.hop_ms, row.e2e_ms) == (20.0, 20.0)
 
 
-def test_silver_mirror_keeps_contract_and_measures(spark):
-    v = _silver_value(spark, s.oru_r01(), T0, T0 + timedelta(milliseconds=20))
-    out = lakehouse.silver_rows(_kafka(spark, [(v, T0 + timedelta(milliseconds=35))]))
-    assert out.columns[: len(CUSTOMER_SILVER_COLUMNS)] == CUSTOMER_SILVER_COLUMNS
+def test_silver_mirror_keeps_the_entity_shape_and_measures_bronze_to_silver(spark):
+    values = _silver_values(spark, s.oru_r01(), T0, T0 + timedelta(milliseconds=20))
+    out = lakehouse.silver_rows(_kafka(spark, [(values["silver_observations"][0], T0 + timedelta(milliseconds=35))]),
+                                "silver_observations")  # fmt: skip
+    assert out.columns[: len(silver.OBSERVATION_SCHEMA)] == silver.OBSERVATION_SCHEMA.fieldNames()
     row = out.first()
-    assert row.msg_control_id == "CTRL0002" and len(row.observations) == 2
+    assert (row.observation_cd, row.value_num, row.alt_observation_cd) == ("2823-3", 6.8, "K")
     assert (row.hop_ms, row.e2e_ms) == (15.0, 35.0)
     assert row.kafka_timestamp == T0 + timedelta(milliseconds=35)
+    assert (row._meta.record_id, row._meta.source_ts) == ("0-0-1", T0 + timedelta(milliseconds=35))
 
 
 def test_quarantine_mirror(spark):
     bronze = _kafka(spark, [(_bronze_value(spark, "garbage", T0), T0 + timedelta(milliseconds=5))])
-    q = hl7v2.to_silver_records(
-        bronze,
-        "real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
-        "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
-    ).first()
+    q = silver.to_silver_records(bronze, **TOPICS).first()
     assert q.topic == "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7"
     row = lakehouse.quarantine_rows(_kafka(spark, [(q.value, T0 + timedelta(milliseconds=9))])).first()
     assert (row.reason, row.hl7, row.hop_ms) == ("not_hl7", "garbage", 4.0)
@@ -85,29 +79,21 @@ def test_mirror_rows_have_ingest_time(spark):
     assert out.select(F.col("_ingested_at").isNotNull()).first()[0]
 
 
-def test_gold_mirror_measures_silver_to_gold(spark):
-    silver = _kafka(spark, [(_silver_value(spark, s.oru_r01(), T0, T0 + timedelta(milliseconds=20)),
-                             T0 + timedelta(milliseconds=35))])  # fmt: skip
-    obs = gold.to_gold_records(silver, "e", "real_time_mode_demo_catalog.hl7_realtime.gold_observations", "o").first()
-    out = lakehouse.gold_rows(_kafka(spark, [(obs.value, T0 + timedelta(milliseconds=50))]), gold.OBSERVATION_SCHEMA)
-    assert out.columns[: len(gold.OBSERVATION_SCHEMA)] == gold.OBSERVATION_SCHEMA.fieldNames()
-    row = out.first()
-    assert (row.observation_cd, row.value_num) == ("2823-3", 6.8)
-    assert (row.hop_ms, row.e2e_ms) == (15.0, 50.0)
-    assert row.kafka_timestamp == T0 + timedelta(milliseconds=50)
-
-
 def test_every_mirror_table_has_its_upsert_key_columns(spark):
     """Delivery is at-least-once; each table upserts on lakehouse.KEYS, so those columns must exist and be set."""
-    raw_ts, bronze_ts, silver_ts = T0, T0 + timedelta(milliseconds=10), T0 + timedelta(milliseconds=20)
-    silver = _kafka(spark, [(_silver_value(spark, s.oru_r01(), raw_ts, bronze_ts), silver_ts)])
-    obs = gold.to_gold_records(silver, "e", "o", "r").first()
+    values = {}
+    for msg in (s.adt_a04(), s.oru_r01(), s.orm_o01(), "garbage"):
+        for table, v in _silver_values(spark, msg, T0, T0 + timedelta(milliseconds=10)).items():
+            values.setdefault(table, v)
     rows = {
         "raw_hl7": lakehouse.raw_rows(_kafka(spark, [(s.adt_a04(), T0, 0)], with_headers=True)),
         "bronze_hl7": lakehouse.bronze_rows(_kafka(spark, [(_bronze_value(spark, s.adt_a04(), T0), T0)])),
-        "silver_hl7": lakehouse.silver_rows(silver),
-        "gold_observations": lakehouse.gold_rows(_kafka(spark, [(obs.value, T0)]), gold.OBSERVATION_SCHEMA),
+        "quarantine_hl7": lakehouse.quarantine_rows(_kafka(spark, [(values["quarantine_hl7"][0], T0)])),
     }
+    for t in silver.SCHEMAS:
+        if t != "quarantine_hl7":
+            rows[t] = lakehouse.silver_rows(_kafka(spark, [(values[t][0], T0)]), t)
+    assert set(rows) == set(lakehouse.KEYS)
     for table, df in rows.items():
         keys = lakehouse.KEYS[table]
         assert set(keys) <= set(df.columns), f"{table} lacks {set(keys) - set(df.columns)}"

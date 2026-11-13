@@ -4,8 +4,9 @@ Wire format handled: CR, LF, or CRLF segment separators; MLLP framing bytes (0x0
 (first one is used); components; HL7 escape sequences (\\F\\ \\S\\ \\T\\ \\R\\ \\E\\). Only the standard
 encoding characters (MSH-2 = ^~\\&) are supported; anything else is quarantined.
 
-Silver keeps the customer's Epic silver field contract (same 34 names and types, same order), followed by
-`observations` (one entry per OBX) and lineage. Mapping (HL7 field -> column):
+parse() reads each message once into `message`: the header, patient, and visit fields, the first order, the document
+status, and every OBX and DG1 as arrays. hl7rt.silver turns it into entity rows. Mapping (HL7 field -> column; the
+names are the Epic silver contract's):
 
     PID-3.1/.4  patient_id / _namespace      PID-4.1/.4  patient_alt_id / _namespace
     PID-7       date_of_birth_dt             PID-8 sex   PID-10.1 race   PID-22.1 ethnicity   PID-18.1 account_id
@@ -13,16 +14,17 @@ Silver keeps the customer's Epic silver field contract (same 34 names and types,
     PV1-19.1    visit_id                     PV1-44 admit_dt_tm
     MSH-4.1     msg_sending_facility         MSH-7 msg_dt_tm   MSH-9.1^9.2 msg_type   MSH-10 msg_control_id
     MSH-13      msg_seq
-    OBX-3 (first OBX)  observation_cd/_desc/_system (.1-.3), alt_observation_* (.4-.6)
-    OBR-4              order_cd/_desc/_system (.1-.3), alt_order_* (.4-.6)
+    OBR-4 (first OBR)  order_cd/_desc/_system (.1-.3), alt_order_* (.4-.6)
     TXA-17             document_completion_status
-    not in HL7 v2: patient_fhir_resource_id, msg_id (NULL)
+    each OBX   set_id (1), value_type (2), observation_cd/_desc/_system (3.1-.3), alt_observation_* (3.4-.6),
+               value (5), units (6.1), reference_range (7), abnormal_flag (8), result_status (11),
+               observation_dt_tm (14)
+    each DG1   set_id (1), diagnosis_cd/_desc/_system (3.1-.3), diagnosis_dt_tm (5), diagnosis_type (6)
 """
 
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
-    ArrayType,
     IntegerType,
     LongType,
     StringType,
@@ -86,6 +88,9 @@ OBSERVATION_FIELDS: list[tuple[str, str]] = [
     ("observation_cd", "string"),
     ("observation_cd_desc", "string"),
     ("observation_cd_system", "string"),
+    ("alt_observation_cd", "string"),
+    ("alt_observation_cd_desc", "string"),
+    ("alt_observation_cd_system", "string"),
     ("value", "string"),
     ("units", "string"),
     ("reference_range", "string"),
@@ -102,6 +107,9 @@ def _observation(obx: Column) -> Column:
         field(obx, 3, 1).alias("observation_cd"),
         field(obx, 3, 2).alias("observation_cd_desc"),
         field(obx, 3, 3).alias("observation_cd_system"),
+        field(obx, 3, 4).alias("alt_observation_cd"),
+        field(obx, 3, 5).alias("alt_observation_cd_desc"),
+        field(obx, 3, 6).alias("alt_observation_cd_system"),
         field(obx, 5).alias("value"),
         field(obx, 6, 1).alias("units"),
         field(obx, 7).alias("reference_range"),
@@ -111,24 +119,46 @@ def _observation(obx: Column) -> Column:
     )
 
 
+DIAGNOSIS_FIELDS: list[tuple[str, str]] = [
+    ("set_id", "string"),
+    ("diagnosis_cd", "string"),
+    ("diagnosis_cd_desc", "string"),
+    ("diagnosis_cd_system", "string"),
+    ("diagnosis_type", "string"),
+    ("diagnosis_dt_tm", "timestamp"),
+]
+
+
+def _diagnosis(dg1: Column) -> Column:
+    return F.struct(
+        field(dg1, 1).alias("set_id"),
+        field(dg1, 3, 1).alias("diagnosis_cd"),
+        field(dg1, 3, 2).alias("diagnosis_cd_desc"),
+        field(dg1, 3, 3).alias("diagnosis_cd_system"),
+        field(dg1, 6).alias("diagnosis_type"),
+        hl7_timestamp(field(dg1, 5)).alias("diagnosis_dt_tm"),
+    )
+
+
 # Working columns added by with_segments(). Each segment is split ONCE in its own projection; Spark won't
 # collapse a projection into the next if that would duplicate an expensive expression, so every field read
 # below is a cheap array lookup. (Inlining segments() per field produced a 379 KB plan with 290 split() calls
 # per record and starved the RTM driver in GC; see docs/latency.md's history link, Phase 2.)
 _SEGS = "_hl7_segs"
 _SEGMENT_COLS = {"MSH": "_hl7_msh", "PID": "_hl7_pid", "PV1": "_hl7_pv1", "OBR": "_hl7_obr", "TXA": "_hl7_txa"}
-_OBX = "_hl7_obx"
-_WORK_COLS = [_SEGS, *_SEGMENT_COLS.values(), _OBX]
+_REPEATING = {"OBX": "_hl7_obx", "DG1": "_hl7_dg1"}
+_WORK_COLS = [_SEGS, *_SEGMENT_COLS.values(), *_REPEATING.values()]
 
 
 def with_segments(df: DataFrame, msg: Column) -> DataFrame:
-    """Adds the working columns: all segments, the first MSH/PID/PV1/OBR/TXA, and every OBX (as field arrays)."""
+    """Adds the working columns: all segments, the first MSH/PID/PV1/OBR/TXA, and every OBX and DG1 (as field
+    arrays)."""
     df = df.withColumn(_SEGS, segments(msg))
     segs = F.col(_SEGS)
     return df.select(
         "*",
         *[first_segment(segs, name).alias(col) for name, col in _SEGMENT_COLS.items()],
-        all_segments(segs, "OBX").alias(_OBX),
+        *[all_segments(segs, name).alias(col) for name, col in _REPEATING.items()],
     )
 
 
@@ -136,52 +166,54 @@ def _seg(name: str) -> Column:
     return F.col(_SEGMENT_COLS[name])
 
 
+# The fields of `message` before its arrays (hl7rt.silver picks each entity's from these).
+MESSAGE_FIELDS: list[str] = [
+    "patient_id", "patient_id_namespace", "patient_alt_id", "patient_alt_id_namespace", "date_of_birth_dt", "sex",
+    "race", "ethnicity", "account_id", "visit_id", "patient_class", "patient_point_of_care", "patient_facility",
+    "admit_dt_tm", "msg_type", "msg_control_id", "msg_dt_tm", "msg_sending_facility", "msg_seq", "order_cd",
+    "order_cd_desc", "order_cd_system", "alt_order_cd", "alt_order_cd_desc", "alt_order_cd_system",
+    "document_completion_status",
+]  # fmt: skip
+
+
 def message_struct() -> Column:
-    """The customer silver contract (34 fields) + observations, read from with_segments() columns."""
+    """One message: MESSAGE_FIELDS, then `observations` (every OBX) and `diagnoses` (every DG1), read from
+    with_segments() columns."""
     msh, pid, pv1, obr, txa = _seg("MSH"), _seg("PID"), _seg("PV1"), _seg("OBR"), _seg("TXA")
-    obx = F.try_element_at(F.col(_OBX), F.lit(1))
     msg_type = F.concat_ws("^", field(msh, 9, 1), field(msh, 9, 2))
     return F.struct(
         # Patient / visit
-        field(pid, 18, 1).alias("account_id"),
-        hl7_timestamp(field(pv1, 44)).alias("admit_dt_tm"),
-        hl7_timestamp(field(pid, 7)).alias("date_of_birth_dt"),
-        field(pid, 22, 1).alias("ethnicity"),
-        field(pid, 4, 1).alias("patient_alt_id"),
-        field(pid, 4, 4).alias("patient_alt_id_namespace"),
-        field(pv1, 2).alias("patient_class"),
-        field(pv1, 3, 4).alias("patient_facility"),
-        F.lit(None).cast("string").alias("patient_fhir_resource_id"),
         field(pid, 3, 1).alias("patient_id"),
         field(pid, 3, 4).alias("patient_id_namespace"),
-        field(pv1, 3, 1).alias("patient_point_of_care"),
-        field(pid, 10, 1).alias("race"),
+        field(pid, 4, 1).alias("patient_alt_id"),
+        field(pid, 4, 4).alias("patient_alt_id_namespace"),
+        hl7_timestamp(field(pid, 7)).alias("date_of_birth_dt"),
         field(pid, 8).alias("sex"),
+        field(pid, 10, 1).alias("race"),
+        field(pid, 22, 1).alias("ethnicity"),
+        field(pid, 18, 1).alias("account_id"),
         field(pv1, 19, 1).alias("visit_id"),
+        field(pv1, 2).alias("patient_class"),
+        field(pv1, 3, 1).alias("patient_point_of_care"),
+        field(pv1, 3, 4).alias("patient_facility"),
+        hl7_timestamp(field(pv1, 44)).alias("admit_dt_tm"),
         # Message
+        F.when(msg_type != "", msg_type).alias("msg_type"),
         field(msh, 10).alias("msg_control_id"),
         hl7_timestamp(field(msh, 7)).alias("msg_dt_tm"),
-        F.lit(None).cast("string").alias("msg_id"),
         field(msh, 4, 1).alias("msg_sending_facility"),
         field(msh, 13).alias("msg_seq"),
-        F.when(msg_type != "", msg_type).alias("msg_type"),
-        # Observation (first OBX)
-        field(obx, 3, 6).alias("alt_observation_cd_system"),
-        field(obx, 3, 4).alias("alt_observation_cd"),
-        field(obx, 3, 5).alias("alt_observation_cd_desc"),
-        field(obx, 3, 3).alias("observation_cd_system"),
-        field(obx, 3, 1).alias("observation_cd"),
-        field(obx, 3, 2).alias("observation_cd_desc"),
-        # Order
-        field(obr, 4, 3).alias("order_cd_system"),
+        # Order (first OBR)
         field(obr, 4, 1).alias("order_cd"),
         field(obr, 4, 2).alias("order_cd_desc"),
+        field(obr, 4, 3).alias("order_cd_system"),
         field(obr, 4, 4).alias("alt_order_cd"),
         field(obr, 4, 5).alias("alt_order_cd_desc"),
         field(obr, 4, 6).alias("alt_order_cd_system"),
         # Document
         field(txa, 17).alias("document_completion_status"),
-        F.transform(F.col(_OBX), _observation).alias("observations"),
+        F.transform(F.col(_REPEATING["OBX"]), _observation).alias("observations"),
+        F.transform(F.col(_REPEATING["DG1"]), _diagnosis).alias("diagnoses"),
     )
 
 
@@ -217,34 +249,13 @@ BRONZE_SCHEMA = StructType(
     ]
 )
 
-_CONTRACT_TYPES = {"admit_dt_tm", "date_of_birth_dt", "msg_dt_tm"}
-SILVER_FIELDS: list[str] = [
-    "account_id", "admit_dt_tm", "date_of_birth_dt", "ethnicity", "patient_alt_id", "patient_alt_id_namespace",
-    "patient_class", "patient_facility", "patient_fhir_resource_id", "patient_id", "patient_id_namespace",
-    "patient_point_of_care", "race", "sex", "visit_id", "msg_control_id", "msg_dt_tm", "msg_id",
-    "msg_sending_facility", "msg_seq", "msg_type", "alt_observation_cd_system", "alt_observation_cd",
-    "alt_observation_cd_desc", "observation_cd_system", "observation_cd", "observation_cd_desc", "order_cd_system",
-    "order_cd", "order_cd_desc", "alt_order_cd", "alt_order_cd_desc", "alt_order_cd_system",
-    "document_completion_status",
-]  # fmt: skip
-
 
 def _type(kind: str):
     return TimestampType() if kind == "timestamp" else StringType()
 
 
 OBSERVATION_SCHEMA = StructType([StructField(n, _type(k)) for n, k in OBSERVATION_FIELDS])
-SILVER_SCHEMA = StructType(
-    [StructField(n, TimestampType() if n in _CONTRACT_TYPES else StringType()) for n in SILVER_FIELDS]
-    + [
-        StructField("observations", ArrayType(OBSERVATION_SCHEMA)),
-        StructField("payload", StringType()),
-        StructField("raw_ts", TimestampType()),
-        StructField("bronze_ts", TimestampType()),
-        StructField("raw_partition", IntegerType()),
-        StructField("raw_offset", LongType()),
-    ]
-)
+DIAGNOSIS_SCHEMA = StructType([StructField(n, _type(k)) for n, k in DIAGNOSIS_FIELDS])
 QUARANTINE_SCHEMA = StructType(
     [
         StructField("reason", StringType()),
@@ -272,38 +283,3 @@ def to_bronze_records(raw: DataFrame) -> DataFrame:
         F.col("timestamp").alias("raw_ts"),
     )
     return staged.select(F.col("key"), F.to_json(envelope).alias("value"))
-
-
-def to_silver_records(bronze: DataFrame, silver_topic: str, quarantine_topic: str) -> DataFrame:
-    """Kafka records from the bronze topic -> (key, value, topic), routed to silver or quarantine.
-
-    One read, one flow: the Kafka sink takes the destination from the `topic` column, so quarantine
-    needs no second flow (and no extra task slots).
-    """
-    b = bronze.select(F.col("key"), F.from_json(F.col("value").cast("string"), BRONZE_SCHEMA).alias("b"),
-                      F.col("timestamp").alias("bronze_ts"))  # fmt: skip
-    p = parse(b, F.col("b.hl7"))
-    hl7, m, why = F.col("b.hl7"), F.col("message"), F.col("reason")
-    silver = F.struct(
-        *[m[n].alias(n) for n in SILVER_FIELDS],
-        m["observations"].alias("observations"),
-        hl7.alias("payload"),
-        F.col("b.raw_ts").alias("raw_ts"),
-        F.col("bronze_ts"),
-        F.col("b.raw_partition").alias("raw_partition"),
-        F.col("b.raw_offset").alias("raw_offset"),
-    )
-    quarantine = F.struct(
-        why.alias("reason"),
-        hl7.alias("hl7"),
-        F.col("b.raw_partition").alias("raw_partition"),
-        F.col("b.raw_offset").alias("raw_offset"),
-        F.col("b.raw_ts").alias("raw_ts"),
-        F.col("bronze_ts"),
-    )
-    ok = why.isNull()
-    return p.select(
-        F.col("key"),
-        F.when(ok, F.to_json(silver)).otherwise(F.to_json(quarantine)).alias("value"),
-        F.when(ok, F.lit(silver_topic)).otherwise(F.lit(quarantine_topic)).alias("topic"),
-    )

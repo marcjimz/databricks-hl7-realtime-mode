@@ -18,18 +18,20 @@ no keys or connection strings.
 
 ```
 REAL-TIME MODE (ms), an Event Hubs topic between every layer
-  HL7 ─► raw_hl7 ─► bronze_hl7 ─► silver_hl7 ─► gold_encounters / gold_observations / gold_orders
-                                     └─► quarantine_hl7
+  HL7 ─► raw_hl7 ─► bronze_hl7 ─► silver_messages / silver_encounters / silver_observations / silver_orders /
+                                  silver_diagnoses, and quarantine_hl7
 STREAMING TABLES (seconds)
   every topic ─► the Delta table of the same name: <catalog>.<schema>.<table>
 SUBSCRIPTIONS (seconds)
-  gold_* ─► subscription hub (SQL rules registered at runtime via the Subscription API) ─► each app's own topic
+  silver_* ─► subscription hub (SQL rules registered at runtime via the Subscription API) ─► each app's own topic
 ```
 
-- **Silver** parses HL7 with plain Spark into the 34-column Epic silver contract. Bad messages go to quarantine.
-- **Gold** splits each message into encounters, observations (one per lab result), and orders.
+- **Bronze** is the raw message plus its header envelope. **Silver** parses it once with plain Spark and writes one row
+  per entity, each with the message's patient, visit, and header fields: messages, encounters (ADT), observations (one
+  per OBX), orders, and diagnoses (one per DG1). Bad messages go to quarantine. Column names follow the Epic silver
+  contract.
 - **Epic JSON** is a drop-in pipeline for the existing pre-parsed Epic feed ([docs/epic-json.md](docs/epic-json.md)).
-- **Subscriptions** let apps choose gold records at runtime, each delivered to the app's own hub
+- **Subscriptions** let apps choose silver records at runtime, each delivered to the app's own hub
   ([docs/subscriptions.md](docs/subscriptions.md)).
 
 ## Subscribe from any application
@@ -42,7 +44,7 @@ needs no change); the API tells it everything else:
 ```
 0. GET  <api>/api/v1/connection           → its topic, Kafka bootstrap servers, Unity Catalog credential, token scope
 1. PUT  <api>/api/v1/subscriptions        {"subscriptions": [{"name": "critical-potassium",
-                                            "sql": "SELECT patient_id, value_num FROM gold_observations
+                                            "sql": "SELECT patient_id, value_num FROM silver_observations
                                                     WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"}]}
         → ACCEPTED (revision, destination topic), or Databricks' own error and nothing applied
 2. GET  <api>/api/v1/subscriptions?wait=25  → repeat until READY (the hub runs exactly these revisions, ~5 s)
@@ -62,9 +64,9 @@ Measured at 200 msg/s at full demo load on serverless Real-Time Mode (GA), with 
 |---|---|---|
 | raw → bronze | 7 ms | **86 ms** |
 | bronze → silver (full HL7 parse) | 0 ms | **78 ms** |
-| silver → gold | 0 ms | **78 ms** |
 
-Every hop is under 200 ms at p99. The max is a few seconds, from checkpoints and occasional Event Hubs connection
+Every hop is under 200 ms at p99. (Measured with a third hop, silver → gold, p99 78 ms, which the two-layer design
+removes: silver now writes the entity rows itself.) The max is a few seconds, from checkpoints and occasional Event Hubs connection
 hangs. See [docs/latency.md](docs/latency.md).
 
 ## Set up, and rebuild after a sandbox wipe
@@ -102,14 +104,14 @@ make help              # everything else
 1. Show the source: raw HL7 v2 (ADT, ORU, ORM, MDM) at 200 msg/s.
 2. Show the hot path: an Event Hubs topic between each layer. Silver has the Epic silver columns. In Catalog Explorer,
    every topic has a streaming table of the same name.
-3. Show the dashboard: p99 per hop (all under 200 ms), p99 by minute, critical labs reaching gold, and quarantine.
+3. Show the dashboard: p99 per hop (all under 200 ms), p99 by minute, critical labs reaching silver, and quarantine.
    `make demo dev` prints its URL, the workspace URL, and the subscriptions dashboard's URL.
 4. Show security: Catalog Explorer → External data → Credentials → `<catalog>_eventhubs`. The pipelines hold no secrets,
    and the Event Hubs namespace has SAS keys disabled.
 
 ## Subscriptions demo
 
-An application subscribes at runtime, as its own service principal, to the gold records it needs. A rule is plain
+An application subscribes at runtime, as its own service principal, to the silver records it needs. A rule is plain
 **Databricks SQL**. The app sends it to the **Subscription API** (a Databricks App), Databricks compiles it on the spot,
 and the hub applies it at its next micro-batch, with no redeploy. Test a rule in the SQL editor first: the same query
 returns the records the hub delivers.
@@ -149,11 +151,11 @@ $ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/
 | 1 | Sign in | profile sp-hl7-realtime-demo | a service principal | 38fafc55-… | PASS |
 | 2 | Connection from the API | GET /api/v1/connection | this app's own topic and credential | hl7_rtm_demo.subscribers.sp-hl7-realtime-demo via sub_sp_hl7_realtime_demo_eventhubs @ hl7rtmaz-ehns.servicebus.windows.net:9093 | PASS |
 | 7 | Skip the API (the registry's Data API) | list_subscriptions via https://… | not available | refused 503 | PASS |
-| 8 | Column not granted | SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
-| 12 | Subquery | SELECT patient_id FROM gold_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
+| 8 | Column not granted | SELECT patient_id FROM silver_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
+| 12 | Subquery | SELECT patient_id FROM silver_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
 …
 | 24 | Cancel | DELETE e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
-| 25 | Hub heartbeat | gold_observations | a batch within 2 minutes | 2026-11-06T01:36:22… | PASS |
+| 25 | Hub heartbeat | silver_observations | a batch within 2 minutes | 2026-11-06T01:36:22… | PASS |
 
 25 checks, 0 failed
 ```
@@ -175,7 +177,7 @@ hub to confirm, and prints matches as they arrive:
 
 ```java
 rules.put("critical-potassium", """
-        SELECT patient_id, value_num, units FROM gold_observations
+        SELECT patient_id, value_num, units FROM silver_observations
         WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5""");
 ```
 
@@ -183,7 +185,7 @@ rules.put("critical-potassium", """
 $ java -jar examples/subscribers/java/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 1 ACCEPTED
-            SELECT patient_id, value_num, units FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5
+            SELECT patient_id, value_num, units FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5
 hub         critical-potassium     revision 1 ACTIVE
 listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group sp-hl7-realtime-demo (Ctrl-C to stop)
 2026-11-05T05:02:15.775Z  critical-potassium     rev 1  {"patient_id":"MRN021417","units":"mmol/L","value_num":6.7}
@@ -193,8 +195,8 @@ listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group s
 
 - **`ACCEPTED`** means Databricks compiled the rule against this app's own views in that call. **`ACTIVE`** means the
   hub is running exactly that revision. The query shown is the canonical form that's stored. The timestamp is when the
-  gold record was produced.
-- **Test it in the SQL editor:** `SELECT patient_id, value_num, units FROM hl7_rtm_demo.sub_sp_hl7_realtime_demo.gold_observations
+  source record was produced.
+- **Test it in the SQL editor:** `SELECT patient_id, value_num, units FROM hl7_rtm_demo.sub_sp_hl7_realtime_demo.silver_observations
   WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5`. Those are the records the hub delivers (live, not
   historical).
 - **Revision numbers count every change** to that subscription. Running an identical rule again keeps its revision and
@@ -210,10 +212,10 @@ Raise the threshold, drop `units`, and add a second subscription:
 
 ```java
 rules.put("critical-potassium", """
-        SELECT patient_id, value_num FROM gold_observations
+        SELECT patient_id, value_num FROM silver_observations
         WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0""");
 rules.put("low-hemoglobin", """
-        SELECT patient_id, value_num, abnormal_flag FROM gold_observations
+        SELECT patient_id, value_num, abnormal_flag FROM silver_observations
         WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8""");
 ```
 
@@ -221,9 +223,9 @@ rules.put("low-hemoglobin", """
 $ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 2 ACCEPTED
-            SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0
+            SELECT patient_id, value_num FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0
 subscribed  low-hemoglobin         revision 1 ACCEPTED
-            SELECT patient_id, value_num, abnormal_flag FROM gold_observations WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8
+            SELECT patient_id, value_num, abnormal_flag FROM silver_observations WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8
 hub         critical-potassium     revision 2 ACTIVE
 hub         low-hemoglobin         revision 1 ACTIVE
 listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group sp-hl7-realtime-demo (Ctrl-C to stop)
@@ -243,7 +245,7 @@ rebuild and run. The code is the source of truth, so the API cancels what it no 
 $ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar
 signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
 subscribed  critical-potassium     revision 3 ACCEPTED
-            SELECT patient_id, value_num, units FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5
+            SELECT patient_id, value_num, units FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5
 cancelled   low-hemoglobin         (no longer in MySubscriptions)
 hub         critical-potassium     revision 3 ACTIVE
 listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group sp-hl7-realtime-demo (Ctrl-C to stop)
@@ -259,9 +261,9 @@ Add a misspelled column, a column this app isn't granted, and a subquery. Databr
 call, nothing is applied, and the app exits with code 2:
 
 ```java
-rules.put("typo", "SELECT patient_id FROM gold_observations WHERE value_numm > 6");
-rules.put("by-facility", "SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH'");
-rules.put("with-labs", "SELECT patient_id FROM gold_observations WHERE patient_id IN (SELECT patient_id FROM gold_encounters)");
+rules.put("typo", "SELECT patient_id FROM silver_observations WHERE value_numm > 6");
+rules.put("by-facility", "SELECT patient_id FROM silver_observations WHERE msg_sending_facility = 'NORTH'");
+rules.put("with-labs", "SELECT patient_id FROM silver_observations WHERE patient_id IN (SELECT patient_id FROM silver_encounters)");
 ```
 
 ```
@@ -297,13 +299,13 @@ Wait two minutes, then run the app. The API waits up to two more minutes for the
 $ java -jar examples/subscribers/java/target/hl7-subscriber.jar
 …
 hub         critical-potassium     revision 3 ACTIVE
-ERROR       HUB_STALE: [the hub hasn't processed gold_observations for 120 s] (is the subscription_hub pipeline running? make demo dev)
+ERROR       HUB_STALE: [the hub hasn't processed silver_observations for 120 s] (is the subscription_hub pipeline running? make demo dev)
 ```
 
 An app that's already listening when the hub stops keeps running and prints `WARNING … the hub hasn't processed …`
 every 30 s until the hub is back.
 
-Start the hub again with `make demo dev`. It resumes from its checkpoint, so no gold record is skipped: the next run
+Start the hub again with `make demo dev`. It resumes from its checkpoint, so no record is skipped: the next run
 of the app catches up on the matches from the stopped period first.
 
 ### Watch it on the dashboard
@@ -345,7 +347,7 @@ infra/azure/     Terraform: workspace, storage, access connector, Event Hubs
 infra/uc.sh      Unity Catalog bootstrap (make uc)
 infra/registry.py  Lakebase subscription registry bootstrap (make registry)
 databricks.yml   bundle variables and targets; resources/ has the pipelines, jobs, and dashboard
-src/hl7rt/       the logic: HL7 parsing, gold, Event Hubs wiring, generators
+src/hl7rt/       the logic: HL7 parsing, silver entities, Event Hubs wiring, generators
 src/pipelines/   thin pipeline definitions (including the subscription hub)
 src/registry/    the subscription registry's schema, owner trigger, RLS, and API (Lakebase Postgres)
 src/subscription_api/  the Subscription API (Databricks App): the integration contract; Swagger at <api>/docs

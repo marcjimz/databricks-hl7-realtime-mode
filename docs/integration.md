@@ -36,7 +36,7 @@ curl -s "$API/api/v1/connection" -H "Authorization: Bearer $TOKEN"
 
 # 3. Declare the whole set. Atomic: all accepted, or nothing applied. Undeclared rules are cancelled.
 curl -s -X PUT "$API/api/v1/subscriptions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"subscriptions": [{"name": "critical-potassium", "sql": "SELECT patient_id, value_num FROM gold_observations WHERE value_num >= 6.5"}]}'
+  -d '{"subscriptions": [{"name": "critical-potassium", "sql": "SELECT patient_id, value_num FROM silver_observations WHERE value_num >= 6.5"}]}'
 #   200 → {"applied": true, "accepted": [{"subscriptionId", "revision", "query", "destination", "unchanged"}], "cancelled": [...]}
 #   422 → {"applied": false, "refused": [{"name", "code", "message"}]}   (code: Databricks' error class, or ours)
 
@@ -66,7 +66,7 @@ Each message is keyed by patient ID. The value is JSON:
 
 ```json
 {"notificationId": "4b0e…", "subscriptionId": "6f1c…", "subscription": "critical-potassium", "revision": 1,
- "source": "gold_observations", "sourcePartition": 3, "sourceOffset": 1048211, "gold_ts": "2026-11-05T05:02:15.775Z",
+ "source": "silver_observations", "sourcePartition": 3, "sourceOffset": 1048211, "source_ts": "2026-11-05T05:02:15.775Z",
  "payload": {"patient_id": "MRN021417", "value_num": 6.7}}
 ```
 

@@ -50,21 +50,24 @@ variables:
   hl7_bronze_topic:
     description: Bronze, the raw message plus MSH envelope and raw-topic lineage.
     default: ${var.catalog}.${var.schema}.bronze_hl7
-  hl7_silver_topic:
-    description: Silver, the parsed message (Epic silver contract + observations).
-    default: ${var.catalog}.${var.schema}.silver_hl7
+  hl7_silver_messages_topic:
+    description: Silver, one record per message (header, patient, visit, raw payload).
+    default: ${var.catalog}.${var.schema}.silver_messages
+  hl7_silver_encounters_topic:
+    description: Silver, one record per ADT event (admission, transfer, discharge, registration, update).
+    default: ${var.catalog}.${var.schema}.silver_encounters
+  hl7_silver_observations_topic:
+    description: Silver, one record per OBX result (numeric value parsed, alternate code).
+    default: ${var.catalog}.${var.schema}.silver_observations
+  hl7_silver_orders_topic:
+    description: Silver, one record per ORM order.
+    default: ${var.catalog}.${var.schema}.silver_orders
+  hl7_silver_diagnoses_topic:
+    description: Silver, one record per DG1 diagnosis (code, system, type).
+    default: ${var.catalog}.${var.schema}.silver_diagnoses
   hl7_quarantine_topic:
     description: Messages that could not be silvered, with the reason.
     default: ${var.catalog}.${var.schema}.quarantine_hl7
-  hl7_gold_encounters_topic:
-    description: Gold, one record per ADT event (admission, discharge, registration, update).
-    default: ${var.catalog}.${var.schema}.gold_encounters
-  hl7_gold_observations_topic:
-    description: Gold, one record per OBX result (numeric value parsed).
-    default: ${var.catalog}.${var.schema}.gold_observations
-  hl7_gold_orders_topic:
-    description: Gold, one record per ORM order.
-    default: ${var.catalog}.${var.schema}.gold_orders
 
   # Real-Time Mode (hot path)
   rtm_trigger_interval:
