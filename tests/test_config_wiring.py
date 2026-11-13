@@ -80,3 +80,12 @@ def test_required_config_keys_are_wired():
         needed = _keys_for(sorted((SRC / "pipelines" / _source_dir(spec)).rglob("*.py")))
         missing = needed - configured
         assert not missing, f"{f.name}:{name} is missing configuration for: {sorted('hl7.' + k for k in missing)}"
+
+
+def test_the_hub_has_a_topic_for_every_source():
+    """The hub reads `topics.<source>` in a loop over SOURCES, which the literal-key check above can't see."""
+    from hl7rt import subscriptions
+
+    spec = yaml.safe_load((ROOT / "resources/pipelines/subscription_hub.yml").read_text())
+    configured = spec["resources"]["pipelines"]["subscription_hub"]["configuration"]
+    assert {f"hl7.topics.{s}" for s in subscriptions.SOURCES} <= set(configured)

@@ -24,9 +24,9 @@ from hl7_subscriptions_client.models import One
 from subscriber import bearer, first_line, is_service_principal
 
 WAIT = 180  # seconds
-GOOD = ("SELECT patient_id, value_num FROM gold_observations "
+GOOD = ("SELECT patient_id, value_num FROM silver_observations "
         "WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5")  # fmt: skip
-CHANGED = ("SELECT patient_id, value_num, units FROM gold_observations "
+CHANGED = ("SELECT patient_id, value_num, units FROM silver_observations "
            "WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0")  # fmt: skip
 
 
@@ -82,27 +82,27 @@ class E2E:
                         attempt(skip_the_api), lambda s: not s.startswith("answered"))  # fmt: skip
 
         # Refused in the declare call itself: Databricks' own errors, or a shape the hub won't run.
-        self.refused("Column not granted", "SELECT patient_id FROM gold_observations WHERE msg_sending_facility = "
+        self.refused("Column not granted", "SELECT patient_id FROM silver_observations WHERE msg_sending_facility = "
                      "'NORTH'", "UNRESOLVED_COLUMN")  # fmt: skip
-        self.refused("Source not granted", "SELECT patient_id FROM gold_encounters", "TABLE_OR_VIEW_NOT_FOUND")
-        self.refused("Misspelled column", "SELECT patient_id FROM gold_observations WHERE value_numm > 6",
+        self.refused("Source not granted", "SELECT patient_id FROM silver_encounters", "TABLE_OR_VIEW_NOT_FOUND")
+        self.refused("Misspelled column", "SELECT patient_id FROM silver_observations WHERE value_numm > 6",
                      "UNRESOLVED_COLUMN")  # fmt: skip
         self.refused(
-            "Syntax error", "SELECT patient_id FROM gold_observations WHER value_num > 6", "PARSE_SYNTAX_ERROR"
+            "Syntax error", "SELECT patient_id FROM silver_observations WHER value_num > 6", "PARSE_SYNTAX_ERROR"
         )
-        self.refused("Subquery", "SELECT patient_id FROM gold_observations WHERE value_num > "
-                     "(SELECT max(value_num) FROM gold_observations)", "SQL_NOT_ALLOWED")  # fmt: skip
-        self.refused("Join", "SELECT o.patient_id FROM gold_observations o JOIN gold_encounters e ON "
+        self.refused("Subquery", "SELECT patient_id FROM silver_observations WHERE value_num > "
+                     "(SELECT max(value_num) FROM silver_observations)", "SQL_NOT_ALLOWED")  # fmt: skip
+        self.refused("Join", "SELECT o.patient_id FROM silver_observations o JOIN silver_encounters e ON "
                      "o.patient_id = e.patient_id", "SQL_NOT_ALLOWED")  # fmt: skip
-        self.refused("Function that reaches outside the record", "SELECT patient_id FROM gold_observations WHERE "
+        self.refused("Function that reaches outside the record", "SELECT patient_id FROM silver_observations WHERE "
                      "http_request('GET', 'https://example.com') IS NOT NULL", "SQL_NOT_ALLOWED")  # fmt: skip
         base = self.setting("e2e.base_schema")
         if base:
-            self.refused("Table outside this app's views", f"SELECT patient_id FROM {base}.gold_observations",
+            self.refused("Table outside this app's views", f"SELECT patient_id FROM {base}.silver_observations",
                          "SQL_NOT_ALLOWED")  # fmt: skip
         try:
             api.call(declare, c, body=api.declared({"e2e-ok": GOOD, "e2e-bad": "SELECT patient_id FROM "
-                                                    "gold_observations WHERE value_numm > 6"}))  # fmt: skip
+                                                    "silver_observations WHERE value_numm > 6"}))  # fmt: skip
             atomic = 200
         except api.ApiError as e:
             atomic = e.status
@@ -166,8 +166,8 @@ class E2E:
         finally:
             consumer.close()
         hub = api.call(get_status, c, wait=0).hub.additional_properties
-        last = hub.get("gold_observations", "never")
-        self.record("Hub heartbeat", "gold_observations", "a batch within 2 minutes", last,
+        last = hub.get("silver_observations", "never")
+        self.record("Hub heartbeat", "silver_observations", "a batch within 2 minutes", last,
                     lambda s: s != "never" and datetime.fromisoformat(s) > datetime.now(UTC)
                     - timedelta(seconds=120))  # fmt: skip
 

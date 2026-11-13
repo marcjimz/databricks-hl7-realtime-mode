@@ -1,4 +1,4 @@
-"""Subscription hub matching: every app's SQL rule, applied to a micro-batch of one gold topic, in one pass.
+"""Subscription hub matching: every app's SQL rule, applied to a micro-batch of one silver topic, in one pass.
 
 A rule is Databricks SQL (`SELECT <fields> FROM <source> WHERE <condition>`), compiled by Databricks against the app's
 own views when it was registered (src/subscription_api). The hub evaluates each stored condition per record with Spark,
@@ -20,13 +20,14 @@ from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 
-from hl7rt import gold
+from hl7rt import silver
 from subscription_api.rules import RuleError, check_condition, clauses, identifier, literal
 
 SOURCES: dict[str, StructType] = {
-    "gold_encounters": gold.ENCOUNTER_SCHEMA,
-    "gold_observations": gold.OBSERVATION_SCHEMA,
-    "gold_orders": gold.ORDER_SCHEMA,
+    "silver_encounters": silver.ENCOUNTER_SCHEMA,
+    "silver_observations": silver.OBSERVATION_SCHEMA,
+    "silver_orders": silver.ORDER_SCHEMA,
+    "silver_diagnoses": silver.DIAGNOSIS_SCHEMA,
 }
 CHUNK = 200  # rules per projection
 
@@ -81,8 +82,9 @@ def events(topic_records: DataFrame, source: str) -> DataFrame:
     """A micro-batch of `source`'s topic as records, with the coordinates notifications carry."""
     return topic_records.select(
         F.from_json(F.col("value").cast("string"), SOURCES[source]).alias("e"),
-        F.col("partition").alias("_partition"), F.col("offset").alias("_offset"), F.col("timestamp").alias("_gold_ts"),
-    ).select("e.*", "_partition", "_offset", "_gold_ts")  # fmt: skip
+        F.col("partition").alias("_partition"), F.col("offset").alias("_offset"),
+        F.col("timestamp").alias("_source_ts"),
+    ).select("e.*", "_partition", "_offset", "_source_ts")  # fmt: skip
 
 
 def _condition(r: Rule):
@@ -201,7 +203,7 @@ def _envelope(matched: DataFrame, source: str) -> DataFrame:
                 F.lit(source).alias("source"),
                 F.col("_partition").alias("sourcePartition"),
                 F.col("_offset").alias("sourceOffset"),
-                F.col("_gold_ts").alias("gold_ts"),
+                F.col("_source_ts").alias("source_ts"),
                 F.parse_json("payload").alias("payload"),
             )
         ).alias("value"),
@@ -246,7 +248,7 @@ def _data_matches(records: DataFrame, source: str, table: DataFrame | None, scan
     out = None
     for c in candidates:
         matched = c.where(F.expr(_ALL_HOLD)).select(
-            "topic", "sid", "name", "rev", "patient_id", "_partition", "_offset", "_gold_ts",
+            "topic", "sid", "name", "rev", "patient_id", "_partition", "_offset", "_source_ts",
             F.expr("concat('{', array_join(transform(fields, f -> element_at(_j, f)), ','), '}')").alias("payload"),
         )  # fmt: skip
         out = matched if out is None else out.unionByName(matched)
@@ -262,9 +264,9 @@ def notifications(records: DataFrame, source: str, rules: "list[Rule] | Compiled
     for hits, metas in compiled.chunks:
         meta = F.element_at(metas, F.col("h.i") + 1)
         parts.append(
-            records.select("patient_id", "_partition", "_offset", "_gold_ts", F.explode(hits).alias("h")).select(
+            records.select("patient_id", "_partition", "_offset", "_source_ts", F.explode(hits).alias("h")).select(
                 meta["topic"].alias("topic"), meta["sid"].alias("sid"), meta["name"].alias("name"),
-                meta["rev"].alias("rev"), "patient_id", "_partition", "_offset", "_gold_ts",
+                meta["rev"].alias("rev"), "patient_id", "_partition", "_offset", "_source_ts",
                 F.col("h.payload").alias("payload"),
             )
         )  # fmt: skip

@@ -23,7 +23,7 @@
     },
     {
       "name": "hub_health",
-      "displayName": "Hub heartbeat per gold source",
+      "displayName": "Hub heartbeat per silver source",
       "queryLines": [
         "SELECT source, CASE WHEN seconds_since_last_batch > 120 THEN 'STALE' ELSE 'OK' END AS status, seconds_since_last_batch, last_batch_at, batch_id, rules FROM hub ORDER BY source"
       ]
@@ -223,7 +223,7 @@
                 "columns": [
                   {
                     "fieldName": "source",
-                    "displayName": "Gold source"
+                    "displayName": "Source"
                   },
                   {
                     "fieldName": "status",

@@ -50,3 +50,23 @@ def test_uc_rebinds_a_catalog_left_bound_to_a_deleted_workspace():
 def test_uc_refreshes_credentials_when_the_connector_is_recreated():
     """A recreated connector keeps its resource ID but gets a new identity, which UC picks up only on update."""
     assert "access_connector_principal_id" in UC and "update-credential" in UC
+
+
+# The live Power BI dashboard's Fabric capacity (infra/fabric): its own tenant and subscription, so nothing is fixed.
+FABRIC = ROOT / "infra/fabric"
+
+
+def test_fabric_stack_is_tagged_and_hardcodes_no_tenant_or_subscription():
+    tf = "".join(p.read_text() for p in FABRIC.glob("*.tf"))
+    assert "owner = var.owner" in tf, "sandbox policy requires an owner tag"
+    assert "RemoveAfter = var.remove_after" in tf and "YYYY-MM-DD" in tf, "the subscription deletes untagged resources"
+    assert "var.subscription_id" in tf and "var.tenant_id" in tf
+    assert not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", tf), "no hardcoded IDs"
+    assert "role_assignment" not in tf, "a capacity names its admins; no role assignments needed"
+
+
+def test_makefile_and_powerbi_script_read_existing_fabric_outputs():
+    outputs = set(re.findall(r'^output "(\w+)"', (FABRIC / "outputs.tf").read_text(), re.M))
+    used = set(re.findall(r"\$\(FAB\) output -raw (\w+)", (ROOT / "Makefile").read_text()))
+    used |= set(re.findall(r'tf_output\("fabric", "(\w+)"\)', (ROOT / "infra/powerbi.py").read_text()))
+    assert used and used <= outputs, f"reads missing outputs: {used - outputs}"

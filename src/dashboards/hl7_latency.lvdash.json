@@ -9,8 +9,8 @@
         "  round(percentile_approx(hop_ms, 0.99)) AS p99_ms, round(max(hop_ms)) AS max_ms,\n",
         "  round(avg(CASE WHEN hop_ms < 200 THEN 1.0 ELSE 0.0 END), 4) AS under_200ms\n",
         "FROM (SELECT '1 raw → bronze' AS hop, kafka_timestamp AS ts, hop_ms, e2e_ms FROM bronze_hl7\n",
-        "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_hl7\n",
-        "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations) WHERE ts >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000 GROUP BY hop ORDER BY hop\n"
+        "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_messages\n",
+        ") WHERE ts >= timestampadd(MINUTE, -15, current_timestamp()) AND hop_ms < 600000 GROUP BY hop ORDER BY hop\n"
       ]
     },
     {
@@ -20,8 +20,8 @@
         "SELECT hop, date_trunc('MINUTE', ts) AS minute,\n",
         "  round(percentile_approx(hop_ms, 0.99)) AS p99_ms\n",
         "FROM (SELECT '1 raw → bronze' AS hop, kafka_timestamp AS ts, hop_ms, e2e_ms FROM bronze_hl7\n",
-        "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_hl7\n",
-        "UNION ALL SELECT '3 silver → gold', kafka_timestamp, hop_ms, e2e_ms FROM gold_observations) WHERE ts >= timestampadd(MINUTE, -60, current_timestamp()) AND hop_ms < 600000 GROUP BY hop, date_trunc('MINUTE', ts)\n"
+        "UNION ALL SELECT '2 bronze → silver', kafka_timestamp, hop_ms, e2e_ms FROM silver_messages\n",
+        ") WHERE ts >= timestampadd(MINUTE, -60, current_timestamp()) AND hop_ms < 600000 GROUP BY hop, date_trunc('MINUTE', ts)\n"
       ]
     },
     {
@@ -30,18 +30,18 @@
       "queryLines": [
         "SELECT\n",
         "  (SELECT round(count(*) / 900.0, 1) FROM raw_hl7 WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS msgs_per_sec,\n",
-        "  (SELECT round(percentile_approx(e2e_ms, 0.99)) FROM gold_observations WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp()) AND e2e_ms < 600000) AS raw_to_gold_p99_ms,\n",
-        "  (SELECT count(*) FROM gold_observations WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS gold_observations,\n",
+        "  (SELECT round(percentile_approx(e2e_ms, 0.99)) FROM silver_observations WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp()) AND e2e_ms < 600000) AS raw_to_silver_p99_ms,\n",
+        "  (SELECT count(*) FROM silver_observations WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS observations,\n",
         "  (SELECT count(*) FROM quarantine_hl7 WHERE kafka_timestamp >= timestampadd(MINUTE, -15, current_timestamp())) AS quarantined\n"
       ]
     },
     {
       "name": "critical_labs",
-      "displayName": "Latest critical labs in gold",
+      "displayName": "Latest critical labs in silver",
       "queryLines": [
-        "SELECT kafka_timestamp AS gold_at, patient_id, patient_facility, observation_cd_desc, value_num,\n",
-        "  abnormal_flag, round(e2e_ms) AS raw_to_gold_ms\n",
-        "FROM gold_observations WHERE abnormal_flag IN ('HH', 'LL') ORDER BY kafka_timestamp DESC LIMIT 50\n"
+        "SELECT kafka_timestamp AS silver_at, patient_id, patient_facility, observation_cd_desc, value_num,\n",
+        "  abnormal_flag, round(e2e_ms) AS raw_to_silver_ms\n",
+        "FROM silver_observations WHERE abnormal_flag IN ('HH', 'LL') ORDER BY kafka_timestamp DESC LIMIT 50\n"
       ]
     },
     {
@@ -125,8 +125,8 @@
                   "datasetName": "kpis",
                   "fields": [
                     {
-                      "name": "raw_to_gold_p99_ms",
-                      "expression": "`raw_to_gold_p99_ms`"
+                      "name": "raw_to_silver_p99_ms",
+                      "expression": "`raw_to_silver_p99_ms`"
                     }
                   ],
                   "disaggregated": true
@@ -138,13 +138,13 @@
               "widgetType": "counter",
               "encodings": {
                 "value": {
-                  "fieldName": "raw_to_gold_p99_ms",
-                  "displayName": "Raw → gold p99 (ms)"
+                  "fieldName": "raw_to_silver_p99_ms",
+                  "displayName": "Raw → silver p99 (ms)"
                 }
               },
               "frame": {
                 "showTitle": true,
-                "title": "Raw → gold p99 (ms)"
+                "title": "Raw → silver p99 (ms)"
               }
             }
           },
@@ -157,7 +157,7 @@
         },
         {
           "widget": {
-            "name": "kpi-gold",
+            "name": "kpi-observations",
             "queries": [
               {
                 "name": "main_query",
@@ -165,8 +165,8 @@
                   "datasetName": "kpis",
                   "fields": [
                     {
-                      "name": "gold_observations",
-                      "expression": "`gold_observations`"
+                      "name": "observations",
+                      "expression": "`observations`"
                     }
                   ],
                   "disaggregated": true
@@ -178,13 +178,13 @@
               "widgetType": "counter",
               "encodings": {
                 "value": {
-                  "fieldName": "gold_observations",
-                  "displayName": "Gold observations (15 min)"
+                  "fieldName": "observations",
+                  "displayName": "Observations (15 min)"
                 }
               },
               "frame": {
                 "showTitle": true,
-                "title": "Gold observations (15 min)"
+                "title": "Observations (15 min)"
               }
             }
           },
@@ -490,8 +490,8 @@
                   "datasetName": "critical_labs",
                   "fields": [
                     {
-                      "name": "gold_at",
-                      "expression": "`gold_at`"
+                      "name": "silver_at",
+                      "expression": "`silver_at`"
                     },
                     {
                       "name": "patient_id",
@@ -514,8 +514,8 @@
                       "expression": "`abnormal_flag`"
                     },
                     {
-                      "name": "raw_to_gold_ms",
-                      "expression": "`raw_to_gold_ms`"
+                      "name": "raw_to_silver_ms",
+                      "expression": "`raw_to_silver_ms`"
                     }
                   ],
                   "disaggregated": true
@@ -528,8 +528,8 @@
               "encodings": {
                 "columns": [
                   {
-                    "fieldName": "gold_at",
-                    "displayName": "In gold"
+                    "fieldName": "silver_at",
+                    "displayName": "In silver"
                   },
                   {
                     "fieldName": "patient_id",
@@ -552,14 +552,14 @@
                     "displayName": "Flag"
                   },
                   {
-                    "fieldName": "raw_to_gold_ms",
-                    "displayName": "raw → gold ms"
+                    "fieldName": "raw_to_silver_ms",
+                    "displayName": "raw → silver ms"
                   }
                 ]
               },
               "frame": {
                 "showTitle": true,
-                "title": "Latest critical labs (HH / LL) in gold"
+                "title": "Latest critical labs (HH / LL) in silver"
               }
             }
           },

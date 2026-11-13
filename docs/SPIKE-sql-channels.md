@@ -61,7 +61,7 @@ changes don't, unless they need a new structure.
 The API parses the statement with sqlglot (as today), has Databricks compile it, then picks the tier from its shape:
 
 - **Tier 1:**
-  - one gold source;
+  - one silver source;
   - a WHERE built from per-record expressions only.
 - **Tier 2:**
   - one streaming source (`new_<source>`);
@@ -69,7 +69,7 @@ The API parses the statement with sqlglot (as today), has Databricks compile it,
   - window functions, subqueries, and aggregates over those.
 - **Tier 3:**
   - two streaming sources joined with a time bound, for example
-    `FROM gold_orders o LEFT JOIN gold_observations r ON r.visit_id = o.visit_id AND r.gold_ts BETWEEN o.gold_ts AND o.gold_ts + INTERVAL 2 HOURS`;
+    `FROM silver_orders o LEFT JOIN silver_observations r ON r.visit_id = o.visit_id AND r.source_ts BETWEEN o.source_ts AND o.source_ts + INTERVAL 2 HOURS`;
   - or `GROUP BY window(...)` / `session_window(...)` over a stream.
   - The API derives the watermarks from the time bound.
   - A stream-stream join with no time bound is refused: its state would grow without limit. Spark itself refuses
@@ -171,6 +171,6 @@ restart. Then C1, C4, and C5 for tier 3, and C7 for self-service onboarding.
 - **Quota and cost:** channels are one continuous pipeline per subscriber. Who pays, and what's the per-app limit?
 - **History size:** how many hours of `recent_` history tier 2 keeps, which bounds both cost and the longest window.
 - **Shared reference data:** which lookup tables (units, providers, care teams) the platform publishes for channels to join.
-- **Platform-built sources:** a structure many apps want (orders ⋈ results) could be built once as a shared gold source
+- **Platform-built sources:** a structure many apps want (orders ⋈ results) could be built once as a shared source
   instead of per channel. When should the API suggest that?
 - **Name:** confirm "channel" with the customer's integration team.

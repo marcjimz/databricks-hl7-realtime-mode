@@ -45,9 +45,9 @@ import org.apache.kafka.common.errors.AuthorizationException;
  */
 public final class E2E {
     private static final Duration WAIT = Duration.ofMinutes(3);
-    private static final String GOOD = "SELECT patient_id, value_num FROM gold_observations "
+    private static final String GOOD = "SELECT patient_id, value_num FROM silver_observations "
             + "WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5";
-    private static final String CHANGED = "SELECT patient_id, value_num, units FROM gold_observations "
+    private static final String CHANGED = "SELECT patient_id, value_num, units FROM silver_observations "
             + "WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0";
 
     record Check(String name, String input, String expected, String actual, boolean pass) { }
@@ -132,26 +132,26 @@ public final class E2E {
         }
 
         // Refused in the declare call itself: Databricks' own errors, or a shape the hub won't run.
-        refused("Column not granted", "SELECT patient_id FROM gold_observations WHERE msg_sending_facility = 'NORTH'",
+        refused("Column not granted", "SELECT patient_id FROM silver_observations WHERE msg_sending_facility = 'NORTH'",
                 "UNRESOLVED_COLUMN");
-        refused("Source not granted", "SELECT patient_id FROM gold_encounters", "TABLE_OR_VIEW_NOT_FOUND");
-        refused("Misspelled column", "SELECT patient_id FROM gold_observations WHERE value_numm > 6", "UNRESOLVED_COLUMN");
-        refused("Syntax error", "SELECT patient_id FROM gold_observations WHER value_num > 6", "PARSE_SYNTAX_ERROR");
-        refused("Subquery", "SELECT patient_id FROM gold_observations WHERE value_num > "
-                + "(SELECT max(value_num) FROM gold_observations)", "SQL_NOT_ALLOWED");
-        refused("Join", "SELECT o.patient_id FROM gold_observations o JOIN gold_encounters e ON o.patient_id = e.patient_id",
+        refused("Source not granted", "SELECT patient_id FROM silver_encounters", "TABLE_OR_VIEW_NOT_FOUND");
+        refused("Misspelled column", "SELECT patient_id FROM silver_observations WHERE value_numm > 6", "UNRESOLVED_COLUMN");
+        refused("Syntax error", "SELECT patient_id FROM silver_observations WHER value_num > 6", "PARSE_SYNTAX_ERROR");
+        refused("Subquery", "SELECT patient_id FROM silver_observations WHERE value_num > "
+                + "(SELECT max(value_num) FROM silver_observations)", "SQL_NOT_ALLOWED");
+        refused("Join", "SELECT o.patient_id FROM silver_observations o JOIN silver_encounters e ON o.patient_id = e.patient_id",
                 "SQL_NOT_ALLOWED");
         refused("Function that reaches outside the record",
-                "SELECT patient_id FROM gold_observations WHERE http_request('GET', 'https://example.com') IS NOT NULL",
+                "SELECT patient_id FROM silver_observations WHERE http_request('GET', 'https://example.com') IS NOT NULL",
                 "SQL_NOT_ALLOWED");
         String base = setting("e2e.base_schema");
         if (base != null) {
-            refused("Table outside this app's views", "SELECT patient_id FROM " + base + ".gold_observations",
+            refused("Table outside this app's views", "SELECT patient_id FROM " + base + ".silver_observations",
                     "SQL_NOT_ALLOWED");
         }
         var mixed = new LinkedHashMap<String, String>();
         mixed.put("e2e-ok", GOOD);
-        mixed.put("e2e-bad", "SELECT patient_id FROM gold_observations WHERE value_numm > 6");
+        mixed.put("e2e-bad", "SELECT patient_id FROM silver_observations WHERE value_numm > 6");
         int atomic;
         try {
             api.declare(Api.declared(mixed));
@@ -201,7 +201,7 @@ public final class E2E {
                     awaitState(cancel.getSubscriptionId(), cancel.getRevision(), "CANCELLED"), s -> s.equals("CANCELLED"));
         }
         Map<String, String> hub = api.getStatus(0).getHub();
-        record("Hub heartbeat", "gold_observations", "a batch within 2 minutes", hub.getOrDefault("gold_observations", "never"),
+        record("Hub heartbeat", "silver_observations", "a batch within 2 minutes", hub.getOrDefault("silver_observations", "never"),
                 s -> !s.equals("never") && Instant.parse(s.replace("+00:00", "Z")).isAfter(Instant.now().minusSeconds(120)));
     }
 

@@ -1,4 +1,4 @@
-"""The hub's registry client is shared by one flow per gold source, whose batches run on concurrent threads. pg8000
+"""The hub's registry client is shared by one flow per silver source, whose batches run on concurrent threads. pg8000
 connections aren't thread-safe ("portal does not exist" on Lakebase), so every call must hold the client's lock."""
 
 import threading
@@ -37,7 +37,7 @@ def test_concurrent_flows_never_share_the_connection_at_once():
             registry.report(f"id-{source}-{i}", 1, "ACTIVE")
             registry.heartbeat(source, i, 0)
 
-    sources = ("gold_encounters", "gold_observations", "gold_orders")
+    sources = ("silver_encounters", "silver_observations", "silver_orders")
     threads = [threading.Thread(target=flow, args=(s,)) for s in sources]
     for t in threads:
         t.start()
@@ -72,5 +72,5 @@ def test_a_dropped_connection_is_reopened_on_the_next_call(monkeypatch):
     registry = Registry("projects/p/branches/production/endpoints/primary", "db")
 
     registry.refresh()
-    registry.heartbeat("gold_observations", 1, 0)
+    registry.heartbeat("silver_observations", 1, 0)
     assert opened == [], "the dropped connection was replaced by a new one"

@@ -1,4 +1,5 @@
-# Hot path, silver — Real-Time Mode (serverless, GA): bronze_hl7 -> silver_hl7 | quarantine_hl7 topics (routed per record by one flow).
+# Hot path, silver — Real-Time Mode (serverless, GA): bronze_hl7 -> silver_{messages,encounters,observations,orders,diagnoses}
+# | quarantine_hl7 topics: one flow parses each message once and routes each entity row by its topic.
 resources:
   pipelines:
     hl7_silver:
@@ -19,5 +20,9 @@ resources:
         hl7.eh.service_credential: ${var.eh_service_credential}
         hl7.kafka.starting_offsets: ${var.kafka_starting_offsets}
         hl7.topics.bronze: ${var.hl7_bronze_topic}
-        hl7.topics.silver: ${var.hl7_silver_topic}
+        hl7.topics.silver_messages: ${var.hl7_silver_messages_topic}
+        hl7.topics.silver_encounters: ${var.hl7_silver_encounters_topic}
+        hl7.topics.silver_observations: ${var.hl7_silver_observations_topic}
+        hl7.topics.silver_orders: ${var.hl7_silver_orders_topic}
+        hl7.topics.silver_diagnoses: ${var.hl7_silver_diagnoses_topic}
         hl7.topics.quarantine: ${var.hl7_quarantine_topic}

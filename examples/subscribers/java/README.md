@@ -1,7 +1,7 @@
 # Example subscriber (Java 17)
 
 An example of an external application using the platform. It isn't part of the platform: any language can do the same
-through the contract ([docs/integration.md](../../docs/integration.md)). It subscribes to gold records at runtime with
+through the contract ([docs/integration.md](../../docs/integration.md)). It subscribes to silver records at runtime with
 Databricks SQL, then consumes its own Event Hub, signing in only as its Databricks service principal.
 
 **The API client is generated from the contract.** At build time, Maven runs openapi-generator on

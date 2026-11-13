@@ -12,7 +12,7 @@ class NotificationTest {
     @Test
     void parsesTheHubEnvelope() {
         var n = Listener.parse("{\"notificationId\":\"n1\",\"subscriptionId\":\"s1\",\"subscription\":\"critical-k\","
-                + "\"revision\":3,\"gold_ts\":\"2026-11-03T12:00:00.123Z\",\"payload\":{\"patient_id\":\"P1\",\"value_num\":6.4}}");
+                + "\"revision\":3,\"source_ts\":\"2026-11-03T12:00:00.123Z\",\"payload\":{\"patient_id\":\"P1\",\"value_num\":6.4}}");
 
         assertEquals("n1", n.getNotificationId());
         assertEquals("critical-k", n.getSubscription());
@@ -38,12 +38,12 @@ class NotificationTest {
     @Test
     void isBacklogWhenItsGoldRecordIsOld() {
         var n = Listener.parse("{\"notificationId\":\"n\",\"subscriptionId\":\"s\",\"revision\":1,"
-                + "\"gold_ts\":\"2026-11-03T12:00:00.123Z\",\"payload\":{}}");
+                + "\"source_ts\":\"2026-11-03T12:00:00.123Z\",\"payload\":{}}");
         var now = java.time.Instant.parse("2026-11-03T12:05:00Z");
 
         assertEquals(true, Listener.isBacklog(n, now, java.time.Duration.ofMinutes(2)));
         assertEquals(false, Listener.isBacklog(n, now, java.time.Duration.ofMinutes(10)));
-        assertEquals(false, Listener.isBacklog(parse("s", 1), now, java.time.Duration.ofMinutes(2)), "no gold_ts: unknown, not old");
+        assertEquals(false, Listener.isBacklog(parse("s", 1), now, java.time.Duration.ofMinutes(2)), "no source_ts: unknown, not old");
     }
 
     @Test
