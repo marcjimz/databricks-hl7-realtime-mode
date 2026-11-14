@@ -127,7 +127,7 @@ def test_comments_and_a_trailing_semicolon_are_harmless():
         "SELECT patient_id, patient_id FROM silver_observations",  # the payload can't hold a field twice
         "SELECT patient_id FROM silver_observations WHERE rand() < 0.01",  # a rule matches the same way every time
         "SELECT patient_id FROM silver_observations WHERE uuid() = patient_id",
-        "SELECT patient_id FROM silver_observations WHERE value_num IN (" + ", ".join(["1"] * 5000) + ")",  # too long
+        "SELECT patient_id FROM silver_observations WHERE value_num IN (" + ", ".join(["1"] * 70_000) + ")",  # too long
         "SELECT patient_id FROM silver_observations WHERE " + "(" * 3000 + "value_num > 1" + ")" * 3000,  # too deep
         "SELECT patient_id FROM silver_observations WHERE value_num > ${threshold}",  # template, not SQL
         "INSERT INTO silver_observations SELECT * FROM silver_observations",
@@ -155,7 +155,7 @@ def test_the_hub_recheck_normalizes_and_bounds_too():
 
     assert check_condition("VALUE_NUM > 1", {"value_num"}) == "value_num > 1"
     with pytest.raises(RuleError):
-        check_condition("value_num > 1" + " AND value_num > 1" * 1000, {"value_num"})
+        check_condition("value_num > 1" + " AND value_num > 1" * 12_000, {"value_num"})
 
 
 def test_the_converted_customer_criteria_are_rules_the_api_accepts():

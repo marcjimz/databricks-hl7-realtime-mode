@@ -21,7 +21,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 
 from hl7rt import silver
-from subscription_api.rules import RuleError, check_condition, clauses, identifier, literal
+from subscription_api.rules import RuleError, check_condition, disjuncts, identifier, index_key, literal
 
 SOURCES: dict[str, StructType] = {
     "silver_encounters": silver.ENCOUNTER_SCHEMA,
@@ -95,14 +95,16 @@ def _condition(r: Rule):
 @dataclass(frozen=True)
 class Compiled:
     """A source's rules, checked and prepared once per registry change (not once per batch): simple rules as data (one
-    fixed plan however many there are), the rest as SQL expressions in chunks."""
+    fixed plan however many there are), the rest as SQL expressions in chunks. A data rule is an OR of AND groups
+    (rules.disjuncts); each group is indexed on its own most selective string = or IN (rules.index_key)."""
 
     generation: int | None
     rules: list[Rule]
     failed: dict[str, str]  # subscription id -> why the hub won't run it
     chunks: list[tuple[Column, Column]]  # expression rules, per chunk: (matching rules per record, their metadata)
-    table: DataFrame | None = None  # indexed data rules: a row per (rule, key value of its string = or IN clause)
-    scan: DataFrame | None = None  # data rules with no string = or IN clause: compared with every record
+    index: DataFrame | None = None  # a row per (rule i, group d, key value): what a record's values join
+    rules_table: DataFrame | None = None  # a row per indexed (rule, group): its other clauses, stored once
+    scan: DataFrame | None = None  # a row per group with no string = or IN clause: compared with every record
     data_rules: int = 0
     compile_ms: int = 0
 
@@ -110,12 +112,13 @@ class Compiled:
 _KIND = {"StringType": "string", "IntegerType": "number", "LongType": "number", "DoubleType": "number",
          "FloatType": "number", "ShortType": "number", "DecimalType": "number"}  # fmt: skip
 _CLAUSE = "struct<col: string, op: string, str: string, num: double, strs: array<string>, nums: array<double>>"
-_TABLE = (
-    f"i int, topic string, sid string, name string, rev int, fields array<string>, clauses array<{_CLAUSE}>, "
-    "key_col string, key_val string"
+_INDEX = "i int, d int, key_col string, key_val string"
+_GROUPS = (
+    f"i int, d int, topic string, sid string, name string, rev int, fields array<string>, clauses array<{_CLAUSE}>, "
+    f"earlier array<array<{_CLAUSE}>>"
 )
-# Every clause of a data rule must hold. A NULL comparison is unknown, so the rule doesn't match: SQL's AND semantics.
-_ALL_HOLD = """forall(clauses, c -> CASE c.op
+# Every clause of a group must hold. A NULL comparison is unknown, so the group doesn't match: SQL's AND semantics.
+_HOLDS = """forall({clauses}, c -> CASE c.op
   WHEN 'eq_s' THEN element_at(_s, c.col) = c.str  WHEN 'ne_s' THEN element_at(_s, c.col) <> c.str
   WHEN 'lt_s' THEN element_at(_s, c.col) < c.str  WHEN 'le_s' THEN element_at(_s, c.col) <= c.str
   WHEN 'gt_s' THEN element_at(_s, c.col) > c.str  WHEN 'ge_s' THEN element_at(_s, c.col) >= c.str
@@ -128,6 +131,14 @@ _ALL_HOLD = """forall(clauses, c -> CASE c.op
   WHEN 'nin_n' THEN NOT array_contains(c.nums, element_at(_n, c.col))
   WHEN 'null' THEN element_at(_a, c.col) IS NULL  WHEN 'not_null' THEN element_at(_a, c.col) IS NOT NULL
 END)"""
+# A record matches a rule when some group holds; it is delivered for the first group that does, so a record that
+# meets several groups of one rule is one notification. (`clauses` omits an indexed group's key: the join checked it.)
+_MATCHES = (
+    _HOLDS.format(clauses="clauses")
+    + " AND NOT exists(earlier, g -> coalesce("
+    + _HOLDS.format(clauses="g")
+    + ", false))"
+)
 
 
 def kinds(source: str) -> dict[str, str]:
@@ -160,32 +171,40 @@ def compile_rules(rules: list[Rule], generation: int | None = None, chunk: int |
     chunk = chunk or CHUNK
     started = time.monotonic()
     good, failed = runnable(rules)
-    table, data, expressions = None, [], []
+    data, expressions = [], []
     for r in good:
-        cl = clauses(r.where, kinds(r.source)) if spark is not None else None
-        (data if cl is not None else expressions).append((r, cl))
-    scan = None
+        groups = disjuncts(r.where, kinds(r.source)) if spark is not None else None
+        (data if groups is not None else expressions).append((r, groups))
+    index, groups_table, scan = None, None, None
     if data:
-        indexed, unindexed = [], []
-        for i, (r, cl) in enumerate(data):
-            row = (i, r.topic, r.subscription_id, r.name, int(r.revision), list(r.fields),
-                   [{"col": c["col"], "op": c["op"], "str": c.get("str"), "num": c.get("num"), "strs": c.get("strs"),
-                     "nums": c.get("nums")} for c in cl])  # fmt: skip
-            key = next((c for c in cl if c["op"] in ("eq_s", "in_s")), None)
-            if key is None:
-                unindexed.append(row + (None, None))
-            else:  # one row per key value: a record only meets the rules that name one of its values
+        keys, indexed, unindexed = [], [], []
+        for i, (r, groups) in enumerate(data):
+            for d, group in enumerate(groups):
+                key = index_key(group)
+                row = (i, d, r.topic, r.subscription_id, r.name, int(r.revision), list(r.fields),
+                       _clauses([c for c in group if c is not key]), [_clauses(g) for g in groups[:d]])  # fmt: skip
+                if key is None:
+                    unindexed.append(row)
+                    continue
+                indexed.append(row)
+                # one row per key value: a record only meets the groups that name one of its values
                 for value in sorted(set([key["str"]] if key["op"] == "eq_s" else key["strs"])):
-                    indexed.append(row + (key["col"], value))
-        table = spark.createDataFrame(indexed, _TABLE) if indexed else None
-        scan = spark.createDataFrame(unindexed, _TABLE) if unindexed else None
+                    keys.append((i, d, key["col"], value))
+        index = spark.createDataFrame(keys, _INDEX) if keys else None
+        groups_table = spark.createDataFrame(indexed, _GROUPS) if indexed else None
+        scan = spark.createDataFrame(unindexed, _GROUPS) if unindexed else None
     chunks = []
     exprs = [r for r, _ in expressions]
     for start in range(0, len(exprs), chunk):
         hits, meta = _chunk_sql(exprs[start : start + chunk])
         chunks.append((F.expr(hits), F.expr(meta)))
     elapsed = int((time.monotonic() - started) * 1000)
-    return Compiled(generation, good, failed, chunks, table, scan, len(data), elapsed)
+    return Compiled(generation, good, failed, chunks, index, groups_table, scan, len(data), elapsed)
+
+
+def _clauses(group: list[dict]) -> list[dict]:
+    return [{"col": c["col"], "op": c["op"], "str": c.get("str"), "num": c.get("num"), "strs": c.get("strs"),
+             "nums": c.get("nums")} for c in group]  # fmt: skip
 
 
 def _envelope(matched: DataFrame, source: str) -> DataFrame:
@@ -211,10 +230,11 @@ def _envelope(matched: DataFrame, source: str) -> DataFrame:
     )
 
 
-def _data_matches(records: DataFrame, source: str, table: DataFrame | None, scan: DataFrame | None) -> DataFrame:
-    """Data rules, in one fixed plan. Indexed rules: each record's string values join the rules that name them (a
-    broadcast equi-join), so a record meets only the few rules that could match it. The rest meet every record. Either
-    way, every clause of a candidate rule must then hold."""
+def _data_matches(records: DataFrame, source: str, c: "Compiled") -> DataFrame:
+    """Data rules, in one fixed plan. Indexed groups: each record's string values join the index rows that name them
+    (a broadcast equi-join), then their group's other clauses (a second, small broadcast join), so a record meets only
+    the few groups that could match it. Unindexed groups meet every record. Either way, every clause of a candidate
+    group must then hold, and no earlier group of its rule may (one notification per record and rule)."""
     cols = [f.name for f in SOURCES[source]]
     k = kinds(source)
 
@@ -240,15 +260,16 @@ def _data_matches(records: DataFrame, source: str, table: DataFrame | None, scan
         F.expr("map(" + ", ".join(f"{literal(c)}, {fragment(c)}" for c in cols) + ")").alias("_j"),
     )
     candidates = []
-    if table is not None:
+    if c.index is not None:
         keyed = with_maps.select("*", F.explode("_s").alias("_k", "_v"))
-        t = F.broadcast(table)
-        candidates.append(keyed.join(t, (keyed["_k"] == t["key_col"]) & (keyed["_v"] == t["key_val"])).drop("_k", "_v"))
-    if scan is not None:
-        candidates.append(with_maps.crossJoin(F.broadcast(scan)))
+        t = F.broadcast(c.index)
+        hits = keyed.join(t, (keyed["_k"] == t["key_col"]) & (keyed["_v"] == t["key_val"]))
+        candidates.append(hits.drop("_k", "_v", "key_col", "key_val").join(F.broadcast(c.rules_table), ["i", "d"]))
+    if c.scan is not None:
+        candidates.append(with_maps.crossJoin(F.broadcast(c.scan)))
     out = None
-    for c in candidates:
-        matched = c.where(F.expr(_ALL_HOLD)).select(
+    for cand in candidates:
+        matched = cand.where(F.expr(_MATCHES)).select(
             "topic", "sid", "name", "rev", "patient_id", "_partition", "_offset", "_source_ts",
             F.expr("concat('{', array_join(transform(fields, f -> element_at(_j, f)), ','), '}')").alias("payload"),
         )  # fmt: skip
@@ -260,8 +281,8 @@ def notifications(records: DataFrame, source: str, rules: "list[Rule] | Compiled
     """Kafka records (topic, key, value) for every rule's matches in a batch of `events(...)`, or None."""
     compiled = rules if isinstance(rules, Compiled) else compile_rules(rules)
     parts = []
-    if compiled.table is not None or compiled.scan is not None:
-        parts.append(_data_matches(records, source, compiled.table, compiled.scan))
+    if compiled.index is not None or compiled.scan is not None:
+        parts.append(_data_matches(records, source, compiled))
     for hits, metas in compiled.chunks:
         meta = F.element_at(metas, F.col("h.i") + 1)
         parts.append(
