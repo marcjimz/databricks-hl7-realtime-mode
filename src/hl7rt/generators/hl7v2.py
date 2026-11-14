@@ -6,9 +6,10 @@ real subscription rules filter on (docs/examples/criteria.md): labs with LOINC a
 a type on admits, registrations, and updates, and patients spread over several points of care. All values are synthetic.
 
 Alongside that background traffic, `Journeys` plays coherent emergency-department encounters, one patient and visit
-each, for dynamic (patient-specific) subscriptions to follow: registration (A04, chief complaint, admitting diagnosis),
-an update (A08), labs and vitals, and for respiratory complaints a chest X-ray order, its report, and a note, ending in a
-discharge (A03) or a transfer (A02). Steps are seconds apart, and journey patients are outside the background population.
+each, for dynamic (patient-specific) subscriptions to follow: registration (A04, chief complaint, admitting
+diagnosis), an update (A08), labs and vitals, and for respiratory complaints a chest X-ray order, its report, and a
+note, ending in a discharge (A03) or a transfer (A02). Steps are seconds apart; journey patients are outside the
+background population.
 Each record carries a `sent_ms` header so the producer -> Event Hubs hop can be measured too.
 A small share of messages are deliberately invalid so the quarantine topic has something to show.
 """
@@ -131,9 +132,10 @@ def _message(n: int, rng: random.Random, kind: str, mrn: str, fac: str, pv1: dic
         segs.append(segment("DG1", {1: str(i), 3: f"{code}^{name}^ICD-10-CM", 5: now, 6: kind_}))
     order = order or f"ORD{n}"
     if kind == "ORU^R01" and radiology:
-        segs += [segment("ORC", {1: "RE", 2: order}), segment("OBR", {1: "1", 2: order, 4: CHEST_XRAY, 7: now, 24: "RAD", 25: "F"}),
-                 segment("OBX", {1: "1", 2: "TX", 3: "IMP^Impression^L", 5: rng.choice(
-                     ["Right lower lobe consolidation.", "No acute cardiopulmonary process."]), 11: "F", 14: now})]  # fmt: skip
+        impression = rng.choice(["Right lower lobe consolidation.", "No acute cardiopulmonary process."])
+        segs += [segment("ORC", {1: "RE", 2: order}),
+                 segment("OBR", {1: "1", 2: order, 4: CHEST_XRAY, 7: now, 24: "RAD", 25: "F"}),
+                 segment("OBX", {1: "1", 2: "TX", 3: "IMP^Impression^L", 5: impression, 11: "F", 14: now})]  # fmt: skip
     elif kind == "ORU^R01":
         panel = "VITALS^Vital Signs^FLOWSHEET" if vitals else "80048^Basic Metabolic Panel^CPT"
         segs.append(segment("OBR", {1: "1", 2: order, 4: panel, 7: now}))
@@ -189,16 +191,21 @@ class Journeys:
         self._started += 1
         code, complaint, respiratory = rng.choice(CHIEF_COMPLAINTS)
         dx = rng.choice(RESPIRATORY_DIAGNOSES if respiratory else OTHER_DIAGNOSES)
-        mrn, fac, poc = f"MRN{self._patients + self._started:06d}", rng.choice(FACILITIES), rng.choice(ED_POINTS_OF_CARE)
+        mrn, fac, poc = (
+            f"MRN{self._patients + self._started:06d}",
+            rng.choice(FACILITIES),
+            rng.choice(ED_POINTS_OF_CARE),
+        )
         ed = {2: "E", 3: f"{poc}^01^A^{fac}", 4: "E", 19: f"VED{self._started:07d}"}
         order = f"RAD{self._started}"
         steps = [("ADT^A04", {"pv1": ed, "pv2": {3: f"{code}^{complaint}"}, "diagnoses": [(*dx, "ADMITTING")]}),
                  ("ADT^A08", {"pv1": ed, "pv2": {3: f"{code}^{complaint}"}}),
                  ("ORU^R01", {"pv1": ed}), ("ORU^R01", {"pv1": ed, "vitals": True})]  # fmt: skip
         if respiratory:
+            note = [f"{complaint} since yesterday.", "Crackles at the right base."]
             steps += [("ORM^O01", {"pv1": ed, "radiology": True, "order": order}),
                       ("ORU^R01", {"pv1": ed, "radiology": True, "order": order}),
-                      ("MDM^T02", {"pv1": ed, "note": [f"{complaint} since yesterday.", "Crackles at the right base."]})]  # fmt: skip
+                      ("MDM^T02", {"pv1": ed, "note": note})]  # fmt: skip
         if rng.random() < 0.5:
             steps.append(("ADT^A02", {"pv1": {**ed, 2: "I", 3: f"MED4^12^B^{fac}", 6: f"{poc}^01^A^{fac}"}}))
         else:

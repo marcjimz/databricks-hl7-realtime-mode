@@ -63,8 +63,8 @@ ENCOUNTER_SCHEMA = _schema(
      "admit_dt_tm", "discharge_dt_tm", "discharge_disposition", *LINEAGE]
 )  # fmt: skip
 OBSERVATION_SCHEMA = _schema(
-    [*CONTEXT, "order_id", "order_cd", "order_cd_desc", "diagnostic_service", "position", "set_id", "value_type", "observation_cd",
-     "observation_cd_desc", "observation_cd_system", "alt_observation_cd", "alt_observation_cd_desc",
+    [*CONTEXT, "order_id", "order_cd", "order_cd_desc", "diagnostic_service", "position", "set_id", "value_type",
+     "observation_cd", "observation_cd_desc", "observation_cd_system", "alt_observation_cd", "alt_observation_cd_desc",
      "alt_observation_cd_system", "value", "value_num", "units", "reference_range", "abnormal_flag", "result_status",
      "observation_dt_tm", *LINEAGE]
 )  # fmt: skip

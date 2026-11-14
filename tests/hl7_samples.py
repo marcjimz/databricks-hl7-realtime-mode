@@ -104,14 +104,18 @@ def adt_a02(control_id: str = "CTRL0005") -> str:
     """A transfer out of the ED: PV1-3 is the new location, PV1-6 the prior one."""
     pv1 = segment("PV1", {1: "1", 2: "I", 3: "MED4^12^B^FAC01", 6: "ED^01^A^FAC01", 19: "V000000042",
                           44: "20261023080000"})  # fmt: skip
-    return message([segment("MSH", {**MSH, 9: "ADT^A02^ADT_A02", 10: control_id}), segment("EVN", {1: "A02"}), PID, pv1])
+    return message(
+        [segment("MSH", {**MSH, 9: "ADT^A02^ADT_A02", 10: control_id}), segment("EVN", {1: "A02"}), PID, pv1]
+    )
 
 
 def adt_a03(control_id: str = "CTRL0006") -> str:
     """A discharge from the ED, with disposition (PV1-36) and discharge time (PV1-45)."""
     pv1 = segment("PV1", {1: "1", 2: "E", 3: "ED^01^A^FAC01", 19: "V000000042", 36: "01", 44: "20261023080000",
                           45: "20261023113000"})  # fmt: skip
-    return message([segment("MSH", {**MSH, 9: "ADT^A03^ADT_A03", 10: control_id}), segment("EVN", {1: "A03"}), PID, pv1])
+    return message(
+        [segment("MSH", {**MSH, 9: "ADT^A03^ADT_A03", 10: control_id}), segment("EVN", {1: "A03"}), PID, pv1]
+    )
 
 
 def orm_o01_radiology(control_id: str = "CTRL0007") -> str:
