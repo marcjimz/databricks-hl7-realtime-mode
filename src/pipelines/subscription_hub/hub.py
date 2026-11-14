@@ -2,15 +2,16 @@
 
 Rules are Databricks SQL registered at runtime through the Subscription API (src/subscription_api) and stored in the
 Lakebase registry; the pipeline graph never changes. Each micro-batch:
-  1. check the registry's generation (one indexed query) and reload the rules if it moved,
+  1. check the registry's generation (one query) and read the subscriptions that changed, if any,
   2. evaluate this source's compiled rule set in one pass and write the matches to each app's topic (the Kafka sink
      routes by the `topic` column). If the batch fails, find the rules that fail on it, report them FAILED, and write
      the rest,
   3. record ACTIVE / CANCELLED / FAILED per revision, a heartbeat, and where the batch's time went (hub_progress).
 
-Compiling a rule set (checking every rule, building its Spark expressions) happens once per registry change, in a
-background thread: batches keep using the last compiled set meanwhile, so a change never blocks delivery. Only a
-source's first set is compiled in the batch itself.
+A source's rule set is recompiled only when one of its own subscriptions changed (each source has its own generation),
+and only the changed rules are parsed again (checks and AND groups are cached per revision). When the last compile was
+quick (SYNC_COMPILE_MS), the batch that saw the change compiles it, so the change is live in that batch; otherwise a
+background thread does, and batches keep using the last compiled set meanwhile, so a change never blocks delivery.
 
 foreach_batch_sink is Public Preview (PREVIEW channel); Real-Time Mode doesn't support foreachBatch, so this hop is
 seconds, not milliseconds. Delivery is at-least-once with stable notification IDs.
@@ -27,10 +28,12 @@ from hl7rt.registry import Registry
 
 _registry = Registry(conf(spark, "registry.endpoint"), conf(spark, "registry.database"))
 _CHUNK = int(conf(spark, "subscriptions.chunk"))  # rules per projection: small enough for Spark to compile and cache it
+SYNC_COMPILE_MS = 1_000  # recompile in the batch when the last compile took less than this; else in the background
 
 
 class _RuleSet:
-    """A source's compiled rules, rebuilt in the background whenever the registry generation moves."""
+    """A source's compiled rules, rebuilt whenever its generation moves: in the batch if that's quick, else in the
+    background."""
 
     def __init__(self, source: str):
         self.source, self.current, self._building = source, None, False
@@ -42,6 +45,13 @@ class _RuleSet:
             self.current = self._compile(generation)
             return self.current, True
         with self._lock:
+            if (
+                self.current.generation != generation
+                and not self._building
+                and (self.current.compile_ms < SYNC_COMPILE_MS)
+            ):
+                self.current = self._compile(generation)
+                return self.current, True
             if self.current.generation != generation and not self._building:
                 self._building = True
                 threading.Thread(target=self._rebuild, args=(generation,), daemon=True).start()
@@ -79,7 +89,7 @@ def _hub(source: str, topic: str):
         t0 = time.monotonic()
         _registry.refresh()
         t1 = time.monotonic()
-        compiled, compiled_now = rule_set.get(_registry.generation)
+        compiled, compiled_now = rule_set.get(_registry.source_generation(source))
         t2 = time.monotonic()
         # Read the micro-batch once, into memory (it's bounded by maxOffsetsPerTrigger): every chunk of rules is then
         # evaluated against local rows, not a fresh read of the topic per chunk.

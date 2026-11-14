@@ -1,7 +1,11 @@
 """The hub's side of the subscription registry (Lakebase Postgres; schema in src/registry/registry.sql).
 
-Read once per micro-batch: one indexed max(generation) query, and a full reload only when it moved. Writes the hub's
-verdict per revision (status) and a heartbeat per source, so apps can tell a quiet stream from a stopped hub.
+Read once per micro-batch: one query for the registry's (max, sum) of generations, and when that moved, only the
+subscriptions changed since (an indexed range on generation). Every write takes a new generation, so a change shows in
+both numbers; a write that committed after a later one was read shows in the sum, and the client then reloads
+everything. Each source has its own generation (from its subscriptions' generations), so a change to one source's rules
+leaves the others' compiled sets alone. Writes the hub's verdict per revision (status) and a heartbeat per source, so
+apps can tell a quiet stream from a stopped hub.
 
 The hub's flows (one per silver source) run batches on concurrent threads and share this one connection, which pg8000
 doesn't allow, so every call holds a lock (each is a single short query).
@@ -22,9 +26,13 @@ from subscription_api.db import TOKEN_SECONDS, connect
 
 _RULES = (
     "SELECT s.subscription_id::text, s.name, s.revision, s.enabled, s.source, s.where_sql, s.fields, "
-    "a.destination_topic, a.allowed_fields "
+    "a.destination_topic, a.allowed_fields, s.generation "
     "FROM subscription_registry.subscriptions s JOIN subscription_registry.apps a ON a.app_role = s.owner"
 )
+_SIGNATURE = (
+    "SELECT coalesce(max(generation), 0), coalesce(sum(generation), 0)::text FROM subscription_registry.subscriptions"
+)
+LOOKBACK = 100  # generations re-read on each change: writes in flight together commit within a few numbers
 
 
 def _locked(method):
@@ -46,9 +54,11 @@ def _locked(method):
 class Registry:
     def __init__(self, endpoint: str, database: str):
         self._endpoint, self._database = endpoint, database
-        self._conn, self._opened, self._generation = None, 0.0, None
+        self._conn, self._opened, self._generation, self._signature = None, 0.0, None, None
+        self._rows: dict[str, tuple] = {}  # subscription id -> its row (_RULES)
         self._enabled: list[tuple] = []
         self._disabled: list[tuple] = []
+        self._sources: dict[str, tuple] = {}  # source -> (max, sum, count) of its subscriptions' generations
         self._reported: dict[str, tuple[int, str]] = {}
         self._lock = threading.RLock()
 
@@ -67,15 +77,27 @@ class Registry:
 
     @_locked
     def refresh(self) -> bool:
-        """Reload subscriptions if the registry changed since the last call. True when it did."""
+        """Read the subscriptions changed since the last call (all of them the first time). True when any did."""
         db = self._db()
-        generation = db.run("SELECT coalesce(max(generation), 0) FROM subscription_registry.subscriptions")[0][0]
-        if generation == self._generation:
+        top, total = db.run(_SIGNATURE)[0]
+        signature = (int(top), int(total))
+        if signature == self._signature:
             return False
-        rows = db.run(_RULES)
-        self._enabled = [r for r in rows if r[3]]
-        self._disabled = [r for r in rows if not r[3]]
-        self._generation = generation
+        rows = None
+        if self._signature is not None:
+            rows = dict(self._rows)
+            rows.update({r[0]: r for r in db.run(_RULES + " WHERE s.generation > :g", g=self._generation - LOOKBACK)})
+            if sum(r[9] for r in rows.values()) != signature[1]:
+                rows = None  # a write committed out of order, or a row was deleted: read everything
+        if rows is None:
+            rows = {r[0]: r for r in db.run(_RULES)}
+        self._rows, self._generation, self._signature = rows, signature[0], signature
+        self._enabled = [r for r in rows.values() if r[3]]
+        self._disabled = [r for r in rows.values() if not r[3]]
+        sources: dict[str, list[int]] = {}
+        for r in rows.values():
+            sources.setdefault(r[4], []).append(r[9])
+        self._sources = {source: (max(g), sum(g), len(g)) for source, g in sources.items()}
         return True
 
     @_locked
@@ -109,6 +131,11 @@ class Registry:
     def generation(self):
         """The registry generation the last refresh() saw (changes whenever any subscription does)."""
         return self._generation
+
+    @_locked
+    def source_generation(self, source: str) -> tuple:
+        """`source`'s own generation: changes when one of its subscriptions does, or one moves to another source."""
+        return self._sources.get(source, (0, 0, 0))
 
     @_locked
     def progress(self, source: str, batch_id: int, rules: int, ms: dict[str, int]):

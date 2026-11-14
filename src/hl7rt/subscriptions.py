@@ -173,7 +173,7 @@ def compile_rules(rules: list[Rule], generation: int | None = None, chunk: int |
     good, failed = runnable(rules)
     data, expressions = [], []
     for r in good:
-        groups = disjuncts(r.where, kinds(r.source)) if spark is not None else None
+        groups = _groups(r) if spark is not None else None
         (data if groups is not None else expressions).append((r, groups))
     index, groups_table, scan = None, None, None
     if data:
@@ -200,6 +200,19 @@ def compile_rules(rules: list[Rule], generation: int | None = None, chunk: int |
         chunks.append((F.expr(hits), F.expr(meta)))
     elapsed = int((time.monotonic() - started) * 1000)
     return Compiled(generation, good, failed, chunks, index, groups_table, scan, len(data), elapsed)
+
+
+_GROUPS_OF: dict[tuple[str, str | None], list[list[dict]] | None] = {}  # (source, canonical WHERE) -> its groups
+
+
+def _groups(r: Rule) -> list[list[dict]] | None:
+    """A rule's AND groups (rules.disjuncts), cached by its WHERE: a registry change recompiles one rule, not all."""
+    key = (r.source, r.where)
+    if key not in _GROUPS_OF:
+        if len(_GROUPS_OF) > 20_000:  # bounded: old revisions drop out
+            _GROUPS_OF.clear()
+        _GROUPS_OF[key] = disjuncts(r.where, kinds(r.source))
+    return _GROUPS_OF[key]
 
 
 def _clauses(group: list[dict]) -> list[dict]:
