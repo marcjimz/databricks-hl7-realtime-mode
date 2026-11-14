@@ -6,7 +6,8 @@
                     (schema subscription_monitor; platform only, nothing granted to apps)
   subscriber apps   terraform var subscriber_apps, per app:
                       - a NOLOGIN Postgres role app_<name> in `subscriber`, usable only by the Subscription API, and its
-                        binding (service principal, hub, sources, fields). Apps removed from Terraform lose it.
+                        binding (service principal, hub, sources, fields) and its data templates
+                        (subscriber_templates). Apps removed from Terraform lose it.
                       - UC views <catalog>.sub_<name>.<source> exposing only its granted fields: Databricks compiles
                         the app's SQL against them, and developers test rules there in the SQL editor
                       - CAN_USE on the Subscription API app
@@ -179,6 +180,16 @@ def main():
             "eventhubs_credential = excluded.eventhubs_credential",
             r=r, n=name, t=a["hub"], s=a["sources"], f=a["fields"], sp=a["application_id"], c=credential(name),
         )  # fmt: skip
+        templates = a.get("templates") or {}
+        db.run("DELETE FROM subscription_registry.templates WHERE app_role = :r AND name <> ALL (CAST(:k AS text[]))",
+               r=r, k=list(templates))  # fmt: skip
+        for t, spec in templates.items():
+            db.run(
+                "INSERT INTO subscription_registry.templates (app_role, name, sources, fields) "
+                "VALUES (:r, :n, CAST(:s AS text[]), CAST(:f AS text[])) ON CONFLICT (app_role, name) "
+                "DO UPDATE SET sources = excluded.sources, fields = excluded.fields",
+                r=r, n=t, s=spec["sources"], f=spec["fields"],
+            )  # fmt: skip
 
         views = f"{catalog}.sub_{name.replace('-', '_')}"
         sql(w, warehouse_id, f"CREATE SCHEMA IF NOT EXISTS {views} COMMENT 'Views {name} may subscribe to'")
@@ -191,7 +202,10 @@ def main():
             sql(w, warehouse_id, f"GRANT USE SCHEMA, SELECT ON SCHEMA {views} TO `{api_sp}`")
             w.apps.update_permissions(API_APP, access_control_list=[AppAccessControlRequest(
                 service_principal_name=a["application_id"], permission_level=AppPermissionLevel.CAN_USE)])  # fmt: skip
-        print(f"ok       app {name} ({a['application_id']}) -> {a['hub']}; views {views}")
+        print(
+            f"ok       app {name} ({a['application_id']}) -> {a['hub']}; views {views}; "
+            f"templates {sorted(templates) or 'none'}"
+        )
 
     data_api_url = f"https://{host}/api/2.0/workspace/{tf_output('workspace_id')}/rest/{DATABASE}"  # the old bypass
     out = ROOT / "examples/subscribers/apps"

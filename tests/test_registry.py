@@ -187,3 +187,45 @@ def test_the_hub_runs_at_most_a_capped_number_of_rules_across_all_apps(pg):
 
 def test_registry_sql_is_idempotent(pg):
     pg().run(SQL)  # applied on every `make registry`
+
+
+def subscribe_as(conn, name, template=None, tier="realtime", fields=("patient_id", "value_num"), where="value_num > 6"):
+    return conn.run(
+        "SELECT subscription_api.subscribe(:n, 'silver_observations', :q, :w, CAST(:f AS text[]), :t, :tier)",
+        n=name, q=f"SELECT {', '.join(fields)} FROM silver_observations WHERE {where}", w=where, f=list(fields),
+        t=template, tier=tier,
+    )[0][0]  # fmt: skip
+
+
+def refused(conn, *args, **kwargs):
+    with pytest.raises(pg8000.DatabaseError) as e:
+        subscribe_as(conn, *args, **kwargs)
+    return e.value.args[0]["M"].split(":")[0]
+
+
+def test_a_subscription_naming_a_template_reads_only_that_templates_fields(pg):
+    """Templates are the platform's named grants per workflow: a subscription that names one is held to it."""
+    a = pg("app_a")
+    r = subscribe_as(a, "tpl-ok", template="lab-values")
+    assert (r["template"], r["tier"]) == ("lab-values", "realtime")
+    # granted to the app, but not to the template
+    assert refused(a, "tpl-wide", template="lab-values", fields=("patient_id", "observation_cd_desc")) == (
+        "TEMPLATE_DENIED"
+    )
+    assert refused(a, "tpl-none", template="no-such-template") == "TEMPLATE_DENIED"
+    assert refused(pg("app_b"), "tpl-other", template="lab-values", fields=("patient_id",)) == "TEMPLATE_DENIED"
+
+
+def test_a_subscription_has_a_tier_realtime_by_default(pg):
+    a = pg("app_a")
+    assert subscribe_as(a, "tier-default")["tier"] == "realtime"
+    deferred = subscribe_as(a, "tier-default", tier="deferred")
+    assert deferred["tier"] == "deferred" and deferred["revision"] == 2, "a tier change is a new revision"
+    assert refused(a, "tier-bad", tier="urgent") == "TIER_INVALID"
+    listed = {s["name"]: s for s in a.run("SELECT subscription_api.list_subscriptions()")[0][0]["subscriptions"]}
+    assert (listed["tier-default"]["tier"], listed["tier-default"]["template"]) == ("deferred", None)
+
+
+def test_apps_see_only_their_own_templates(pg):
+    assert pg("app_b").run("SELECT count(*) FROM subscription_registry.templates")[0][0] == 0
+    assert pg("app_a").run("SELECT name FROM subscription_registry.templates") == [["lab-values"]]

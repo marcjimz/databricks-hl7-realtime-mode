@@ -89,3 +89,13 @@ def test_the_hub_has_a_topic_for_every_source():
     spec = yaml.safe_load((ROOT / "resources/pipelines/subscription_hub.yml").read_text())
     configured = spec["resources"]["pipelines"]["subscription_hub"]["configuration"]
     assert {f"hl7.topics.{s}" for s in subscriptions.SOURCES} <= set(configured)
+
+
+def test_the_deferred_hub_is_the_realtime_hub_on_a_longer_trigger():
+    """Two hub pipelines run the same code; only the tier they serve and the trigger may differ."""
+    hubs = yaml.safe_load((ROOT / "resources/pipelines/subscription_hub.yml").read_text())["resources"]["pipelines"]
+    realtime, deferred = hubs["subscription_hub"], hubs["subscription_hub_deferred"]
+    assert realtime["configuration"].pop("hl7.subscriptions.tier") == "realtime"
+    assert deferred["configuration"].pop("hl7.subscriptions.tier") == "deferred"
+    assert deferred["configuration"].pop("pipelines.trigger.interval").endswith(" seconds")
+    assert {k: v for k, v in deferred.items() if k != "name"} == {k: v for k, v in realtime.items() if k != "name"}

@@ -89,12 +89,22 @@ variable "tables" {
   ]
 }
 
+variable "subscriber_templates" {
+  description = "Data templates: name -> the silver sources and columns one workflow needs (minimum necessary). Apps are granted templates; a subscription that names one may read, filter on, and receive only its columns."
+  type = map(object({
+    sources = list(string)
+    fields  = list(string)
+  }))
+  default = {}
+}
+
 variable "subscriber_apps" {
-  description = "Subscriber apps: name -> its Databricks service principal's application ID and what it may read (silver sources and columns). Each gets its own hub and a hub-scoped identity (subscribers.tf)."
+  description = "Subscriber apps: name -> its Databricks service principal's application ID and what it may read: data templates (subscriber_templates) and/or sources and columns of its own. Each gets its own hub and a hub-scoped identity (subscribers.tf)."
   type = map(object({
     application_id = string
-    sources        = list(string)
-    fields         = list(string)
+    templates      = optional(list(string), [])
+    sources        = optional(list(string), [])
+    fields         = optional(list(string), [])
   }))
   default = {}
   validation {

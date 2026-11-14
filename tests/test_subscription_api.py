@@ -211,3 +211,48 @@ def test_declaring_nothing_cancels_everything(client):
 def test_a_case_insensitive_rule_is_stored_in_canonical_form(client):
     r = declare(client, [("upper", "SELECT PATIENT_ID FROM SILVER_OBSERVATIONS WHERE VALUE_NUM > 6")])
     assert r.json()["accepted"][0]["query"] == "SELECT patient_id FROM silver_observations WHERE value_num > 6"
+
+
+def test_a_rule_held_to_a_template_reads_only_its_columns(client):
+    """app-a's template lab-values is patient_id and value_num: a rule naming it may not filter on, or receive, more."""
+    ok = client.put(
+        "/api/v1/subscriptions/tpl-k",
+        headers=A,
+        json={
+            "sql": "SELECT patient_id, value_num FROM silver_observations WHERE value_num > 6",
+            "template": "lab-values",
+        },
+    )
+    assert ok.status_code == 200 and ok.json()["template"] == "lab-values"
+    wide = client.put("/api/v1/subscriptions/tpl-wide", headers=A, json={"sql": POTASSIUM, "template": "lab-values"})
+    assert wide.status_code == 422
+    (refusal,) = wide.json()["refused"]
+    assert refusal["code"] == "TEMPLATE_DENIED" and "observation_cd_desc" in refusal["message"]
+    other = client.put(
+        "/api/v1/subscriptions/tpl-b",
+        headers=B,
+        json={"sql": "SELECT patient_id FROM silver_observations", "template": "lab-values"},
+    )
+    assert other.status_code == 422 and other.json()["refused"][0]["code"] == "TEMPLATE_DENIED"
+
+
+def test_a_deferred_subscription_waits_for_the_deferred_hub(client, pg):
+    r = client.put("/api/v1/subscriptions/billing-k", headers=A, json={"sql": POTASSIUM, "tier": "deferred"})
+    assert r.status_code == 200 and r.json()["tier"] == "deferred"
+    listed = {s["name"]: s for s in client.get("/api/v1/subscriptions", headers=A).json()["subscriptions"]}
+    assert listed["billing-k"]["tier"] == "deferred"
+    owner = pg()
+    owner.run(
+        "INSERT INTO subscription_registry.status (subscription_id, revision, state) "
+        "SELECT subscription_id, revision, 'ACTIVE' FROM subscription_registry.subscriptions "
+        "ON CONFLICT (subscription_id) DO UPDATE SET revision = excluded.revision, state = 'ACTIVE'"
+    )
+    owner.run(
+        "INSERT INTO subscription_registry.hub_heartbeat VALUES ('silver_observations', now(), 1, 1) "
+        "ON CONFLICT (source) DO UPDATE SET last_batch_at = now()"
+    )
+    owner.run("DELETE FROM subscription_registry.hub_heartbeat WHERE source = 'deferred:silver_observations'")
+    stale = client.get("/api/v1/subscriptions", headers=A).json()
+    assert stale["state"] == "HUB_STALE" and "deferred:silver_observations" in stale["problems"][0]
+    owner.run("INSERT INTO subscription_registry.hub_heartbeat VALUES ('deferred:silver_observations', now(), 1, 1)")
+    assert client.get("/api/v1/subscriptions", headers=A).json()["state"] == "READY"

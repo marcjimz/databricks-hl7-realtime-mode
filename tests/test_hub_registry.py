@@ -78,13 +78,14 @@ def test_a_dropped_connection_is_reopened_on_the_next_call(monkeypatch):
 
 class FakeRegistry:
     """The subscriptions table as the hub reads it: rows (id, name, revision, enabled, source, where, fields, topic,
-    allowed fields, generation), and every query the client ran."""
+    granted fields, generation, tier), and every query the client ran."""
 
     def __init__(self):
         self.rows, self.queries = {}, []
 
-    def put(self, sid, source, generation, enabled=True, where="value_num > 1"):
-        self.rows[sid] = (sid, sid, generation, enabled, source, where, ["patient_id"], "t", ["patient_id"], generation)
+    def put(self, sid, source, generation, enabled=True, where="value_num > 1", tier="realtime"):
+        self.rows[sid] = (sid, sid, generation, enabled, source, where, ["patient_id"], "t", ["patient_id"], generation,
+                          tier)  # fmt: skip
 
     def run(self, sql, **params):
         self.queries.append((sql, params))
@@ -97,8 +98,8 @@ class FakeRegistry:
         return rows
 
 
-def _registry(db):
-    registry = Registry("projects/p/branches/production/endpoints/primary", "db")
+def _registry(db, tier="realtime"):
+    registry = Registry("projects/p/branches/production/endpoints/primary", "db", tier)
     registry._db = lambda: db
     return registry
 
@@ -160,3 +161,21 @@ def test_a_cancelled_subscription_leaves_its_sources_rules_and_moves_its_generat
     registry.refresh()
     assert registry.rules("silver_observations") == [] and registry.cancelled("silver_observations") == [("a", 2)]
     assert registry.source_generation("silver_observations") == (2, 2, 1)
+
+
+def test_each_hub_runs_only_its_own_tier_and_keys_its_heartbeat_by_it():
+    db = FakeRegistry()
+    db.put("now", "silver_observations", 1)
+    db.put("later", "silver_observations", 2, tier="deferred")
+    realtime, deferred = _registry(db), _registry(db, "deferred")
+    realtime.refresh(), deferred.refresh()
+    assert [r.subscription_id for r in realtime.rules("silver_observations")] == ["now"]
+    assert [r.subscription_id for r in deferred.rules("silver_observations")] == ["later"]
+    gen = realtime.source_generation("silver_observations")
+    db.put("later", "silver_observations", 3, tier="deferred", where="value_num > 3")
+    realtime.refresh()
+    assert realtime.source_generation("silver_observations") == gen, "the other tier's change doesn't rebuild this one"
+    assert (realtime.hub_key("silver_observations"), deferred.hub_key("silver_observations")) == (
+        "silver_observations",
+        "deferred:silver_observations",
+    )

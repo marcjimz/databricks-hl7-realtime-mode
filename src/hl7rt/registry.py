@@ -24,10 +24,13 @@ from pg8000.exceptions import InterfaceError
 from hl7rt.subscriptions import Rule
 from subscription_api.db import TOKEN_SECONDS, connect
 
+# A subscription that names a data template is held to the template's columns (none, if the template was removed).
 _RULES = (
     "SELECT s.subscription_id::text, s.name, s.revision, s.enabled, s.source, s.where_sql, s.fields, "
-    "a.destination_topic, a.allowed_fields, s.generation "
-    "FROM subscription_registry.subscriptions s JOIN subscription_registry.apps a ON a.app_role = s.owner"
+    "a.destination_topic, CASE WHEN s.template IS NULL THEN a.allowed_fields ELSE coalesce(t.fields, '{}') END, "
+    "s.generation, s.tier "
+    "FROM subscription_registry.subscriptions s JOIN subscription_registry.apps a ON a.app_role = s.owner "
+    "LEFT JOIN subscription_registry.templates t ON t.app_role = s.owner AND t.name = s.template"
 )
 _SIGNATURE = (
     "SELECT coalesce(max(generation), 0), coalesce(sum(generation), 0)::text FROM subscription_registry.subscriptions"
@@ -52,8 +55,10 @@ def _locked(method):
 
 
 class Registry:
-    def __init__(self, endpoint: str, database: str):
-        self._endpoint, self._database = endpoint, database
+    """One hub's view of the registry: the subscriptions of its delivery tier (realtime or deferred)."""
+
+    def __init__(self, endpoint: str, database: str, tier: str = "realtime"):
+        self._endpoint, self._database, self.tier = endpoint, database, tier
         self._conn, self._opened, self._generation, self._signature = None, 0.0, None, None
         self._rows: dict[str, tuple] = {}  # subscription id -> its row (_RULES)
         self._enabled: list[tuple] = []
@@ -92,10 +97,11 @@ class Registry:
         if rows is None:
             rows = {r[0]: r for r in db.run(_RULES)}
         self._rows, self._generation, self._signature = rows, signature[0], signature
-        self._enabled = [r for r in rows.values() if r[3]]
-        self._disabled = [r for r in rows.values() if not r[3]]
+        mine = [r for r in rows.values() if r[10] == self.tier]
+        self._enabled = [r for r in mine if r[3]]
+        self._disabled = [r for r in mine if not r[3]]
         sources: dict[str, list[int]] = {}
-        for r in rows.values():
+        for r in mine:
             sources.setdefault(r[4], []).append(r[9])
         self._sources = {source: (max(g), sum(g), len(g)) for source, g in sources.items()}
         return True
@@ -137,6 +143,10 @@ class Registry:
         """`source`'s own generation: changes when one of its subscriptions does, or one moves to another source."""
         return self._sources.get(source, (0, 0, 0))
 
+    def hub_key(self, source: str) -> str:
+        """How this hub names `source` in its heartbeat and progress: the source, prefixed by the tier if deferred."""
+        return source if self.tier == "realtime" else f"{self.tier}:{source}"
+
     @_locked
     def progress(self, source: str, batch_id: int, rules: int, ms: dict[str, int]):
         """Where this batch's time went (subscription_registry.hub_progress), for docs/SCALABILITY.md."""
@@ -144,7 +154,7 @@ class Registry:
             "INSERT INTO subscription_registry.hub_progress (source, batch_id, rules, refresh_ms, prepare_ms, "
             "compile_ms, write_ms, report_ms) VALUES (:s, :b, :n, :refresh, :prepare, :compile, :write, :report) "
             "ON CONFLICT (source, batch_id) DO NOTHING",
-            s=source, b=batch_id, n=rules, **ms,
+            s=self.hub_key(source), b=batch_id, n=rules, **ms,
         )  # fmt: skip
 
     @_locked
@@ -152,5 +162,5 @@ class Registry:
         self._db().run(
             "INSERT INTO subscription_registry.hub_heartbeat VALUES (:s, now(), :b, :n) ON CONFLICT (source) "
             "DO UPDATE SET last_batch_at = now(), batch_id = excluded.batch_id, rules = excluded.rules",
-            s=source, b=batch_id, n=rules,
+            s=self.hub_key(source), b=batch_id, n=rules,
         )  # fmt: skip

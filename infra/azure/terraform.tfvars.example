@@ -8,11 +8,28 @@ prefix                = "hl7rtm" # Event Hubs and storage names are globally uni
 location              = "eastus2"
 catalog               = "hl7_rtm" # created by `make uc`; hubs are named <catalog>.<schema>.<table>
 
-# Subscriber apps (docs/subscriptions.md): each brings its own Databricks service principal.
+# Data templates (docs/subscriptions.md): the sources and columns one workflow needs. A subscription that names a
+# template may read, filter on, and receive only its columns.
+# subscriber_templates = {
+#   "ed-respiratory-monitoring" = {
+#     sources = ["silver_encounters", "silver_diagnoses", "silver_observations", "silver_orders", "silver_documents"]
+#     fields  = ["patient_id", "visit_id", "msg_type", "patient_class", "patient_point_of_care", "chief_complaint",
+#                "diagnosis_cd", "diagnosis_type", "observation_cd", "observation_cd_system", "alt_observation_cd",
+#                "alt_observation_cd_system", "value", "value_num", "units", "abnormal_flag", "order_cd",
+#                "diagnostic_service", "document_type", "document_text"]
+#   }
+# }
+
+# Subscriber apps (docs/subscriptions.md): each brings its own Databricks service principal, and is granted templates
+# and/or sources and columns of its own.
 # subscriber_apps = {
+#   "ed-monitor" = {
+#     application_id = "00000000-0000-0000-0000-000000000000"
+#     templates      = ["ed-respiratory-monitoring"]
+#   }
 #   "lab-alerts" = {
 #     application_id = "00000000-0000-0000-0000-000000000000"
-#     sources        = ["gold_observations"]
+#     sources        = ["silver_observations"]
 #     fields         = ["patient_id", "observation_cd_desc", "value_num", "units", "abnormal_flag"]
 #   }
 # }

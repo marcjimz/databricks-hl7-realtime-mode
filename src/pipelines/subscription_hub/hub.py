@@ -26,7 +26,10 @@ from hl7rt import eventhubs, subscriptions
 from hl7rt.config import conf
 from hl7rt.registry import Registry
 
-_registry = Registry(conf(spark, "registry.endpoint"), conf(spark, "registry.database"))
+# This hub's delivery tier: realtime, or deferred (the same code on a longer trigger; see its pipeline resource)
+_registry = Registry(
+    conf(spark, "registry.endpoint"), conf(spark, "registry.database"), conf(spark, "subscriptions.tier")
+)
 _CHUNK = int(conf(spark, "subscriptions.chunk"))  # rules per projection: small enough for Spark to compile and cache it
 SYNC_COMPILE_MS = 1_000  # recompile in the batch when the last compile took less than this; else in the background
 

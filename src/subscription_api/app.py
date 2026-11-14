@@ -45,6 +45,8 @@ WAREHOUSE = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
 EVENTHUBS_NAMESPACE = os.environ.get("HL7_EVENTHUBS_NAMESPACE", "")  # where every app's hub lives
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # = the registry's CHECK on subscriptions.name
 HUB_STALE_AFTER = 120  # seconds without a hub batch for a source
+DEFERRED_INTERVAL = int(os.environ.get("HL7_HUB_DEFERRED_INTERVAL_SECONDS", "60"))  # the deferred hub's trigger
+TIERS = ("realtime", "deferred")
 MAX_WAIT = 60  # per call; clients poll (a proxy in between may cut long requests)
 
 DESCRIPTION = """
@@ -87,6 +89,14 @@ app = FastAPI(
 _VERIFIED_CALLER = Header(default=None, include_in_schema=False)  # set by the Apps proxy, never by the client
 
 
+_TEMPLATE = Field(default=None, description="A data template granted to your app: the rule may read, filter on, and "
+                  "receive only the template's columns (TEMPLATE_DENIED otherwise). Omitted: your app's whole grant.",
+                  examples=["ed-respiratory-monitoring"])  # fmt: skip
+_TIER = Field(default="realtime", description="realtime: delivered within seconds (clinical). deferred: delivered by a "
+              "separate hub on a longer trigger, for work that can wait (e.g. billing); it never shares a batch with "
+              "realtime rules.")  # fmt: skip
+
+
 class Item(BaseModel):
     name: str = Field(description="1-63 lowercase letters, digits, or '-'; unique within your app",
                       examples=["critical-potassium"])  # fmt: skip
@@ -95,6 +105,8 @@ class Item(BaseModel):
         examples=["SELECT patient_id, value_num, units FROM silver_observations "
                   "WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"],
     )  # fmt: skip
+    template: str | None = _TEMPLATE
+    tier: Literal["realtime", "deferred"] = _TIER
 
 
 class Declared(BaseModel):
@@ -103,6 +115,8 @@ class Declared(BaseModel):
 
 class One(BaseModel):
     sql: str = Field(description="SELECT <columns> FROM <silver source> WHERE <filter>, in Databricks SQL")
+    template: str | None = _TEMPLATE
+    tier: Literal["realtime", "deferred"] = _TIER
 
 
 # Responses. Extra fields are kept, so the contract can grow without breaking clients.
@@ -117,6 +131,8 @@ class Accepted(_Open):
     state: Literal["ACCEPTED"]
     query: str = Field(description="The canonical SQL that's stored and run")
     destination: str = Field(description="Your topic: where notifications arrive")
+    template: str | None = Field(default=None, description="The data template the rule is held to, if any")
+    tier: str = Field(default="realtime", description="realtime or deferred")
     unchanged: bool | None = Field(default=None, description="True when the rule was already active as is")
 
 
@@ -136,7 +152,7 @@ class DeclareResult(_Open):
 class Refusal(_Open):
     name: str | None = None
     code: str = Field(description="Databricks' error class (UNRESOLVED_COLUMN, PARSE_SYNTAX_ERROR, ...) or ours "
-                      "(SQL_NOT_ALLOWED, INVALID_NAME, RULE_LIMIT_REACHED)")  # fmt: skip
+                      "(SQL_NOT_ALLOWED, INVALID_NAME, RULE_LIMIT_REACHED, TEMPLATE_DENIED)")  # fmt: skip
     message: str
 
 
@@ -169,6 +185,8 @@ class Subscription(_Open):
     source: str
     query: str
     fields: list[str]
+    template: str | None = None
+    tier: str = "realtime"
     state: str = Field(description="The hub's verdict for this revision: PENDING, ACTIVE, FAILED, or CANCELLED")
     error: str | None = Field(default=None, description="Spark's error when FAILED")
 
@@ -181,7 +199,8 @@ class Status(_Open):
     )  # fmt: skip
     problems: list[str]
     subscriptions: list[Subscription]
-    hub: dict[str, str] = Field(description="Source -> the hub's last batch time (ISO 8601)")
+    hub: dict[str, str] = Field(description="Source -> the hub's last batch time (ISO 8601); the deferred hub's "
+                                "sources are prefixed 'deferred:'")  # fmt: skip
 
 
 class Health(_Open):
@@ -338,8 +357,9 @@ def compile_with_databricks(sql: str, schema: str) -> dict | None:
     return {"code": m.group(1) if m else "DATABRICKS_ERROR", "message": message}
 
 
-def _check(item: Item, who: dict, registered: dict) -> dict:
-    """{name, ok: True, rule} or {name, ok: False, code, message} (shape check, then Databricks)."""
+def _check(item: Item, who: dict, registered: dict, templates: dict) -> dict:
+    """{name, ok: True, rule, template, tier} or {name, ok: False, code, message} (shape check, the template, then
+    Databricks)."""
     try:
         rule = rules.parse(item.sql, rules.SOURCES, who["schema"])
     except rules.RuleError as e:
@@ -347,12 +367,20 @@ def _check(item: Item, who: dict, registered: dict) -> dict:
             return {"name": item.name, "ok": False, "code": e.code, "message": e.message}
         error = compile_with_databricks(item.sql, who["schema"])  # Databricks' own words for why it doesn't parse
         return {"name": item.name, "ok": False, **(error or {"code": "SQL_NOT_ALLOWED", "message": e.message})}
+    if item.template is not None:
+        t = templates.get(item.template)
+        outside = None if t is None else (set(rule.fields) | rules.columns(rule.where)) - set(t["fields"])
+        if t is None or rule.source not in t["sources"] or outside:
+            why = (f"isn't granted to {who['name']}" if t is None else f"doesn't include {rule.source}"
+                   if rule.source not in t["sources"] else f"doesn't include {sorted(outside)}")  # fmt: skip
+            return {"name": item.name, "ok": False, "code": "TEMPLATE_DENIED",
+                    "message": f"TEMPLATE_DENIED: template {item.template} {why}"}  # fmt: skip
     same = registered.get(item.name)
     if not (same and same["enabled"] and same["query"] == rule.query):  # unchanged rules were compiled before
         error = compile_with_databricks(rule.query, who["schema"])
         if error:
             return {"name": item.name, "ok": False, **error}
-    return {"name": item.name, "ok": True, "rule": rule}
+    return {"name": item.name, "ok": True, "rule": rule, "template": item.template, "tier": item.tier}
 
 
 def _registered(conn) -> dict:
@@ -360,13 +388,20 @@ def _registered(conn) -> dict:
     return {s["name"]: s for s in listing["subscriptions"]}
 
 
+def _templates(conn) -> dict:
+    """The caller's data templates (row-level security: only its own): name -> {sources, fields}."""
+    rows = conn.run("SELECT name, sources, fields FROM subscription_registry.templates")
+    return {name: {"sources": sources, "fields": fields} for name, sources, fields in rows}
+
+
 def _apply(conn, checked: list[dict], registered: dict) -> list[dict]:
     out = []
     for c in checked:
         r = c["rule"]
         try:
-            receipt = conn.run("SELECT subscription_api.subscribe(:n, :s, :q, :w, CAST(:f AS text[]))", n=c["name"],
-                               s=r.source, q=r.query, w=r.where, f=list(r.fields))[0][0]  # fmt: skip
+            receipt = conn.run("SELECT subscription_api.subscribe(:n, :s, :q, :w, CAST(:f AS text[]), :t, :tier)",
+                               n=c["name"], s=r.source, q=r.query, w=r.where, f=list(r.fields), t=c["template"],
+                               tier=c["tier"])[0][0]  # fmt: skip
         except Exception as e:  # noqa: BLE001 - a registry domain error (RULE_LIMIT_REACHED, ...): refuse it all
             message = _registry_message(e)
             raise Refused(
@@ -383,7 +418,7 @@ def _registry_message(e: Exception) -> str:
     return e.args[0].get("M", str(e)) if e.args and isinstance(e.args[0], dict) else str(e)
 
 
-def _validate(items: list[Item], who: dict, registered: dict) -> list[dict]:
+def _validate(items: list[Item], who: dict, registered: dict, templates: dict) -> list[dict]:
     names = [i.name for i in items]
     if len(names) != len(set(names)):
         raise Refused(422, {"code": "DUPLICATE_NAME", "message": "each subscription name once"})
@@ -399,7 +434,7 @@ def _validate(items: list[Item], who: dict, registered: dict) -> list[dict]:
                 ],
             },
         )
-    return [_check(i, who, registered) for i in items]
+    return [_check(i, who, registered, templates) for i in items]
 
 
 def _refusals(checked):
@@ -441,7 +476,7 @@ def connection(x_forwarded_email: str | None = _VERIFIED_CALLER):
 def validate(body: Declared, x_forwarded_email: str | None = _VERIFIED_CALLER):
     who = _caller(x_forwarded_email)
     with Session(who["role"]) as conn:
-        checked = _validate(body.subscriptions, who, _registered(conn))
+        checked = _validate(body.subscriptions, who, _registered(conn), _templates(conn))
     return {"valid": all(c["ok"] for c in checked), "refused": _refusals(checked),
             "accepted": [{"name": c["name"], "query": c["rule"].query} for c in checked if c["ok"]]}  # fmt: skip
 
@@ -458,7 +493,7 @@ def declare(body: Declared, x_forwarded_email: str | None = _VERIFIED_CALLER):
     who = _caller(x_forwarded_email)
     with Session(who["role"]) as conn:
         registered = _registered(conn)
-        checked = _validate(body.subscriptions, who, registered)
+        checked = _validate(body.subscriptions, who, registered, _templates(conn))
         if not all(c["ok"] for c in checked):
             raise Refused(422, {"applied": False, "refused": _refusals(checked)})
         accepted = _apply(conn, checked, registered)
@@ -482,7 +517,9 @@ def put_one(name: str, body: One, x_forwarded_email: str | None = _VERIFIED_CALL
     who = _caller(x_forwarded_email)
     with Session(who["role"]) as conn:
         registered = _registered(conn)
-        checked = _validate([Item(name=name, sql=body.sql)], who, registered)
+        checked = _validate(
+            [Item(name=name, sql=body.sql, template=body.template, tier=body.tier)], who, registered, _templates(conn)
+        )
         if not checked[0]["ok"]:
             raise Refused(422, {"applied": False, "refused": _refusals(checked)})
         return _apply(conn, checked, registered)[0]
@@ -511,8 +548,13 @@ def _state(listing: dict) -> dict:
     failed = [f"{s['name']}: {s['error']}" for s in subs if s["state"] == "FAILED"]
     pending = [s["name"] for s in subs if s["state"] != "ACTIVE"]
     now = time.time()
-    stale = sorted({s["source"] for s in subs} - {src for src, at in listing["hub"].items()
-                                                   if now - _epoch(at) < HUB_STALE_AFTER})  # fmt: skip
+
+    def fresh(key):  # the deferred hub runs a batch per trigger interval
+        at = listing["hub"].get(key)
+        return at is not None and now - _epoch(at) < HUB_STALE_AFTER + (DEFERRED_INTERVAL if ":" in key else 0)
+
+    keys = {s["source"] if s.get("tier", "realtime") == "realtime" else f"{s['tier']}:{s['source']}" for s in subs}
+    stale = sorted(k for k in keys if not fresh(k))
     if failed:
         return {"state": "FAILED", "problems": failed}
     if pending:
