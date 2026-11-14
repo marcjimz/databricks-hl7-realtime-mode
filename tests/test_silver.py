@@ -58,8 +58,8 @@ def test_orm_is_a_message_and_one_order(spark):
     assert counts(spark, s.orm_o01()) == {"silver_messages": 1, "silver_orders": 1}
 
 
-def test_document_messages_are_messages_only(spark):
-    assert counts(spark, s.mdm_t02()) == {"silver_messages": 1}
+def test_document_messages_are_a_message_a_document_and_their_text_observations(spark):
+    assert counts(spark, s.mdm_t02()) == {"silver_messages": 1, "silver_documents": 1, "silver_observations": 2}
 
 
 def test_unparseable_messages_go_to_quarantine_only(spark):
@@ -76,7 +76,8 @@ def test_key_is_kept_so_a_patients_records_stay_ordered(spark):
 def test_tables_are_the_topics_the_pipelines_write():
     assert silver.TABLES == {
         "messages": "silver_messages", "encounters": "silver_encounters", "observations": "silver_observations",
-        "orders": "silver_orders", "diagnoses": "silver_diagnoses", "quarantine": "quarantine_hl7",
+        "orders": "silver_orders", "diagnoses": "silver_diagnoses", "documents": "silver_documents",
+        "quarantine": "quarantine_hl7",
     }  # fmt: skip
 
 
@@ -84,7 +85,7 @@ def test_tables_are_the_topics_the_pipelines_write():
 
 
 def test_every_entity_starts_with_the_message_context_and_ends_with_lineage(spark):
-    for table, v, _ in records(spark, s.adt_a04(), s.oru_r01(), s.orm_o01()):
+    for table, v, _ in records(spark, s.adt_a04(), s.oru_r01(), s.orm_o01(), s.mdm_t02()):
         if table == "quarantine_hl7":
             continue
         names = list(v)
@@ -115,6 +116,16 @@ def test_encounter_fields(spark):
     assert (e["event"], e["event_name"]) == ("A04", "registration")
     assert (e["patient_class"], e["patient_point_of_care"], e["patient_facility"]) == ("E", "ED", "FAC01")
     assert e["admit_dt_tm"].startswith("2026-10-23T08:00:00")
+    assert (e["admission_type"], e["chief_complaint_cd"], e["chief_complaint"]) == ("E", "CC01", "Cough and fever")
+    assert (e["prior_point_of_care"], e["discharge_dt_tm"], e["discharge_disposition"]) == (None, None, None)
+
+
+def test_a_transfer_has_the_prior_location_and_a_discharge_its_time_and_disposition(spark):
+    (t,) = by_table(spark, s.adt_a02())["silver_encounters"]
+    assert (t["event_name"], t["patient_point_of_care"], t["prior_point_of_care"]) == ("transfer", "MED4", "ED")
+    (d,) = by_table(spark, s.adt_a03())["silver_encounters"]
+    assert (d["event_name"], d["discharge_disposition"]) == ("discharge", "01")
+    assert d["discharge_dt_tm"].startswith("2026-10-23T11:30:00")
 
 
 def test_encounter_event_names():
@@ -152,6 +163,23 @@ def test_order_fields(spark):
     assert (o["order_cd"], o["order_cd_desc"], o["order_cd_system"]) == ("85025", "Complete Blood Count", "CPT")
     assert (o["alt_order_cd"], o["alt_order_cd_desc"], o["alt_order_cd_system"]) == ("CBC", "CBC", "L")
     assert o["msg_control_id"] == "CTRL0003"
+    assert (o["order_id"], o["order_control"], o["diagnostic_service"]) == ("ORD9", "NW", None)
+
+
+def test_radiology_orders_and_results_carry_the_diagnostic_service(spark):
+    (o,) = by_table(spark, s.orm_o01_radiology())["silver_orders"]
+    assert (o["order_cd"], o["order_id"], o["diagnostic_service"]) == ("71046", "ORD7", "RAD")
+    (r,) = by_table(spark, s.oru_r01_radiology())["silver_observations"]
+    assert (r["order_cd"], r["order_id"], r["diagnostic_service"]) == ("71046", "ORD7", "RAD")
+    assert (r["value_type"], r["value"], r["value_num"]) == ("TX", "Right lower lobe consolidation.", None)
+
+
+def test_document_fields(spark):
+    (d,) = by_table(spark, s.mdm_t02())["silver_documents"]
+    assert list(d) == [f.name for f in silver.DOCUMENT_SCHEMA]
+    assert (d["document_id"], d["document_type"], d["document_completion_status"]) == ("DOC1", "ED", "AU")
+    assert d["document_dt_tm"].startswith("2026-10-23T08:45:00")
+    assert d["document_text"] == "Cough and fever for 3 days.\nCrackles at the right base."
 
 
 def test_diagnosis_fields(spark):
@@ -175,9 +203,13 @@ def test_silver_json_roundtrips_through_schemas(spark):
     schemas = {
         "silver_messages": silver.MESSAGE_SCHEMA, "silver_encounters": silver.ENCOUNTER_SCHEMA,
         "silver_observations": silver.OBSERVATION_SCHEMA, "silver_orders": silver.ORDER_SCHEMA,
-        "silver_diagnoses": silver.DIAGNOSIS_SCHEMA, "quarantine_hl7": hl7v2.QUARANTINE_SCHEMA,
+        "silver_diagnoses": silver.DIAGNOSIS_SCHEMA, "silver_documents": silver.DOCUMENT_SCHEMA,
+        "quarantine_hl7": hl7v2.QUARANTINE_SCHEMA,
     }  # fmt: skip
-    out = silver.to_silver_records(_bronze(spark, s.adt_a04(), s.oru_r01(), s.orm_o01(), "garbage"), **TOPICS)
+    assert schemas == silver.SCHEMAS
+    out = silver.to_silver_records(
+        _bronze(spark, s.adt_a04(), s.oru_r01(), s.orm_o01(), s.mdm_t02(), "garbage"), **TOPICS
+    )
     seen = set()
     for r in out.collect():
         table = r.topic.removeprefix(PREFIX)

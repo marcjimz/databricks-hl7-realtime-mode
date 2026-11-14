@@ -65,6 +65,9 @@ variables:
   hl7_silver_diagnoses_topic:
     description: Silver, one record per DG1 diagnosis (code, system, type).
     default: ${var.catalog}.${var.schema}.silver_diagnoses
+  hl7_silver_documents_topic:
+    description: Silver, one record per MDM document (type, ID, status, text).
+    default: ${var.catalog}.${var.schema}.silver_documents
   hl7_quarantine_topic:
     description: Messages that could not be silvered, with the reason.
     default: ${var.catalog}.${var.schema}.quarantine_hl7
@@ -117,6 +120,9 @@ variables:
   generator_rate:
     description: Events per second from the synthetic generators.
     default: "200"
+  generator_journeys_per_minute:
+    description: New coherent ED encounters a minute in the HL7 feed, for dynamic patient subscriptions (0 turns them off).
+    default: "6"
 
 targets:
   # Azure Databricks workspace from infra/azure. The Makefile sets the host (DATABRICKS_HOST), `catalog`, and

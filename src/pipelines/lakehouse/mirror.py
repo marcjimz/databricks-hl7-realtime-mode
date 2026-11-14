@@ -60,3 +60,5 @@ _layer("silver_orders", "topics.silver_orders", lambda df: lakehouse.silver_rows
        "Silver orders: one row per ORM order.", table_properties=_STATS)  # fmt: skip
 _layer("silver_diagnoses", "topics.silver_diagnoses", lambda df: lakehouse.silver_rows(df, "silver_diagnoses"),
        "Silver diagnoses: one row per DG1 diagnosis.", table_properties=_STATS)  # fmt: skip
+_layer("silver_documents", "topics.silver_documents", lambda df: lakehouse.silver_rows(df, "silver_documents"),
+       "Silver documents: one row per MDM document.", table_properties=_STATS)  # fmt: skip

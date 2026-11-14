@@ -5,6 +5,7 @@
     each OBX       -> 1 row     silver_observations  numeric value_num for NM values (in practice ORU^R01)
     ORM^*          -> 1 row     silver_orders
     each DG1       -> 1 row     silver_diagnoses
+    MDM^*          -> 1 row     silver_documents     with the text of its OBX lines (they're observations too)
     can't be parsed -> 1 row    quarantine_hl7       with the reason
 
 Every entity row carries the message's context (CONTEXT: patient, visit, header), so a rule on one entity needs no
@@ -29,6 +30,7 @@ TABLES = {
     "observations": "silver_observations",
     "orders": "silver_orders",
     "diagnoses": "silver_diagnoses",
+    "documents": "silver_documents",
     "quarantine": "quarantine_hl7",
 }
 ADT_EVENTS = {"A01": "admission", "A02": "transfer", "A03": "discharge", "A04": "registration", "A08": "update"}
@@ -38,9 +40,10 @@ CONTEXT = [
     "patient_facility", "msg_type", "msg_control_id", "msg_dt_tm", "msg_sending_facility", "msg_seq",
 ]  # fmt: skip
 LINEAGE = ["raw_ts", "bronze_ts", "raw_partition", "raw_offset"]
-_ORDER = ["order_cd", "order_cd_desc", "order_cd_system", "alt_order_cd", "alt_order_cd_desc", "alt_order_cd_system"]
-_TIMESTAMPS = {"admit_dt_tm", "date_of_birth_dt", "msg_dt_tm", "observation_dt_tm", "diagnosis_dt_tm", "raw_ts",
-               "bronze_ts"}  # fmt: skip
+_ORDER = ["order_id", "order_control", "order_cd", "order_cd_desc", "order_cd_system", "alt_order_cd",
+          "alt_order_cd_desc", "alt_order_cd_system", "diagnostic_service"]  # fmt: skip
+_TIMESTAMPS = {"admit_dt_tm", "discharge_dt_tm", "date_of_birth_dt", "msg_dt_tm", "observation_dt_tm",
+               "diagnosis_dt_tm", "document_dt_tm", "raw_ts", "bronze_ts"}  # fmt: skip
 _TYPES = {"position": IntegerType(), "set_id": IntegerType(), "value_num": DoubleType(),
           "raw_partition": IntegerType(), "raw_offset": LongType()}  # fmt: skip
 
@@ -55,9 +58,12 @@ MESSAGE_SCHEMA = _schema(
     [*CONTEXT, "patient_alt_id", "patient_alt_id_namespace", "date_of_birth_dt", "sex", "race", "ethnicity",
      "admit_dt_tm", "document_completion_status", "payload", *LINEAGE]
 )  # fmt: skip
-ENCOUNTER_SCHEMA = _schema(["event", "event_name", *CONTEXT, "admit_dt_tm", *LINEAGE])
+ENCOUNTER_SCHEMA = _schema(
+    ["event", "event_name", *CONTEXT, "admission_type", "chief_complaint_cd", "chief_complaint", "prior_point_of_care",
+     "admit_dt_tm", "discharge_dt_tm", "discharge_disposition", *LINEAGE]
+)  # fmt: skip
 OBSERVATION_SCHEMA = _schema(
-    [*CONTEXT, "order_cd", "order_cd_desc", "position", "set_id", "value_type", "observation_cd",
+    [*CONTEXT, "order_id", "order_cd", "order_cd_desc", "diagnostic_service", "position", "set_id", "value_type", "observation_cd",
      "observation_cd_desc", "observation_cd_system", "alt_observation_cd", "alt_observation_cd_desc",
      "alt_observation_cd_system", "value", "value_num", "units", "reference_range", "abnormal_flag", "result_status",
      "observation_dt_tm", *LINEAGE]
@@ -67,6 +73,10 @@ DIAGNOSIS_SCHEMA = _schema(
     [*CONTEXT, "position", "set_id", "diagnosis_cd", "diagnosis_cd_desc", "diagnosis_cd_system", "diagnosis_type",
      "diagnosis_dt_tm", *LINEAGE]
 )  # fmt: skip
+DOCUMENT_SCHEMA = _schema(
+    [*CONTEXT, "document_id", "document_type", "document_dt_tm", "document_completion_status", "document_text",
+     *LINEAGE]
+)  # fmt: skip
 # table -> schema, for the mirror and the subscription hub
 SCHEMAS = {
     "silver_messages": MESSAGE_SCHEMA,
@@ -74,6 +84,7 @@ SCHEMAS = {
     "silver_observations": OBSERVATION_SCHEMA,
     "silver_orders": ORDER_SCHEMA,
     "silver_diagnoses": DIAGNOSIS_SCHEMA,
+    "silver_documents": DOCUMENT_SCHEMA,
     "quarantine_hl7": hl7v2.QUARANTINE_SCHEMA,
 }
 
@@ -96,7 +107,7 @@ def _each(items: Column, record) -> Column:
 
 
 def to_silver_records(bronze: DataFrame, messages: str, encounters: str, observations: str, orders: str,
-                      diagnoses: str, quarantine: str) -> DataFrame:  # fmt: skip
+                      diagnoses: str, documents: str, quarantine: str) -> DataFrame:  # fmt: skip
     """Kafka records from the bronze topic -> (key, value, topic), one per entity row (or one quarantine row). The key
     (patient) is kept so each patient's records stay ordered within a partition."""
     b = bronze.select(F.col("key"), F.from_json(F.col("value").cast("string"), hl7v2.BRONZE_SCHEMA).alias("b"),
@@ -113,6 +124,8 @@ def to_silver_records(bronze: DataFrame, messages: str, encounters: str, observa
     family = F.substring_index(col["msg_type"], "^", 1)
     event = F.substring_index(col["msg_type"], "^", -1)
     event_names = F.create_map(*[F.lit(x) for kv in ADT_EVENTS.items() for x in kv])
+    lines = F.array_join(F.transform(m["observations"], lambda o: o["value"]), "\n")
+    text = F.when(lines != "", lines)
 
     def observation(o: Column, position: Column) -> Column:
         return _record(observations, OBSERVATION_SCHEMA, col | {n: o[n] for n in hl7v2.OBSERVATION_SCHEMA.fieldNames()}
@@ -130,6 +143,7 @@ def to_silver_records(bronze: DataFrame, messages: str, encounters: str, observa
         _each(m["observations"], observation),
         _only_if(family == "ORM", _record(orders, ORDER_SCHEMA, col)),
         _each(m["diagnoses"], diagnosis),
+        _only_if(family == "MDM", _record(documents, DOCUMENT_SCHEMA, col | {"document_text": text})),
     )  # fmt: skip
     held = F.array(
         _record(quarantine, hl7v2.QUARANTINE_SCHEMA, col | {"reason": F.col("reason"), "hl7": col["payload"]})

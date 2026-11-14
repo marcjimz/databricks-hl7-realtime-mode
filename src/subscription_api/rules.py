@@ -16,7 +16,9 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 DIALECT = "databricks"
 # = hl7rt.subscriptions.SOURCES (tests/test_subscriptions.py keeps them in step)
-SOURCES = frozenset({"silver_encounters", "silver_observations", "silver_orders", "silver_diagnoses"})
+SOURCES = frozenset(
+    {"silver_encounters", "silver_observations", "silver_orders", "silver_diagnoses", "silver_documents"}
+)
 # Functions that reach outside the record. Unqualified names only: any qualified function (a UC UDF) is refused too.
 DENIED_FUNCTIONS = {
     "http_request", "secret", "try_secret", "reflect", "try_reflect", "java_method", "remote_query", "vector_search",

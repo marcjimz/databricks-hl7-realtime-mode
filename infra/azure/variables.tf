@@ -84,6 +84,7 @@ variable "tables" {
     "silver_observations",
     "silver_orders",
     "silver_diagnoses",
+    "silver_documents",
     "quarantine_hl7",
   ]
 }

@@ -28,5 +28,6 @@ resources:
         hl7.topics.silver_observations: ${var.hl7_silver_observations_topic}
         hl7.topics.silver_orders: ${var.hl7_silver_orders_topic}
         hl7.topics.silver_diagnoses: ${var.hl7_silver_diagnoses_topic}
+        hl7.topics.silver_documents: ${var.hl7_silver_documents_topic}
         hl7.subscriptions.chunk: ${var.hub_rules_per_projection}
         hl7.subscriptions.max_records_per_batch: ${var.hub_max_records_per_batch}

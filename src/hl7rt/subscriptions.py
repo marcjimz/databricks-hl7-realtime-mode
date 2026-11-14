@@ -28,6 +28,7 @@ SOURCES: dict[str, StructType] = {
     "silver_observations": silver.OBSERVATION_SCHEMA,
     "silver_orders": silver.ORDER_SCHEMA,
     "silver_diagnoses": silver.DIAGNOSIS_SCHEMA,
+    "silver_documents": silver.DOCUMENT_SCHEMA,
 }
 CHUNK = 200  # rules per projection
 
