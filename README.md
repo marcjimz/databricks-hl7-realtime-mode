@@ -19,7 +19,7 @@ no keys or connection strings.
 ```
 REAL-TIME MODE (ms), an Event Hubs topic between every layer
   HL7 ─► raw_hl7 ─► bronze_hl7 ─► silver_messages / silver_encounters / silver_observations / silver_orders /
-                                  silver_diagnoses, and quarantine_hl7
+                                  silver_diagnoses / silver_documents, and quarantine_hl7
 STREAMING TABLES (seconds)
   every topic ─► the Delta table of the same name: <catalog>.<schema>.<table>
 SUBSCRIPTIONS (seconds)
@@ -28,8 +28,8 @@ SUBSCRIPTIONS (seconds)
 
 - **Bronze** is the raw message plus its header envelope. **Silver** parses it once with plain Spark and writes one row
   per entity, each with the message's patient, visit, and header fields: messages, encounters (ADT), observations (one
-  per OBX), orders, and diagnoses (one per DG1). Bad messages go to quarantine. Column names follow the Epic silver
-  contract.
+  per OBX), orders, diagnoses (one per DG1), and documents (MDM). Bad messages go to quarantine. Column names follow
+  the Epic silver contract.
 - **Epic JSON** is a drop-in pipeline for the existing pre-parsed Epic feed ([docs/epic-json.md](docs/epic-json.md)).
 - **Subscriptions** let apps choose silver records at runtime, each delivered to the app's own hub
   ([docs/subscriptions.md](docs/subscriptions.md)).

@@ -25,9 +25,9 @@ Java app (as its own SP) ──PUT [{name, sql}]──► Subscription API (Data
 - **Registry** (`src/registry/registry.sql`, Lakebase Postgres): the apps' subscriptions and the platform's grants. Only
   the API writes to it, and always as the calling app's own role.
 - **Hub** (`resources/pipelines/subscription_hub.yml`, `src/pipelines/subscription_hub`, `src/hl7rt/subscriptions.py`):
-  one serverless pipeline with one flow per silver source.
-  - Each micro-batch it reloads the rules if they changed (one indexed query), re-checks them, and evaluates all of a
-    source's rules in one projection.
+  a serverless pipeline with one flow per silver source, and a second one for the deferred tier (see "Delivery tiers").
+  - Each micro-batch it reads only the subscriptions that changed (one query when nothing did), re-checks them, and
+    evaluates all of a source's rules in one pass.
   - It writes the matches to each app's hub.
   - A rule that fails on the data is reported FAILED on its own; the other rules keep running.
 - **App** (`examples/subscribers/java`, Java 17): declares its subscriptions in code, sends them to the API, and consumes its hub.
@@ -39,11 +39,15 @@ the PREVIEW channel. The RTM hot path is unchanged.
 **How the hub evaluates rules:**
 - **Up to 1,000 enabled rules across all apps.** Past that, a new rule is refused with `RULE_LIMIT_REACHED`; cancel
   one first.
-- **Compiled off the delivery path:** the rule set is compiled in the background when the registry changes, and
-  batches keep using the last compiled set.
-- **Simple rules run as data:** a column compared with a literal, joined by `AND`. Each record meets only the rules
-  that name one of its values (an equality index), in a plan whose size doesn't depend on the rule count.
-- **Other rules run as SQL expressions:** functions, `OR`, `LIKE`.
+- **A change touches only its own source, and only the changed rule is parsed again.** Each source has its own
+  generation, so an edit to an observations rule doesn't rebuild the encounters hub's rules. A quick recompile runs in
+  the batch that saw the change; a slow one runs in the background while batches keep the last compiled set.
+- **Simple rules run as data:** comparisons of a column with a literal, combined with `AND` and `OR` (flattened to at
+  most 64 AND groups). Each group is indexed on its most selective `=` or `IN` (patient or visit ID first, then codes,
+  then points of care, then anything else, such as message types), so a record meets only the groups that name one of
+  its values, in a plan whose size doesn't depend on the rule count. A record that matches several groups of one rule
+  is one notification.
+- **Other rules run as SQL expressions:** functions, `LIKE`, `NOT` around a group.
 - **The path doesn't change the result:** both select the same records as the SQL editor and send identical
   notifications.
 
@@ -58,6 +62,48 @@ the source record's broker time:
 
 From the raw HL7 topic to the app's hub, one rule measured p99 4.8 s, of which the hot path takes under 100 ms. These
 numbers don't include the app's own poll. How it got here, and what's next past the cap: [SCALABILITY.md](SCALABILITY.md).
+
+## Dynamic patient rules
+
+A workflow often follows patients, not codes: a base rule watches emergency-department registrations, and each
+registration adds that patient to the app's patient rules (updates, admit diagnoses, labs and vitals, radiology, notes)
+until discharge, transfer, or the app decides the patient doesn't qualify. The patient list is SQL, in the rule:
+
+```sql
+SELECT patient_id, value_num, units FROM silver_observations
+WHERE patient_id IN ('MRN050001', 'MRN050002', ...)
+  AND ((alt_observation_cd_system = 'LN' AND alt_observation_cd IN ('2823-3', '718-7'))
+    OR (observation_cd_system = 'FLOWSHEET' AND observation_cd IN ('572 PULSE', '569 SPO2')))
+```
+
+- **Adding or removing a patient is an edit of that rule** (`PUT /api/v1/subscriptions/{name}`). It's a new revision
+  of the same subscription: it doesn't count against the rule cap, and it doesn't touch any other rule, of this app or
+  another. The hub indexes the rule on `patient_id`, so a long list costs an index row per patient, not a scan.
+- **Lists of thousands fit.** A rule may be up to 200,000 characters (~10,000 patient IDs); a 10,000-patient rule
+  parses and flattens in well under a second.
+- **Live only.** A rule delivers records from the batch its revision goes live (ACTIVE) on. Records of a newly added
+  patient that arrived between the registration notification and that batch aren't delivered; read them from the app's
+  own views if the workflow needs them.
+- **The example:** `examples/subscribers/python/monitor.py` runs the whole workflow (logic in `patient_rules.py`) and
+  times each census edit until ACTIVE. The synthetic feed plays coherent ED encounters for it to follow
+  (`generator_journeys_per_minute`).
+
+## Data templates
+
+A template is the platform's named grant for one workflow: the silver sources and columns it needs, and no more.
+Templates are defined in Terraform (`subscriber_templates`) and granted to apps (`subscriber_apps.<app>.templates`); an
+app's views and grant are its own columns plus its templates'. A subscription that names a template
+(`"template": "ed-respiratory-monitoring"`) may read, filter on, and receive only that template's columns: the API
+refuses anything else with `TEMPLATE_DENIED`, the registry checks the source and fields again, and the hub runs the rule
+with the template's columns as its grant. Template changes apply to the hub at the subscription's next revision.
+
+## Delivery tiers
+
+Each subscription has a tier: `realtime` (the default, for clinical work: the hub as above) or `deferred` (work that can
+wait, such as billing). Deferred rules run on a second hub pipeline, `subscription_hub_deferred`: the same code on a
+longer trigger (`hub_deferred_interval_seconds`, default 60), so their load never shares a batch with realtime rules.
+Both deliver to the app's own Event Hub. Its heartbeat is listed as `deferred:<source>`, and `getStatus` reports
+`HUB_STALE` for a deferred subscription only after its trigger interval plus the usual 120 s.
 
 ## Security model
 
@@ -130,14 +176,14 @@ WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8
 
 - **Allowed:**
   - `SELECT` lists the fields to deliver: columns only.
-  - `FROM` names one silver source: `silver_encounters`, `silver_observations`, `silver_orders`, or `silver_diagnoses`. Unqualified, or the app's own
-    view in full, as tested in the editor.
+  - `FROM` names one silver source: `silver_encounters`, `silver_observations`, `silver_orders`, `silver_diagnoses`, or
+    `silver_documents`. Unqualified, or the app's own view in full, as tested in the editor.
   - `WHERE` is any Databricks SQL filter over that record: comparisons, `IN`, `BETWEEN`, `LIKE`, `IS NULL`, `AND`/`OR`/
     `NOT`, and built-ins such as `lower`, `startswith`, `contains`, `abs`, `coalesce`.
 - **Normalized:** identifiers are case-insensitive, as in Databricks, and stored in lowercase. Comments and a trailing
   `;` are dropped from the canonical query.
 - **Refused:** randomness (`rand`, `uuid`, …): a rule must match the same record the same way every time. Also time
-  travel (`VERSION AS OF`), a field listed twice, and SQL over 10,000 characters.
+  travel (`VERSION AS OF`), a field listed twice, and SQL over 200,000 characters.
 - **Also refused:** functions that reach outside the record (`http_request`, `secret`, `reflect`/`java_method`, `ai_*`,
   `read_*`, UC UDFs, `current_user`), and joins, subqueries, CTEs, set operations, aggregates, sorting, `LIMIT`,
   parameters, and multiple statements. All are `SQL_NOT_ALLOWED`.
@@ -153,7 +199,7 @@ platform builds it once, as a new governed source (a topic/table), and grants it
 | Need | Pattern |
 |---|---|
 | Labs for patients currently in the ICU | A platform source that adds the patient's location to each lab (stream-static or stateful join) |
-| A large cohort list | A platform-registered lookup source; a small list fits in `IN (...)` |
+| A large cohort list | A platform-registered lookup source; up to ~10,000 IDs fit in `IN (...)` (see "Dynamic patient rules") |
 | "Second abnormal result within 24 h" | Temporal correlation: a separate, stateful capability |
 | Current census by unit changed | Query-result changes: a materialized view plus a diff, platform-built |
 
@@ -170,6 +216,7 @@ Sunday wipe.
    subscriber_apps = {
      "my-app" = {
        application_id = "<the SP's application ID>"
+       templates      = []  # data templates from subscriber_templates, and/or its own sources and fields:
        sources        = ["silver_observations"]
        fields         = ["patient_id", "observation_cd_desc", "value_num", "units", "abnormal_flag"]
      }
