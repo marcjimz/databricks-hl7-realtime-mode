@@ -38,6 +38,7 @@ def fake_databricks(sql, schema):
 def client(pg, monkeypatch):
     monkeypatch.setattr(api, "pool", api.Pool(lambda: pg("api")))
     monkeypatch.setattr(api, "CATALOG", "cat")
+    monkeypatch.setattr(api, "_COMPILED", {})  # each test sees Databricks compile its own shapes
     compiled = []
     monkeypatch.setattr(api, "compile_with_databricks", lambda sql, schema: compiled.append(sql) or
                         fake_databricks(sql, schema))  # fmt: skip
