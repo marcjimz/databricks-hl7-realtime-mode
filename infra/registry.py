@@ -134,15 +134,27 @@ def main():
 
     catalog = tf_output("catalog")
     registry_catalog = f"{catalog}_registry"
+    # After a sandbox wipe the shared metastore keeps the old registration, made for the deleted workspace's database.
+    # It only feeds the subscriptions dashboard, so say how to replace it and carry on.
     try:
-        w.postgres.get_catalog(name=f"catalogs/{registry_catalog}")
-        print(f"ok       catalog {registry_catalog} (the registry database, for the subscriptions dashboard)")
-    except Exception:  # noqa: BLE001 - not registered yet
-        w.postgres.create_catalog(
-            catalog=Catalog(spec=CatalogCatalogSpec(postgres_database=DATABASE, branch=BRANCH)),
-            catalog_id=registry_catalog,
-        ).wait()
-        print(f"created  catalog {registry_catalog} (the registry database, for the subscriptions dashboard)")
+        old = w.catalogs.get(registry_catalog)
+    except Exception:  # noqa: BLE001 - not registered
+        old = None
+    built_for = (old.properties or {}).get("workspace_id") if old else None
+    if built_for and built_for != str(tf_output("workspace_id")):
+        print(f"STALE    catalog {registry_catalog} is registered for workspace {built_for} (gone), so the "
+              "subscriptions dashboard has no data. Remove it, then rerun make registry:\n"
+              f"         databricks api delete /api/2.0/postgres/catalogs/{registry_catalog}")  # fmt: skip
+    else:
+        try:
+            w.postgres.get_catalog(name=f"catalogs/{registry_catalog}")
+            print(f"ok       catalog {registry_catalog} (the registry database, for the subscriptions dashboard)")
+        except Exception:  # noqa: BLE001 - not registered yet
+            w.postgres.create_catalog(
+                catalog=Catalog(spec=CatalogCatalogSpec(postgres_database=DATABASE, branch=BRANCH)),
+                catalog_id=registry_catalog,
+            ).wait()
+            print(f"created  catalog {registry_catalog} (the registry database, for the subscriptions dashboard)")
 
     try:
         api_app = w.apps.get(API_APP)
