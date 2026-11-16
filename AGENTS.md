@@ -287,9 +287,16 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
 - **Data templates and tiers are subscription properties.** A template (`subscriber_templates` in Terraform →
   `subscription_registry.templates`, per app) is a named per-workflow grant: a subscription naming one is held to its
   columns by the API (`TEMPLATE_DENIED`), the registry trigger, and the hub (it runs the rule with the template's columns
-  as its grant). A tier (`realtime` | `deferred`) picks the hub: `subscription_hub` or `subscription_hub_deferred`
+  as its grant). A tier (`realtime` | `deferred`) picks the hub: `subscription_hub_<entity>` or `subscription_hub_deferred`
   (same code, `hl7.subscriptions.tier`, a longer `pipelines.trigger.interval`), keyed `deferred:<source>` in heartbeat
-  and progress. Keep the two hub resources in step (`tests/test_config_wiring.py`).
+  and progress. The hub resources share one YAML anchor; keep them in step (`tests/test_config_wiring.py`).
+- **One realtime hub pipeline per silver source.** In one pipeline, the five sources' batches shared a driver and a
+  Python process: a batch took ~1.4 s alone and ~4–5 s once every source had live rules (5–8 batches overlapping), so
+  a shorter trigger made delivery slower, not faster. Set the hub's `pipelines.trigger.interval` explicitly
+  (`hub_trigger_interval_seconds`): SDP's default for streaming flows is 4 s, which was most of delivery.
+  `hub_progress.age_ms` (the newest record's age when the batch function starts) and `spark_ms` (Spark's own split of
+  the batch) show time spent outside the hub's phases. Measured and rejected: running a single-read plan on the batch
+  itself instead of collecting it (write 2.0–2.7 s vs ~1.7 s).
 - **The Apps proxy may cut long requests.** Clients poll `?wait` in short calls (≤25 s); the API caps each call at
   60 s.
 - **Monitoring reads the registry through Unity Catalog.** `make registry` registers the database as `<catalog>_registry`

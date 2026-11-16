@@ -99,7 +99,7 @@ def main(argv: list[str]):
     if status.state == StatusState.FAILED:
         exit_with(3, f"the hub can't run {problems}")
     if status.state != StatusState.READY:
-        exit_with(4, f"{status.state}: {problems} (is the subscription_hub pipeline running? make demo dev)")
+        exit_with(4, f"{status.state}: {problems} (are the subscription hub pipelines running? make demo dev)")
 
     # 3. Consume this app's topic with a token Unity Catalog issues from its service credential (no Azure secret here).
     from confluent_kafka import Consumer
@@ -125,7 +125,7 @@ def health_check(client):
     try:
         now = api.call(get_status, client, wait=0)
         if now.state == StatusState.HUB_STALE:
-            print(f"WARNING     [{', '.join(now.problems)}]: is the subscription_hub pipeline running?", flush=True)
+            print(f"WARNING     [{', '.join(now.problems)}]: are the subscription hub pipelines running?", flush=True)
     except Exception as e:  # noqa: BLE001
         print(f"WARNING     health check failed ({e}); still listening", flush=True)
 

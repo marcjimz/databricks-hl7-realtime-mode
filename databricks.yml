@@ -112,6 +112,9 @@ variables:
   hub_max_records_per_batch:
     description: Most silver records the subscription hub reads per micro-batch per source (it holds a batch in memory).
     default: 20000
+  hub_trigger_interval_seconds:
+    description: Trigger interval of the realtime hub, in seconds. Unset, SDP's streaming default (4 s) is most of delivery.
+    default: 1
   hub_deferred_interval_seconds:
     description: Trigger interval of the deferred-tier hub (subscriptions with tier deferred, e.g. billing), in seconds.
     default: 60

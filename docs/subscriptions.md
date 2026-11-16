@@ -25,7 +25,9 @@ Java app (as its own SP) ──PUT [{name, sql}]──► Subscription API (Data
 - **Registry** (`src/registry/registry.sql`, Lakebase Postgres): the apps' subscriptions and the platform's grants. Only
   the API writes to it, and always as the calling app's own role.
 - **Hub** (`resources/pipelines/subscription_hub.yml`, `src/pipelines/subscription_hub`, `src/hl7rt/subscriptions.py`):
-  a serverless pipeline with one flow per silver source, and a second one for the deferred tier (see "Delivery tiers").
+  one serverless pipeline per silver source (in one pipeline, the sources' batches slowed each other; see "Measured"),
+  and one more for the deferred tier (see "Delivery tiers"). They run the same code; each names its sources
+  (`hl7.subscriptions.sources`) and batches every `hub_trigger_interval_seconds` (default 1; SDP's default is 4 s).
   - Each micro-batch it reads only the subscriptions that changed (one query when nothing did), re-checks them, and
     evaluates all of a source's rules in one pass.
   - It writes the matches to each app's hub.
@@ -87,18 +89,26 @@ WHERE patient_id IN ('MRN050001', 'MRN050002', ...)
 - **The example:** `examples/subscribers/python/monitor.py` runs the whole workflow (logic in `patient_rules.py`) and
   times each census edit until ACTIVE. The synthetic feed plays coherent ED encounters for it to follow
   (`generator_journeys_per_minute`).
-- **Measured** (2026-11-16, dev, 30 minutes, demo load of 200 msg/s, 6 ED journeys a minute; five patient rules
-  edited together per census change, from a separate app):
+- **Measured** (2026-11-16, dev, demo load of 200 msg/s, 6 ED journeys a minute; five patient rules edited together
+  per census change, from a separate app; 10–30 minute runs):
 
-  | What | p50 | p99 | max | n |
-  |---|---|---|---|---|
-  | Census edit → ACTIVE (PUT of the five rules, then the hub's next batch) | 6.1 s | 8.4 s | 14.5 s | 244 edits |
-  | Patient record → app (silver broker time → app) | 4.4 s | 7.7 s | 13.3 s | 1,629 records |
-  | Records for a patient after their removal went live | | | | **0** |
+  | Hub | Census edit → ACTIVE p50 / p99 | Patient record → app p50 / p99 / max | n (edits, records) |
+  |---|---|---|---|
+  | One pipeline for all sources, SDP's default 4 s trigger | 6.1 / 8.4 s | 4.4 / 7.7 / 13.3 s | 244, 1,629 |
+  | One pipeline, 1 s trigger | 4.3–4.5 / 7.0–9.3 s | 5.1–5.3 / 6.9–9.6 s | 140 + 86, 797 + 503 |
+  | **One pipeline per source, 1 s trigger** (current) | **3.4 / 8.4 s** | **3.6 / 5.8 / 6.6 s** | 94, 455 |
 
-  An edit's PUT is ~1 s once Databricks has compiled the rule's shape (the API reuses that compile for edits that only
-  change literals, `rules.shape`); the first edit of a new shape compiles on the warehouse (~1.4 s per rule). The rest
-  is the hub picking the edit up: it recompiles in the batch that sees it (0.2–0.5 s), on a ~4 s batch interval.
+  No record was delivered for a patient after their removal went live, in any run. Edit → ACTIVE is the five PUTs
+  (~1 s once Databricks has compiled the rule's shape: the API reuses that compile for edits that only change literals,
+  `rules.shape`; a new shape compiles on the warehouse, ~1.4 s per rule), then the hub's next batch, which recompiles
+  the edit in-batch (0.2–0.5 s).
+
+  Where a batch's time goes (`hub_progress`, per source, p50 of the current setup): ~3 s per batch, of which ~1.1–1.4 s
+  pass inside Spark's batch call before the hub's function starts (`age_ms`), ~1.1–1.4 s are the hub's collect, match,
+  and Event Hubs write (`write_ms`), and ~0.6 s are Spark's offsets, commits, and source metrics (`spark_ms`). In one
+  pipeline, the five sources' batches overlapped 5–8 at a time on one driver and Python process and took ~4–5 s each,
+  so a shorter trigger alone made delivery slower. What's left is per-batch overhead of `foreachBatch` on serverless;
+  going well under ~3 s needs a different engine (Real-Time Mode, the Phase 3 study).
 
 ## Data templates
 
@@ -112,7 +122,7 @@ with the template's columns as its grant. Template changes apply to the hub at t
 ## Delivery tiers
 
 Each subscription has a tier: `realtime` (the default, for clinical work: the hub as above) or `deferred` (work that can
-wait, such as billing). Deferred rules run on a second hub pipeline, `subscription_hub_deferred`: the same code on a
+wait, such as billing). Deferred rules run on one more hub pipeline, `subscription_hub_deferred`, for every source: the same code on a
 longer trigger (`hub_deferred_interval_seconds`, default 60), so their load never shares a batch with realtime rules.
 Both deliver to the app's own Event Hub. Its heartbeat is listed as `deferred:<source>`, and `getStatus` reports
 `HUB_STALE` for a deferred subscription only after its trigger interval plus the usual 120 s.

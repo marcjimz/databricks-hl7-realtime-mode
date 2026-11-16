@@ -172,7 +172,7 @@ def main(argv: list[str]):
             print(f"refused     {r.name if isinstance(r.name, str) else '':<22} {r.code}: {first_line(r.message)}")
         exit_with(2, f"{e.code}: {first_line(e.message)}")
     if m.wait_active(base) is None:
-        exit_with(4, "the base rule wasn't ACTIVE in time (is the subscription_hub pipeline running?)")
+        exit_with(4, "the base rule wasn't ACTIVE in time (are the subscription hub pipelines running?)")
     print("hub         base rule ACTIVE; following ED registrations", flush=True)
 
     from confluent_kafka import Consumer, KafkaError, KafkaException

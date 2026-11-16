@@ -48,6 +48,7 @@ HUB_STALE_AFTER = 120  # seconds without a hub batch for a source
 DEFERRED_INTERVAL = int(os.environ.get("HL7_HUB_DEFERRED_INTERVAL_SECONDS", "60"))  # the deferred hub's trigger
 TIERS = ("realtime", "deferred")
 MAX_WAIT = 60  # per call; clients poll (a proxy in between may cut long requests)
+WAIT_POLL = 0.25  # seconds between registry reads while a call waits (each is part of edit -> ACTIVE)
 
 DESCRIPTION = """
 The contract any application uses to receive HL7 records it chooses with Databricks SQL. The full guide, with
@@ -604,7 +605,7 @@ def status(
         state = _state(listing)
         if state["state"] in ("READY", "FAILED") or time.time() >= deadline:
             return {"app": who["name"], **state, **listing}
-        time.sleep(1)
+        time.sleep(WAIT_POLL)
 
 
 def _openapi() -> dict:

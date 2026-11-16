@@ -15,6 +15,7 @@ Python; psycopg[binary] aborted the serverless pipeline process (native library 
 """
 
 import contextlib
+import json
 import threading
 import time
 from functools import wraps
@@ -148,13 +149,17 @@ class Registry:
         return source if self.tier == "realtime" else f"{self.tier}:{source}"
 
     @_locked
-    def progress(self, source: str, batch_id: int, rules: int, ms: dict[str, int]):
+    def progress(self, source: str, batch_id: int, rules: int, ms: dict[str, int], age_ms=None, spark_ms=None):
         """Where this batch's time went (subscription_registry.hub_progress), for docs/SCALABILITY.md."""
         self._db().run(
             "INSERT INTO subscription_registry.hub_progress (source, batch_id, rules, refresh_ms, prepare_ms, "
-            "compile_ms, write_ms, report_ms) VALUES (:s, :b, :n, :refresh, :prepare, :compile, :write, :report) "
-            "ON CONFLICT (source, batch_id) DO NOTHING",
-            s=self.hub_key(source), b=batch_id, n=rules, **ms,
+            "compile_ms, write_ms, report_ms, age_ms, spark_ms) VALUES (:s, :b, :n, :refresh, :prepare, :compile, "
+            ":write, :report, :age, CAST(:spark AS jsonb)) ON CONFLICT (source, batch_id) DO UPDATE SET at = now(), "
+            "rules = excluded.rules, refresh_ms = excluded.refresh_ms, prepare_ms = excluded.prepare_ms, "
+            "compile_ms = excluded.compile_ms, write_ms = excluded.write_ms, report_ms = excluded.report_ms, "
+            "age_ms = excluded.age_ms, spark_ms = excluded.spark_ms",  # a new checkpoint numbers batches from 0 again
+            s=self.hub_key(source), b=batch_id, n=rules, age=age_ms,
+            spark=json.dumps(spark_ms) if spark_ms else None, **ms,
         )  # fmt: skip
 
     @_locked

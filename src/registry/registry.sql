@@ -107,6 +107,10 @@ CREATE TABLE IF NOT EXISTS subscription_registry.hub_progress (
   report_ms  int NOT NULL,  -- status and heartbeat
   PRIMARY KEY (source, batch_id)
 );
+-- How old the batch's newest record was when the hub began on it (its broker time to the batch's start), and Spark's
+-- own split of the previous batch (StreamingQueryProgress.durationMs): the time outside the phases above.
+ALTER TABLE subscription_registry.hub_progress ADD COLUMN IF NOT EXISTS age_ms int;
+ALTER TABLE subscription_registry.hub_progress ADD COLUMN IF NOT EXISTS spark_ms jsonb;
 
 -- Platform limits. The hub evaluates every enabled rule in each micro-batch, so their number is capped.
 CREATE TABLE IF NOT EXISTS subscription_registry.limits (

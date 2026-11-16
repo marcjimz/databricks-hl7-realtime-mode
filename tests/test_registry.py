@@ -229,3 +229,17 @@ def test_a_subscription_has_a_tier_realtime_by_default(pg):
 def test_apps_see_only_their_own_templates(pg):
     assert pg("app_b").run("SELECT count(*) FROM subscription_registry.templates")[0][0] == 0
     assert pg("app_a").run("SELECT name FROM subscription_registry.templates") == [["lab-values"]]
+
+
+def test_hub_progress_records_a_restarted_hubs_batches(pg):
+    """A new checkpoint numbers batches from 0 again: its batches replace the old rows, they aren't dropped."""
+    from hl7rt.registry import Registry
+
+    registry = Registry("projects/p/branches/production/endpoints/primary", "db")
+    conn = pg()
+    registry._db = lambda: conn  # the hub's statements, on the real schema
+    ms = {"refresh": 1, "prepare": 0, "compile": 0, "write": 500, "report": 7}
+    registry.progress("silver_orders", 0, 1, ms)
+    registry.progress("silver_orders", 0, 2, ms | {"write": 400}, age_ms=180, spark_ms={"addBatch": 700})
+    assert conn.run("SELECT rules, write_ms, age_ms, spark_ms->>'addBatch' FROM subscription_registry.hub_progress "
+                    "WHERE source = 'silver_orders' AND batch_id = 0") == [[2, 400, 180, "700"]]  # fmt: skip

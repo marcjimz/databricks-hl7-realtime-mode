@@ -285,11 +285,11 @@ ERROR       3 subscription(s) refused; fix MySubscriptions.java
 
 ### 5. Stop the hub
 
-The app doesn't listen silently to a stopped hub. Stop the hub pipeline:
+The app doesn't listen silently to a stopped hub. Stop the observations hub (each silver source has its own):
 
 ```bash
 (export DATABRICKS_HOST=$(terraform -chdir=infra/azure output -raw workspace_url) DATABRICKS_AUTH_TYPE=azure-cli
- databricks pipelines stop $(databricks pipelines list-pipelines --filter "name LIKE 'hl7rt-dev-subscription-hub'" \
+ databricks pipelines stop $(databricks pipelines list-pipelines --filter "name LIKE 'hl7rt-dev-subscription-hub-observations'" \
    -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["pipeline_id"])') >/dev/null)
 ```
 
@@ -299,7 +299,7 @@ Wait two minutes, then run the app. The API waits up to two more minutes for the
 $ java -jar examples/subscribers/java/target/hl7-subscriber.jar
 …
 hub         critical-potassium     revision 3 ACTIVE
-ERROR       HUB_STALE: [the hub hasn't processed silver_observations for 120 s] (is the subscription_hub pipeline running? make demo dev)
+ERROR       HUB_STALE: [the hub hasn't processed silver_observations for 120 s] (are the subscription hub pipelines running? make demo dev)
 ```
 
 An app that's already listening when the hub stops keeps running and prints `WARNING … the hub hasn't processed …`
