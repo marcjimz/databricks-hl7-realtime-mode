@@ -357,6 +357,12 @@ def compile_with_databricks(sql: str, schema: str) -> dict | None:
     return {"code": m.group(1) if m else "DATABRICKS_ERROR", "message": message}
 
 
+# Shapes Databricks compiled for an app's views lately: (views schema, rules.shape(query)) -> when. A rule edit that
+# only changes literals (a patient list) reuses it and skips the warehouse. Kept SHAPE_TTL, so a revoked grant shows.
+_COMPILED: dict[tuple[str, str], float] = {}
+SHAPE_TTL = 300  # seconds
+
+
 def _check(item: Item, who: dict, registered: dict, templates: dict) -> dict:
     """{name, ok: True, rule, template, tier} or {name, ok: False, code, message} (shape check, the template, then
     Databricks)."""
@@ -377,9 +383,14 @@ def _check(item: Item, who: dict, registered: dict, templates: dict) -> dict:
                     "message": f"TEMPLATE_DENIED: template {item.template} {why}"}  # fmt: skip
     same = registered.get(item.name)
     if not (same and same["enabled"] and same["query"] == rule.query):  # unchanged rules were compiled before
-        error = compile_with_databricks(rule.query, who["schema"])
-        if error:
-            return {"name": item.name, "ok": False, **error}
+        key = (who["schema"], rules.shape(rule.query))
+        if time.monotonic() - _COMPILED.get(key, -SHAPE_TTL) >= SHAPE_TTL:  # a new shape, or not recently
+            error = compile_with_databricks(rule.query, who["schema"])
+            if error:
+                return {"name": item.name, "ok": False, **error}
+            if len(_COMPILED) > 20_000:
+                _COMPILED.clear()
+            _COMPILED[key] = time.monotonic()
     return {"name": item.name, "ok": True, "rule": rule, "template": item.template, "tier": item.tier}
 
 

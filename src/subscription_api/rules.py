@@ -150,6 +150,24 @@ def check_condition(condition: str | None, granted: set[str]) -> str | None:
     return node.sql(dialect=DIALECT, comments=False)
 
 
+def shape(query: str) -> str:
+    """The query with its literals blanked (a string is '', a number 0) and each IN list cut to one of each kind: what
+    Databricks' compile depends on. Two rules of one shape compile the same way (an edited patient list, say)."""
+
+    def blank(node):
+        if isinstance(node, exp.Literal):
+            return exp.Literal.string("") if node.is_string else exp.Literal.number(0)
+        if isinstance(node, exp.In) and not node.args.get("query"):
+            kinds = {}
+            for v in node.expressions:
+                kinds.setdefault(type(v).__name__ + str(getattr(v, "is_string", "")), v)
+            node.set("expressions", list(kinds.values()))
+        return node
+
+    tree = sqlglot.parse_one(query, read=DIALECT)
+    return tree.transform(blank).sql(dialect=DIALECT, comments=False)
+
+
 def literal(value: str) -> str:
     """`value` as a Databricks SQL string literal, escaped."""
     return exp.Literal.string(value).sql(dialect=DIALECT)

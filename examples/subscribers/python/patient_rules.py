@@ -28,7 +28,8 @@ def _list(values) -> str:
 BASE = {
     "ed-registrations": f"""
         SELECT patient_id, visit_id, patient_point_of_care, chief_complaint, msg_type FROM silver_encounters
-        WHERE msg_type = 'ADT^A04' AND patient_class = 'E' AND patient_point_of_care IN ({_list(ED_POINTS_OF_CARE)})""",
+        WHERE msg_type = 'ADT^A04' AND patient_class = 'E' AND patient_point_of_care IN ({_list(ED_POINTS_OF_CARE)})
+          AND chief_complaint IS NOT NULL""",
 }
 
 

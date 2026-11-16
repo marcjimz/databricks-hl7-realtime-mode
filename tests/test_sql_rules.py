@@ -171,3 +171,12 @@ def test_the_converted_customer_criteria_are_rules_the_api_accepts():
     for sql in rules:
         sql = sql.replace(", ...", "")  # the doc elides long lists
         assert parse(sql, set(subscriptions.SOURCES), SCHEMA).where
+
+
+def test_a_rules_shape_ignores_its_literals_but_not_their_kinds():
+    from subscription_api.rules import shape
+
+    q = "SELECT patient_id FROM silver_observations WHERE patient_id IN ({}) AND value_num > {}"
+    assert shape(q.format("'A'", 1)) == shape(q.format("'B', 'C', 'D'", 7.5)), "lists and values don't matter"
+    assert shape(q.format("'A'", 1)) != shape(q.format("1", 1)), "a number where a string was is a new shape"
+    assert shape(q.format("'A'", 1)) != shape(q.format("'A'", 1).replace("value_num", "units")), "columns do"

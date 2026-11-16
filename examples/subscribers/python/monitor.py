@@ -16,6 +16,7 @@ import statistics
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -73,7 +74,7 @@ class Monitor:
             live = {s.name: s.revision for s in status.subscriptions if s.enabled and s.state == "ACTIVE"}
             if all(live.get(n) == r for n, r in revisions.items()):
                 return time.monotonic() - started
-            failed = [p for p in status.problems if p.split(":")[0] in revisions]
+            failed = [p for p in status.problems if p.split(":")[0] in revisions] if status.state == "FAILED" else []
             if failed:
                 exit_with(3, f"the hub can't run {failed}")
         return None
@@ -88,8 +89,10 @@ class Monitor:
                 continue
             started = time.monotonic()
             revisions = {}
-            for name, sql in patient_rules.patient_rules(ids).items():
-                r = self.put(name, sql)
+            wanted = patient_rules.patient_rules(ids)
+            with ThreadPoolExecutor(len(wanted)) as pool:  # one edit per rule, at once
+                done = dict(zip(wanted, pool.map(lambda kv: self.put(*kv), wanted.items()), strict=True))
+            for name, r in done.items():
                 if r is not None:
                     revisions[name] = r.revision
                     for mrn in removed:
@@ -133,7 +136,9 @@ class Monitor:
 
     def summary(self):
         def pct(xs, q):
-            return statistics.quantiles(xs, n=100)[q - 1] if len(xs) >= 2 else (xs[0] if xs else float("nan"))
+            if len(xs) < 2:
+                return xs[0] if xs else float("nan")
+            return statistics.quantiles(xs, n=100, method="inclusive")[q - 1]
 
         e, d = self.edit_to_active, self.delivery_ms
         print(f"summary     {len(e)} census edits: edit -> ACTIVE p50 {pct(e, 50):.1f} s, p99 {pct(e, 99):.1f} s, "

@@ -256,3 +256,21 @@ def test_a_deferred_subscription_waits_for_the_deferred_hub(client, pg):
     assert stale["state"] == "HUB_STALE" and "deferred:silver_observations" in stale["problems"][0]
     owner.run("INSERT INTO subscription_registry.hub_heartbeat VALUES ('deferred:silver_observations', now(), 1, 1)")
     assert client.get("/api/v1/subscriptions", headers=A).json()["state"] == "READY"
+
+
+def test_editing_a_rules_literals_reuses_databricks_compile_of_its_shape(client):
+    """A patient-list edit changes only literals: Databricks compiled that shape already, so the edit skips the
+    warehouse (and the hub check still runs on every revision)."""
+
+    def sql(ids):
+        return (f"SELECT patient_id, value_num FROM silver_observations WHERE patient_id IN ({ids}) "
+                "AND observation_cd_desc = 'Potassium'")  # fmt: skip
+
+    for ids in ("'P1'", "'P1', 'P2'", "'P2', 'P3', 'P4'"):
+        r = client.put("/api/v1/subscriptions/census", headers=A, json={"sql": sql(ids)})
+        assert r.status_code == 200, r.text
+    assert sum("IN ('P" in q for q in client.compiled) == 1, "one compile per shape"
+    typo = client.put(
+        "/api/v1/subscriptions/census", headers=A, json={"sql": sql("'P9'").replace("value_num", "units")}
+    )
+    assert typo.status_code == 422, "a new shape is compiled (and refused) as before"
