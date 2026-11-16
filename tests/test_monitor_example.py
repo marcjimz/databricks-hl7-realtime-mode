@@ -38,8 +38,8 @@ def test_each_patient_rule_is_indexed_on_the_patient_list(spark, name):
     _, rule = _rule(name, pr.patient_rules(CENSUS)[name])
     c = subscriptions.compile_rules([rule], spark=spark)
     assert c.data_rules == 1 and c.scan is None
-    assert {r.key_col for r in c.index.collect()} == {"patient_id"}
-    assert c.index.count() == len(CENSUS) * c.rules_table.count(), "one index row per patient, per branch"
+    assert c.index.columns == {"patient_id"}
+    assert len(c.index) == len(CENSUS) * c.rules_table.count(), "one index row per patient, per branch"
 
 
 def test_an_empty_census_cancels_the_patient_rules():

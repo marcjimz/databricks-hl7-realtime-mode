@@ -99,8 +99,8 @@ def _age_ms(rows, started: float) -> int | None:
     return int((started - newest.timestamp()) * 1000)
 
 
-def _write(records, source, rule_set):
-    out = subscriptions.notifications(records, source, rule_set)
+def _write(records, source, rule_set, rows=None):
+    out = subscriptions.notifications(records, source, rule_set, rows)
     if out is not None:
         # A hung Event Hubs connection would hold the write until the delivery timeout (2 min) and fail the batch;
         # give up on a request after 5 s and retry on a new connection, as the RTM sinks do.
@@ -126,12 +126,12 @@ def _hub(source: str, topic: str):
         failed = dict(compiled.failed)
         try:
             if records is not None:
-                _write(records, source, compiled)
+                _write(records, source, compiled, rows)
         except Exception:  # noqa: BLE001 - one rule's runtime error must not stop every app's delivery
             failed |= subscriptions.failing(records, compiled.rules)
             rule_set.drop(set(failed))
             compiled = rule_set.current
-            _write(records, source, compiled)
+            _write(records, source, compiled, rows)
         t3 = time.monotonic()
         revisions = {r.subscription_id: r.revision for r in _registry.rules(source)}
         for subscription_id, error in failed.items():

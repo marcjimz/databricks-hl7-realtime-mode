@@ -58,8 +58,8 @@ test:
 	mvn -q -f examples/subscribers/java/pom.xml test
 
 lint:
-	uv run ruff check src tests infra examples/subscribers/python
-	uv run ruff format --check src tests infra examples/subscribers/python
+	uv run ruff check src tests infra examples/subscribers/python examples/benchmarks
+	uv run ruff format --check src tests infra examples/subscribers/python examples/benchmarks
 	terraform fmt -check -recursive infra
 
 # The plan is applied only after you confirm it (never auto-approved).

@@ -77,6 +77,48 @@ What each step taught:
 - **Correctness doesn't depend on the path.** For every operator, NULLs included, tests check that both paths match
   `spark.sql`, and that both send byte-identical notifications.
 
+### Dynamic patient lists at the cap (measured 2026-11-16)
+
+The ED workflow (docs/subscriptions.md, "Dynamic patient rules") at scale: each virtual app watches a census of 2,000
+patients with five rules, one per silver source (`examples/benchmarks/patient_lists.py`; 50 of each census's patients
+are in the feed, so each rule matches 0.1% of patients, as above). The ED monitor runs alongside as its own app and
+measures its edits and deliveries. Realtime hub: one pipeline per source, 1 s trigger. Demo load (200 msg/s); 10
+minutes per step; churn is 30 census edits a minute (150 rule revisions) on top of the monitor's own.
+
+| Rules | Index | Churn | Monitor edit → ACTIVE p50 / p99 | Monitor delivery p50 / p99 | Benchmark rules' delivery p50 / p99 | Batch p50 (observations) |
+|---|---|---|---|---|---|---|
+| 100 | broadcast table | — | 4.8 / 7.8 s | 4.3 / 9.6 s | 3.7 / 12.4 s | 3.6 s |
+| 100 | broadcast table | 30/min | 5.4 / 7.6 s | 5.8 / 7.7 s | 5.0 / 7.3 s | 4.8 s |
+| 990 | broadcast table | — | 9.5 / 12.4 s | 7.0 / 10.1 s | 5.9 / 9.7 s | 7.3 s |
+| 990 | broadcast table | 30/min | 17.5 / 19.7 s | 13.4 / 18.3 s | 12.5 / 17.3 s | 11.9 s |
+| 990 | **in-memory lookup** | — | **7.1 / 9.0 s** | **4.9 / 7.4 s** | **4.1 / 6.4 s** | **3.9 s** |
+| 990 | **in-memory lookup** | 30/min | **9.1 / 12.0 s** | **7.0 / 10.8 s** | **6.5 / 9.4 s** | **6.3 s** |
+
+No record was delivered after a patient's removal went live, in any step. ~60,000 notifications per 10 minutes at 990
+rules.
+
+What it showed:
+- **A patient list was never Spark filters,** but the index was a Spark table: a row per (rule, group, listed value).
+  At 990 rules that's ~400 k rows per source and ~1.2 M on observations (its rule is labs OR vitals OR radiology, and
+  flattening the OR puts the list in each branch). Two costs grew with it:
+  - every batch re-shipped the whole table into its broadcast join (observations' write: 2–5.7 s);
+  - every edit rebuilt the source's whole table (`compile_ms` 2 s, 5.8 s on observations), and under churn those
+    rebuilds ran continuously, competing with the batches.
+- **The index is now a hash map in the hub's memory** (`subscriptions.Index`): the hub already collects each batch
+  (a few hundred records), looks their values up, and joins only the (record, group) candidates, broadcast, to the
+  small groups table. The plan no longer depends on list sizes (`test_the_plan_does_not_grow_with_a_patient_list`), and
+  notifications are byte-identical to the Spark-table path's.
+- **What's left at 990 under churn:**
+  - each change still rebuilds the source's whole map and groups table (1.2–2.6 s);
+  - batches are ~4.4–6.3 s.
+
+  The next steps are an incremental map (update only the changed rule's entries) and the ~3 s per-batch floor of
+  `foreachBatch` on serverless (docs/subscriptions.md, "Measured").
+- **A source's first compile after a restart takes ~21–24 s at 990 rules** (sqlglot re-checks every 2,000-ID rule). It
+  runs once per start, in the first batch, so a restart at the cap delays delivery by about that long.
+- **A benchmark app must be its own app.** With the benchmark's rules in the monitor's app, its `?wait` status waited on
+  every benchmark rule (READY means all of an app's rules are live), and edit → ACTIVE read 12 s instead of 5 s.
+
 Not done, and not needed at the cap:
 - splitting rule *evaluation* into per-app shards;
 - an index for numeric-only rules;

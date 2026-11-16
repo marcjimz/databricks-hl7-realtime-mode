@@ -96,13 +96,15 @@ def _condition(r: Rule):
 class Compiled:
     """A source's rules, checked and prepared once per registry change (not once per batch): simple rules as data (one
     fixed plan however many there are), the rest as SQL expressions in chunks. A data rule is an OR of AND groups
-    (rules.disjuncts); each group is indexed on its own most selective string = or IN (rules.index_key)."""
+    (rules.disjuncts); each group is indexed on its own most selective string = or IN (rules.index_key). The index is a
+    hash map in the hub's memory, not a Spark table: a batch looks its records' values up and joins only the candidates,
+    so the plan doesn't carry (or re-broadcast) a row per listed patient."""
 
     generation: int | None
     rules: list[Rule]
     failed: dict[str, str]  # subscription id -> why the hub won't run it
     chunks: list[tuple[Column, Column]]  # expression rules, per chunk: (matching rules per record, their metadata)
-    index: DataFrame | None = None  # a row per (rule i, group d, key value): what a record's values join
+    index: "Index | None" = None  # (key column, value) -> the groups it keys, in memory: what a record's values look up
     rules_table: DataFrame | None = None  # a row per indexed (rule, group): its other clauses, stored once
     scan: DataFrame | None = None  # a row per group with no string = or IN clause: compared with every record
     data_rules: int = 0
@@ -112,7 +114,43 @@ class Compiled:
 _KIND = {"StringType": "string", "IntegerType": "number", "LongType": "number", "DoubleType": "number",
          "FloatType": "number", "ShortType": "number", "DecimalType": "number"}  # fmt: skip
 _CLAUSE = "struct<col: string, op: string, str: string, num: double, strs: array<string>, nums: array<double>>"
-_INDEX = "i int, d int, key_col string, key_val string"
+_CANDIDATES = "_cp int, _co long, i int, d int"  # a record (its partition, offset) and a group that could match it
+
+
+class Index:
+    """(key column, value) -> [(rule i, group d)]: each indexed group under every value of its key."""
+
+    def __init__(self):
+        self.groups: dict[tuple[str, str], list[tuple[int, int]]] = {}
+        self.columns: set[str] = set()
+
+    def add(self, i: int, d: int, col: str, values):
+        self.columns.add(col)
+        for v in values:
+            self.groups.setdefault((col, v), []).append((i, d))
+
+    def candidates(self, rows) -> list[tuple[int, int, int, int]]:
+        """(partition, offset, i, d) for each record and group one of its values keys (a group at most once per
+        record)."""
+        out = []
+        for r in rows:
+            seen = set()
+            for col in self.columns:
+                v = r[col]
+                for g in self.groups.get((col, v), ()) if v is not None else ():
+                    if g not in seen:
+                        seen.add(g)
+                        out.append((r["_partition"], r["_offset"], *g))
+        return out
+
+    def rows(self) -> list[tuple[int, int, str, str]]:
+        """(i, d, key column, value) per entry, sorted (for tests and inspection)."""
+        return sorted((i, d, col, v) for (col, v), gs in self.groups.items() for i, d in gs)
+
+    def __len__(self):
+        return sum(len(gs) for gs in self.groups.values())
+
+
 _GROUPS = (
     f"i int, d int, topic string, sid string, name string, rev int, fields array<string>, clauses array<{_CLAUSE}>, "
     f"earlier array<array<{_CLAUSE}>>"
@@ -177,7 +215,7 @@ def compile_rules(rules: list[Rule], generation: int | None = None, chunk: int |
         (data if groups is not None else expressions).append((r, groups))
     index, groups_table, scan = None, None, None
     if data:
-        keys, indexed, unindexed = [], [], []
+        keys, indexed, unindexed = Index(), [], []
         for i, (r, groups) in enumerate(data):
             for d, group in enumerate(groups):
                 key = index_key(group)
@@ -187,10 +225,9 @@ def compile_rules(rules: list[Rule], generation: int | None = None, chunk: int |
                     unindexed.append(row)
                     continue
                 indexed.append(row)
-                # one row per key value: a record only meets the groups that name one of its values
-                for value in sorted(set([key["str"]] if key["op"] == "eq_s" else key["strs"])):
-                    keys.append((i, d, key["col"], value))
-        index = spark.createDataFrame(keys, _INDEX) if keys else None
+                # one entry per key value: a record only meets the groups that name one of its values
+                keys.add(i, d, key["col"], set([key["str"]] if key["op"] == "eq_s" else key["strs"]))
+        index = keys if len(keys) else None
         groups_table = spark.createDataFrame(indexed, _GROUPS) if indexed else None
         scan = spark.createDataFrame(unindexed, _GROUPS) if unindexed else None
     chunks = []
@@ -243,11 +280,12 @@ def _envelope(matched: DataFrame, source: str) -> DataFrame:
     )
 
 
-def _data_matches(records: DataFrame, source: str, c: "Compiled") -> DataFrame:
-    """Data rules, in one fixed plan. Indexed groups: each record's string values join the index rows that name them
-    (a broadcast equi-join), then their group's other clauses (a second, small broadcast join), so a record meets only
-    the few groups that could match it. Unindexed groups meet every record. Either way, every clause of a candidate
-    group must then hold, and no earlier group of its rule may (one notification per record and rule)."""
+def _data_matches(records: DataFrame, source: str, c: "Compiled", rows=None) -> DataFrame | None:
+    """Data rules, in one fixed plan. Indexed groups: each record's string values are looked up in the in-memory index
+    (`rows`: the batch's records, collected; read from `records` if not given), and only the (record, group) candidates
+    are joined to the records and their group's other clauses (small broadcast joins), so a record meets only the few
+    groups that could match it. Unindexed groups meet every record. Either way, every clause of a candidate group must
+    then hold, and no earlier group of its rule may (one notification per record and rule)."""
     cols = [f.name for f in SOURCES[source]]
     k = kinds(source)
 
@@ -274,10 +312,13 @@ def _data_matches(records: DataFrame, source: str, c: "Compiled") -> DataFrame:
     )
     candidates = []
     if c.index is not None:
-        keyed = with_maps.select("*", F.explode("_s").alias("_k", "_v"))
-        t = F.broadcast(c.index)
-        hits = keyed.join(t, (keyed["_k"] == t["key_col"]) & (keyed["_v"] == t["key_val"]))
-        candidates.append(hits.drop("_k", "_v", "key_col", "key_val").join(F.broadcast(c.rules_table), ["i", "d"]))
+        if rows is None:
+            rows = records.select("_partition", "_offset", *sorted(c.index.columns)).collect()
+        found = c.index.candidates(rows)
+        if found:
+            t = F.broadcast(records.sparkSession.createDataFrame(found, _CANDIDATES))
+            hits = with_maps.join(t, (with_maps["_partition"] == t["_cp"]) & (with_maps["_offset"] == t["_co"]))
+            candidates.append(hits.drop("_cp", "_co").join(F.broadcast(c.rules_table), ["i", "d"]))
     if c.scan is not None:
         candidates.append(with_maps.crossJoin(F.broadcast(c.scan)))
     out = None
@@ -290,12 +331,15 @@ def _data_matches(records: DataFrame, source: str, c: "Compiled") -> DataFrame:
     return out
 
 
-def notifications(records: DataFrame, source: str, rules: "list[Rule] | Compiled") -> DataFrame | None:
-    """Kafka records (topic, key, value) for every rule's matches in a batch of `events(...)`, or None."""
+def notifications(records: DataFrame, source: str, rules: "list[Rule] | Compiled", rows=None) -> DataFrame | None:
+    """Kafka records (topic, key, value) for every rule's matches in a batch of `events(...)`, or None. `rows`: the
+    batch's records already collected (the hub has them), for the index lookup."""
     compiled = rules if isinstance(rules, Compiled) else compile_rules(rules)
     parts = []
     if compiled.index is not None or compiled.scan is not None:
-        parts.append(_data_matches(records, source, compiled))
+        data = _data_matches(records, source, compiled, rows)
+        if data is not None:
+            parts.append(data)
     for hits, metas in compiled.chunks:
         meta = F.element_at(metas, F.col("h.i") + 1)
         parts.append(

@@ -271,9 +271,11 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
     `_data_matches`). Without the index, a cross join of records and rules was 10× slower. `OR` is flattened to AND
     groups (DNF, at most `MAX_DISJUNCTS`; distribution holds in SQL's three-valued logic too), each indexed on its most
     selective `=`/`IN` (IDs, then `*_cd`, then points of care, then the rest: never the first clause by default,
-    which is usually a low-selectivity `msg_type`). Index rows carry only (rule, group, key value); a group's other
-    clauses are stored once in a second small table, so a 2,000-patient list is 2,000 small rows, not 2,000 copies of
-    the list. A record is delivered for the first group that holds (one notification per record and rule). Anything
+    which is usually a low-selectivity `msg_type`). **The index is a hash map in the hub's memory** (`Index`:
+    (column, value) → groups), not a Spark table: the hub looks up its collected batch and joins only the candidates.
+    As a broadcast table it was ~1.2 M rows at the cap with 2,000-patient lists, re-shipped every batch and rebuilt
+    on every edit (delivery p99 18 s under churn, 11 s with the map; docs/SCALABILITY.md). A group's other clauses
+    are stored once in a small groups table. A record is delivered for the first group that holds (one notification per record and rule). Anything
     not simple keeps the expression path. Both paths must match `spark.sql` and send identical notifications
     (`tests/test_subscriptions.py`).
   - **Patients are SQL.** Dynamic workflows edit a rule's `patient_id IN (...)` list (a new revision, not a new rule:

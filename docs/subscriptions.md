@@ -80,7 +80,8 @@ WHERE patient_id IN ('MRN050001', 'MRN050002', ...)
 
 - **Adding or removing a patient is an edit of that rule** (`PUT /api/v1/subscriptions/{name}`). It's a new revision
   of the same subscription: it doesn't count against the rule cap, and it doesn't touch any other rule, of this app or
-  another. The hub indexes the rule on `patient_id`, so a long list costs an index row per patient, not a scan.
+  another. The hub indexes the rule on `patient_id` in an in-memory lookup, so a long list costs a map entry per
+  patient, not a scan or a bigger plan (measured to the cap with 2,000-patient lists: docs/SCALABILITY.md).
 - **Lists of thousands fit.** A rule may be up to 200,000 characters (~10,000 patient IDs); a 10,000-patient rule
   parses and flattens in well under a second.
 - **Live only.** A rule delivers records from the batch its revision goes live (ACTIVE) on. Records of a newly added
