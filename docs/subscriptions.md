@@ -87,6 +87,18 @@ WHERE patient_id IN ('MRN050001', 'MRN050002', ...)
 - **The example:** `examples/subscribers/python/monitor.py` runs the whole workflow (logic in `patient_rules.py`) and
   times each census edit until ACTIVE. The synthetic feed plays coherent ED encounters for it to follow
   (`generator_journeys_per_minute`).
+- **Measured** (2026-11-16, dev, 30 minutes, demo load of 200 msg/s, 6 ED journeys a minute; five patient rules
+  edited together per census change, from a separate app):
+
+  | What | p50 | p99 | max | n |
+  |---|---|---|---|---|
+  | Census edit → ACTIVE (PUT of the five rules, then the hub's next batch) | 6.1 s | 8.4 s | 14.5 s | 244 edits |
+  | Patient record → app (silver broker time → app) | 4.4 s | 7.7 s | 13.3 s | 1,629 records |
+  | Records for a patient after their removal went live | | | | **0** |
+
+  An edit's PUT is ~1 s once Databricks has compiled the rule's shape (the API reuses that compile for edits that only
+  change literals, `rules.shape`); the first edit of a new shape compiles on the warehouse (~1.4 s per rule). The rest
+  is the hub picking the edit up: it recompiles in the batch that sees it (0.2–0.5 s), on a ~4 s batch interval.
 
 ## Data templates
 
