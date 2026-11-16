@@ -1,5 +1,5 @@
 """Hot path, silver (Real-Time Mode): bronze topic -> one topic per entity (messages, encounters, observations, orders,
-diagnoses), bad messages -> quarantine topic.
+diagnoses, documents), bad messages -> quarantine topic.
 
 One flow writes every topic: each message is parsed once, exploded into its entity rows, and the sink (no fixed topic)
 routes each row by its `topic` column.
@@ -27,5 +27,6 @@ def hl7_silver():
         observations=conf(spark, "topics.silver_observations"),
         orders=conf(spark, "topics.silver_orders"),
         diagnoses=conf(spark, "topics.silver_diagnoses"),
+        documents=conf(spark, "topics.silver_documents"),
         quarantine=conf(spark, "topics.quarantine"),
     )

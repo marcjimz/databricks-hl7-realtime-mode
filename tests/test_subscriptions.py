@@ -2,6 +2,7 @@
 become notifications routed to each app's own topic."""
 
 import json
+import re
 
 import pytest
 from pyspark.sql import functions as F
@@ -227,6 +228,13 @@ DATA_CONDITIONS = [
     "value_num IN (7.2, 13)",
     "value_num NOT IN (7.2)",
     "(abnormal_flag = 'LL') AND (value_num < 8)",
+    # OR of AND groups (the shape real criteria take) stays on the data path, flattened to its disjuncts
+    "value_num > 1 OR abnormal_flag = 'HH'",
+    "value_num > 7 OR abnormal_flag = 'LL'",  # P1 matches both branches: delivered once
+    "patient_id IN ('P1', 'P3') AND (observation_cd_desc = 'Hemoglobin' OR value_num > 6)",
+    "(patient_id = 'P1' OR patient_id = 'P3') AND (abnormal_flag = 'LL' OR abnormal_flag = 'HH')",
+    "abnormal_flag IS NULL OR value_num < 8",
+    "(units = 'g/dL' AND value_num < 8) OR (units = 'mmol/L' AND abnormal_flag IN ('HH', 'LL'))",
 ]
 
 
@@ -263,8 +271,8 @@ def test_both_paths_send_identical_notifications(spark, observations, condition)
 
 @pytest.mark.parametrize(
     "condition",
-    ["lower(units) = 'g/dl'", "value_num > 1 OR abnormal_flag = 'HH'", "NOT (value_num > 7)", "units LIKE '%/L'",
-     "value_num > 'x'", "value_num = patient_id", "coalesce(abnormal_flag, 'none') = 'none'"],
+    ["lower(units) = 'g/dl'", "value_num > 1 OR lower(units) = 'x'", "NOT (value_num > 7 OR units = 'x')",
+     "units LIKE '%/L'", "value_num > 'x'", "value_num = patient_id", "coalesce(abnormal_flag, 'none') = 'none'"],
 )  # fmt: skip
 def test_anything_else_keeps_the_expression_path(spark, condition):
     sql = f"SELECT patient_id FROM silver_observations WHERE {condition}"
@@ -286,9 +294,9 @@ def test_a_thousand_data_rules_are_one_fixed_plan(spark, observations):
 def test_data_rules_are_indexed_by_a_string_equality_when_they_have_one(spark):
     keyed = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE patient_id IN ('P1', 'P1', 'P4') "
                                     "AND value_num > 1")  # fmt: skip
-    assert sorted(r.key_val for r in keyed.table.collect()) == ["P1", "P4"] and keyed.scan is None, "one row per value"
+    assert sorted(v for *_, v in keyed.index.rows()) == ["P1", "P4"] and keyed.scan is None, "one row per value"
     numeric = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE value_num > 1")
-    assert numeric.table is None and numeric.scan.count() == 1, "no string equality: compared with every record"
+    assert numeric.index is None and numeric.scan.count() == 1, "no string equality: compared with every record"
 
 
 def test_a_record_matches_an_indexed_rule_once_even_if_several_values_could_index_it(spark, observations):
@@ -304,3 +312,100 @@ def test_the_api_accepts_exactly_the_hubs_sources():
     from subscription_api import rules
 
     assert set(subscriptions.SOURCES) == rules.SOURCES
+
+
+def test_the_index_key_is_the_most_selective_equality_not_the_first(spark):
+    """A dynamic patient rule names its message types and codes first; it is indexed on the patient list."""
+    c = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE units IN ('g/dL', 'mmol/L') "
+                                "AND observation_cd_desc = 'Hemoglobin' AND patient_id IN ('P1', 'P2')")  # fmt: skip
+    assert c.index.columns == {"patient_id"}
+    c = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE units = 'g/dL' "
+                                "AND observation_cd = '718-7'", granted=GRANTED | {"observation_cd"})  # fmt: skip
+    assert c.index.columns == {"observation_cd"}, "codes before other strings"
+
+
+def test_each_branch_of_an_or_is_indexed_on_its_own_key(spark):
+    c = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE patient_id = 'P1' "
+                                "OR (observation_cd = '718-7' AND units = 'g/dL')",
+                         granted=GRANTED | {"observation_cd"})  # fmt: skip
+    assert sorted((d, col, v) for _, d, col, v in c.index.rows()) == [
+        (0, "patient_id", "P1"),
+        (1, "observation_cd", "718-7"),
+    ]
+
+
+def test_a_long_patient_list_is_one_index_row_per_patient_and_its_clauses_are_stored_once(spark, observations):
+    patients = [f"MRN{i:06d}" for i in range(2_000)] + ["P1", "P3"]
+    sql = (f"SELECT patient_id FROM silver_observations WHERE patient_id IN ({', '.join(repr(p) for p in patients)}) "
+           "AND (observation_cd_desc = 'Hemoglobin' OR abnormal_flag = 'HH')")  # fmt: skip
+    c = compiled_as_data(spark, sql)
+    assert len(c.index) == 2 * len(patients), "one row per patient, per branch"
+    assert c.index.columns == {"patient_id"} and c.rules_table.count() == 2, (
+        "clauses live once per branch, not per patient"
+    )
+    out = subscriptions.notifications(subscriptions.events(observations, "silver_observations"),
+                                      "silver_observations", c).collect()  # fmt: skip
+    assert sorted(json.loads(x.value)["payload"]["patient_id"] for x in out) == ["P1", "P3"]
+
+
+def test_a_record_that_matches_several_branches_is_delivered_once_with_one_notification_id(spark, observations):
+    sql = "SELECT patient_id FROM silver_observations WHERE patient_id = 'P1' OR value_num < 8 OR abnormal_flag = 'LL'"
+    out = subscriptions.notifications(subscriptions.events(observations, "silver_observations"),
+                                      "silver_observations", compiled_as_data(spark, sql)).collect()  # fmt: skip
+    ids = [json.loads(x.value)["notificationId"] for x in out]
+    assert len(ids) == len(set(ids)) == 2  # P1 (all three branches) and P3 (value_num 6.9)
+
+
+def test_too_many_branches_keep_the_expression_path(spark):
+    from subscription_api.rules import MAX_DISJUNCTS
+
+    groups = " AND ".join(f"(value_num > {i} OR units = 'u{i}')" for i in range(7))  # 2**7 = 128 branches
+    assert MAX_DISJUNCTS < 2**7
+    c = subscriptions.compile_rules([rule(f"SELECT patient_id FROM silver_observations WHERE {groups}")], spark=spark)
+    assert c.data_rules == 0 and len(c.chunks) == 1
+
+
+def test_the_converted_customer_criteria_run_indexed_on_the_data_path(spark):
+    """docs/examples/criteria.md's rules (OR of AND groups, long IN lists) are data rules, each group indexed on its
+    most selective list: patients when there is one, else codes or points of care, never the message type."""
+    import re
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parents[1] / "docs/examples/criteria.md").read_text()
+    for sql in re.findall(r"`(SELECT [^`]+ FROM silver_[^`]+)`", doc):
+        r = parse(sql.replace(", ...", ""), set(subscriptions.SOURCES), "cat.sub_app_a")
+        everything = frozenset(f.name for f in subscriptions.SOURCES[r.source])
+        c = subscriptions.compile_rules([Rule(SID, "c", 1, r.source, r.where, list(r.fields), "t", everything)],
+                                        spark=spark)  # fmt: skip
+        assert c.data_rules == 1 and c.scan is None, sql
+        key_cols = c.index.columns
+        assert "msg_type" not in key_cols, (sql, key_cols)
+        if "patient_id IN" in sql:
+            assert key_cols == {"patient_id"}
+
+
+def test_the_plan_does_not_grow_with_a_patient_list(spark, observations):
+    """The index is a lookup in the hub's memory: a batch's plan carries its candidates, not a row per listed patient
+    (a 1.2 M-row broadcast index made every batch re-ship it; docs/SCALABILITY.md)."""
+
+    def plan(n):
+        patients = ["P1"] + [f"MRN{i:06d}" for i in range(n)]
+        c = compiled_as_data(spark, f"SELECT patient_id FROM silver_observations WHERE patient_id IN "
+                                    f"({', '.join(repr(p) for p in patients)})")  # fmt: skip
+        out = subscriptions.notifications(subscriptions.events(observations, "silver_observations"),
+                                          "silver_observations", c)  # fmt: skip
+        return re.sub(r"#\d+L?", "#", out._jdf.queryExecution().optimizedPlan().toString())  # expression IDs vary
+
+    small, large = plan(10), plan(5_000)
+    assert "MRN004999" not in large
+    assert large == small
+
+
+def test_the_hubs_collected_rows_give_the_same_notifications(spark, observations):
+    c = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE patient_id IN ('P1', 'P3') "
+                                "AND value_num > 1")  # fmt: skip
+    records = subscriptions.events(observations, "silver_observations")
+    rows = records.collect()
+    looked_up = subscriptions.notifications(records, "silver_observations", c, rows).collect()
+    assert sorted(looked_up) == sorted(subscriptions.notifications(records, "silver_observations", c).collect())
+    assert sorted(json.loads(x.value)["payload"]["patient_id"] for x in looked_up) == ["P1", "P3"]

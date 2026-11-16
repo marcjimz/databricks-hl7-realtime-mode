@@ -29,6 +29,16 @@ ALTER TABLE subscription_registry.apps ADD COLUMN IF NOT EXISTS service_principa
 -- GET /api/v1/connection, so apps don't configure it.
 ALTER TABLE subscription_registry.apps ADD COLUMN IF NOT EXISTS eventhubs_credential text;
 
+-- Data templates: the platform's named grants per workflow (a set of sources and columns within the app's grant). A
+-- subscription that names one may read, filter on, and receive only those columns.
+CREATE TABLE IF NOT EXISTS subscription_registry.templates (
+  app_role text NOT NULL REFERENCES subscription_registry.apps ON DELETE CASCADE,
+  name     text NOT NULL,
+  sources  text[] NOT NULL,
+  fields   text[] NOT NULL,
+  PRIMARY KEY (app_role, name)
+);
+
 CREATE SEQUENCE IF NOT EXISTS subscription_registry.generation;
 
 CREATE TABLE IF NOT EXISTS subscription_registry.subscriptions (
@@ -46,6 +56,10 @@ CREATE TABLE IF NOT EXISTS subscription_registry.subscriptions (
   UNIQUE (owner, name)
 );
 CREATE INDEX IF NOT EXISTS subscriptions_generation ON subscription_registry.subscriptions (generation);
+-- The data template it is held to (NULL: the app's whole grant), and its delivery tier: realtime (the clinical hub,
+-- seconds) or deferred (a separate hub on a longer trigger, for work that can wait, e.g. billing).
+ALTER TABLE subscription_registry.subscriptions ADD COLUMN IF NOT EXISTS template text;
+ALTER TABLE subscription_registry.subscriptions ADD COLUMN IF NOT EXISTS tier text NOT NULL DEFAULT 'realtime';
 
 -- Migration from structured predicates (2026-11): their owners were the old SP-named roles, so the rows go; apps
 -- re-register their SQL rules on their next run.
@@ -93,6 +107,10 @@ CREATE TABLE IF NOT EXISTS subscription_registry.hub_progress (
   report_ms  int NOT NULL,  -- status and heartbeat
   PRIMARY KEY (source, batch_id)
 );
+-- How old the batch's newest record was when the hub began on it (its broker time to the batch's start), and Spark's
+-- own split of the previous batch (StreamingQueryProgress.durationMs): the time outside the phases above.
+ALTER TABLE subscription_registry.hub_progress ADD COLUMN IF NOT EXISTS age_ms int;
+ALTER TABLE subscription_registry.hub_progress ADD COLUMN IF NOT EXISTS spark_ms jsonb;
 
 -- Platform limits. The hub evaluates every enabled rule in each micro-batch, so their number is capped.
 CREATE TABLE IF NOT EXISTS subscription_registry.limits (
@@ -111,7 +129,7 @@ $$;
 -- Every write to subscriptions goes through here: the owner is the acting role (the app, never the service), the app
 -- must be onboarded and granted the source and fields, and revision/generation are server-assigned.
 CREATE OR REPLACE FUNCTION subscription_registry.stamp() RETURNS trigger LANGUAGE plpgsql AS $$
-DECLARE app subscription_registry.apps; new_rule bool;
+DECLARE app subscription_registry.apps; tpl subscription_registry.templates; new_rule bool;
 BEGIN
   IF TG_OP = 'UPDATE' AND (NEW.owner <> OLD.owner OR NEW.name <> OLD.name OR NEW.subscription_id <> OLD.subscription_id) THEN
     RAISE EXCEPTION 'OWNERSHIP_DENIED: owner, name, and id are immutable' USING ERRCODE = '42501';
@@ -128,6 +146,19 @@ BEGIN
         (SELECT coalesce(array_agg(x), '{}') FROM unnest(NEW.fields) x WHERE x <> ALL (app.allowed_fields))
         USING ERRCODE = '42501';
     END IF;
+    IF NEW.template IS NOT NULL THEN
+      SELECT * INTO tpl FROM subscription_registry.templates WHERE app_role = current_user AND name = NEW.template;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'TEMPLATE_DENIED: template % is not granted to this app', NEW.template USING ERRCODE = '42501';
+      END IF;
+      IF NOT NEW.source = ANY (tpl.sources) OR NOT NEW.fields <@ tpl.fields THEN
+        RAISE EXCEPTION 'TEMPLATE_DENIED: template % allows % of %', NEW.template, tpl.fields, tpl.sources
+          USING ERRCODE = '42501';
+      END IF;
+    END IF;
+  END IF;
+  IF NEW.tier NOT IN ('realtime', 'deferred') THEN
+    RAISE EXCEPTION 'TIER_INVALID: tier is realtime or deferred, not %', NEW.tier USING ERRCODE = '22023';
   END IF;
   -- The hub's rule cap, across every app. One writer at a time, so two apps can't both take the last slot.
   -- (An upsert fires the INSERT trigger even when it becomes an UPDATE: an already enabled name isn't a new rule.)
@@ -159,6 +190,9 @@ CREATE TRIGGER stamp BEFORE INSERT OR UPDATE ON subscription_registry.subscripti
 ALTER TABLE subscription_registry.apps ENABLE ROW LEVEL SECURITY;
 ALTER TABLE subscription_registry.subscriptions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE subscription_registry.status ENABLE ROW LEVEL SECURITY;
+ALTER TABLE subscription_registry.templates ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS own ON subscription_registry.templates;
+CREATE POLICY own ON subscription_registry.templates FOR SELECT TO subscriber USING (app_role = current_user);
 DROP POLICY IF EXISTS own ON subscription_registry.apps;
 CREATE POLICY own ON subscription_registry.apps FOR SELECT TO subscriber USING (app_role = current_user);
 DROP POLICY IF EXISTS service ON subscription_registry.apps;  -- the service maps a verified caller to its app role
@@ -172,24 +206,27 @@ CREATE POLICY own ON subscription_registry.status FOR SELECT TO subscriber
 
 -- ---------------------------------------------------------------------------------------------------------------------
 -- API, called by the Subscription API as the app's role. SECURITY INVOKER: RLS and the trigger see the app.
+DROP FUNCTION IF EXISTS subscription_api.subscribe(text, text, text, text, text[]);  -- before template and tier
 CREATE OR REPLACE FUNCTION subscription_api.subscribe(p_name text, p_source text, p_query text, p_where text,
-                                                      p_fields text[])
+                                                      p_fields text[], p_template text DEFAULT NULL,
+                                                      p_tier text DEFAULT 'realtime')
 RETURNS jsonb LANGUAGE plpgsql SECURITY INVOKER AS $$
 DECLARE s subscription_registry.subscriptions; topic text;
 BEGIN
-  INSERT INTO subscription_registry.subscriptions AS t (owner, name, source, query, where_sql, fields)
-    VALUES (current_user, p_name, p_source, p_query, p_where, p_fields)
+  INSERT INTO subscription_registry.subscriptions AS t (owner, name, source, query, where_sql, fields, template, tier)
+    VALUES (current_user, p_name, p_source, p_query, p_where, p_fields, p_template, p_tier)
     ON CONFLICT (owner, name) DO UPDATE
       SET source = excluded.source, query = excluded.query, where_sql = excluded.where_sql, fields = excluded.fields,
-          enabled = true
-      WHERE (t.source, t.query, t.fields, t.enabled) IS DISTINCT FROM (excluded.source, excluded.query, excluded.fields, true)
+          template = excluded.template, tier = excluded.tier, enabled = true
+      WHERE (t.source, t.query, t.fields, t.template, t.tier, t.enabled)
+            IS DISTINCT FROM (excluded.source, excluded.query, excluded.fields, excluded.template, excluded.tier, true)
     RETURNING * INTO s;
   IF s.subscription_id IS NULL THEN  -- identical definition: no new revision
     SELECT * INTO s FROM subscription_registry.subscriptions WHERE owner = current_user AND name = p_name;
   END IF;
   SELECT destination_topic INTO topic FROM subscription_registry.apps WHERE app_role = current_user;
   RETURN jsonb_build_object('subscriptionId', s.subscription_id, 'name', s.name, 'revision', s.revision,
-    'state', 'ACCEPTED', 'query', s.query, 'destination', topic);
+    'state', 'ACCEPTED', 'query', s.query, 'destination', topic, 'template', s.template, 'tier', s.tier);
 END $$;
 
 CREATE OR REPLACE FUNCTION subscription_api.unsubscribe(p_name text)
@@ -210,7 +247,7 @@ RETURNS jsonb LANGUAGE sql STABLE SECURITY INVOKER AS $$
   SELECT jsonb_build_object(
     'subscriptions', coalesce((SELECT jsonb_agg(jsonb_build_object(
         'subscriptionId', s.subscription_id, 'name', s.name, 'revision', s.revision, 'enabled', s.enabled,
-        'source', s.source, 'query', s.query, 'fields', s.fields,
+        'source', s.source, 'query', s.query, 'fields', s.fields, 'template', s.template, 'tier', s.tier,
         'state', CASE WHEN st.revision = s.revision THEN st.state ELSE 'PENDING' END,
         'error', CASE WHEN st.revision = s.revision THEN st.error END) ORDER BY s.name)
       FROM subscription_registry.subscriptions s LEFT JOIN subscription_registry.status st USING (subscription_id)), '[]'),
@@ -225,7 +262,7 @@ CREATE SCHEMA IF NOT EXISTS subscription_monitor;
 DROP VIEW IF EXISTS subscription_monitor.subscriptions;  -- views only: dropped and recreated, so columns can change
 CREATE VIEW subscription_monitor.subscriptions AS
 SELECT a.app_name, a.service_principal, s.name AS subscription, s.revision, s.source,
-       s.query AS rule, array_to_string(s.fields, ', ') AS fields,
+       s.query AS rule, array_to_string(s.fields, ', ') AS fields, s.template, s.tier,
        CASE WHEN st.revision = s.revision THEN st.state WHEN s.enabled THEN 'PENDING' ELSE 'CANCELLING' END AS state,
        CASE WHEN st.revision = s.revision THEN st.error END AS error,
        s.updated_at AS registered_at,
@@ -255,6 +292,7 @@ GRANT USAGE ON SCHEMA subscription_api, subscription_registry TO subscriber;
 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA subscription_api TO subscriber;
 GRANT EXECUTE ON FUNCTION subscription_registry.stamp(), subscription_registry.enabled_rules() TO subscriber;
 GRANT SELECT ON subscription_registry.limits TO subscriber;
-GRANT SELECT ON subscription_registry.apps, subscription_registry.status, subscription_registry.hub_heartbeat TO subscriber;
+GRANT SELECT ON subscription_registry.apps, subscription_registry.status, subscription_registry.hub_heartbeat,
+                subscription_registry.templates TO subscriber;
 GRANT SELECT, INSERT, UPDATE ON subscription_registry.subscriptions TO subscriber;
 GRANT USAGE ON SEQUENCE subscription_registry.generation TO subscriber;

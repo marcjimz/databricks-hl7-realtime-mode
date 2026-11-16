@@ -19,7 +19,7 @@ no keys or connection strings.
 ```
 REAL-TIME MODE (ms), an Event Hubs topic between every layer
   HL7 ─► raw_hl7 ─► bronze_hl7 ─► silver_messages / silver_encounters / silver_observations / silver_orders /
-                                  silver_diagnoses, and quarantine_hl7
+                                  silver_diagnoses / silver_documents, and quarantine_hl7
 STREAMING TABLES (seconds)
   every topic ─► the Delta table of the same name: <catalog>.<schema>.<table>
 SUBSCRIPTIONS (seconds)
@@ -28,8 +28,8 @@ SUBSCRIPTIONS (seconds)
 
 - **Bronze** is the raw message plus its header envelope. **Silver** parses it once with plain Spark and writes one row
   per entity, each with the message's patient, visit, and header fields: messages, encounters (ADT), observations (one
-  per OBX), orders, and diagnoses (one per DG1). Bad messages go to quarantine. Column names follow the Epic silver
-  contract.
+  per OBX), orders, diagnoses (one per DG1), and documents (MDM). Bad messages go to quarantine. Column names follow
+  the Epic silver contract.
 - **Epic JSON** is a drop-in pipeline for the existing pre-parsed Epic feed ([docs/epic-json.md](docs/epic-json.md)).
 - **Subscriptions** let apps choose silver records at runtime, each delivered to the app's own hub
   ([docs/subscriptions.md](docs/subscriptions.md)).
@@ -285,11 +285,11 @@ ERROR       3 subscription(s) refused; fix MySubscriptions.java
 
 ### 5. Stop the hub
 
-The app doesn't listen silently to a stopped hub. Stop the hub pipeline:
+The app doesn't listen silently to a stopped hub. Stop the observations hub (each silver source has its own):
 
 ```bash
 (export DATABRICKS_HOST=$(terraform -chdir=infra/azure output -raw workspace_url) DATABRICKS_AUTH_TYPE=azure-cli
- databricks pipelines stop $(databricks pipelines list-pipelines --filter "name LIKE 'hl7rt-dev-subscription-hub'" \
+ databricks pipelines stop $(databricks pipelines list-pipelines --filter "name LIKE 'hl7rt-dev-subscription-hub-observations'" \
    -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["pipeline_id"])') >/dev/null)
 ```
 
@@ -299,7 +299,7 @@ Wait two minutes, then run the app. The API waits up to two more minutes for the
 $ java -jar examples/subscribers/java/target/hl7-subscriber.jar
 …
 hub         critical-potassium     revision 3 ACTIVE
-ERROR       HUB_STALE: [the hub hasn't processed silver_observations for 120 s] (is the subscription_hub pipeline running? make demo dev)
+ERROR       HUB_STALE: [the hub hasn't processed silver_observations for 120 s] (are the subscription hub pipelines running? make demo dev)
 ```
 
 An app that's already listening when the hub stops keeps running and prints `WARNING … the hub hasn't processed …`

@@ -12,7 +12,7 @@ Unity Catalog service credential. It has to **prove** low latency with measureme
 
 ```
 HOT PATH (RTM, Event Hubs topics between every layer)
-  raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_{messages,encounters,observations,orders,diagnoses} | quarantine_hl7
+  raw_hl7 ─► bronze ─► bronze_hl7 ─► silver ─► silver_{messages,encounters,observations,orders,diagnoses,documents} | quarantine_hl7
 LAKEHOUSE PATH (SDP micro-batch, off the hot path)
   every topic ─► the Delta streaming table of the same name (audit, replay, BI) + per-record latency telemetry
 ```
@@ -255,20 +255,50 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
 - **The hub runs at most 1,000 enabled rules** (`subscription_registry.limits`; the trigger serializes the count with an
   advisory lock, and an upsert of an already-enabled name isn't a new rule). At the cap it delivers p99 ~7 s
   (docs/SCALABILITY.md has the measured steps). Keep it fast with these rules:
-  - **Compile per registry change, never per batch.** The hub compiles a source's rules in a background thread, and
-    batches use the last compiled set (`_RuleSet`). `hub_progress` records each batch's phases: read it before
-    optimizing.
+  - **Compile per registry change, never per batch, and only what changed.** The registry client reads only the
+    subscriptions whose generation moved, and each source has its own generation (`Registry.source_generation`), so
+    one app's edit never rebuilds another source's rules. Checks and AND groups are cached per revision/WHERE, so a
+    recompile re-parses only the changed rule. A quick recompile runs in the batch that saw it (`SYNC_COMPILE_MS`); a
+    slow one runs in a background thread while batches use the last set (`_RuleSet`). `hub_progress` records each
+    batch's phases: read it before optimizing.
+  - **`max(generation)` alone misses a write that commits out of order** (it took its number before a later write
+    committed). The client also compares the registry's sum of generations with its own and reloads everything when
+    they differ (`tests/test_hub_registry.py`).
   - **Don't build expressions with PySpark `Column` calls per rule.** Each call is a round trip to the driver (about
     70 ms per rule). Build one `F.expr` string per chunk, from checked parts only: the WHERE regenerated from its
     parsed tree, quoted identifiers (`rules.identifier`), and escaped literals (`rules.literal`).
-  - **Simple rules are data, joined through an equality index** (`clauses()` in rules.py, `_data_matches`). Without the
-    index, a cross join of records and rules was 10× slower. Anything not simple keeps the expression path. Both paths
-    must match `spark.sql` and send identical notifications (`tests/test_subscriptions.py`).
+  - **Simple rules are data, joined through an equality index** (`disjuncts()` and `index_key()` in rules.py,
+    `_data_matches`). Without the index, a cross join of records and rules was 10× slower. `OR` is flattened to AND
+    groups (DNF, at most `MAX_DISJUNCTS`; distribution holds in SQL's three-valued logic too), each indexed on its most
+    selective `=`/`IN` (IDs, then `*_cd`, then points of care, then the rest: never the first clause by default,
+    which is usually a low-selectivity `msg_type`). **The index is a hash map in the hub's memory** (`Index`:
+    (column, value) → groups), not a Spark table: the hub looks up its collected batch and joins only the candidates.
+    As a broadcast table it was ~1.2 M rows at the cap with 2,000-patient lists, re-shipped every batch and rebuilt
+    on every edit (delivery p99 18 s under churn, 11 s with the map; docs/SCALABILITY.md). A group's other clauses
+    are stored once in a small groups table. A record is delivered for the first group that holds (one notification per record and rule). Anything
+    not simple keeps the expression path. Both paths must match `spark.sql` and send identical notifications
+    (`tests/test_subscriptions.py`).
+  - **Patients are SQL.** Dynamic workflows edit a rule's `patient_id IN (...)` list (a new revision, not a new rule:
+    no cap slot). Rules may be 200,000 characters (`MAX_SQL`, ~10,000 IDs). Delivery is live from the revision's
+    ACTIVE batch: no backfill.
   - **Read each micro-batch once** (collect into a local DataFrame; batches are bounded by `maxOffsetsPerTrigger`).
     Each union branch over the source would read it again.
   - **Serverless doesn't allow `persist`/`cache` or Spark codegen settings.** Restructure the plan instead.
   - **A running continuous pipeline doesn't pick up changed source files on deploy** unless its definition changed.
     Restart it (stop + start-update; it resumes from its checkpoint).
+- **Data templates and tiers are subscription properties.** A template (`subscriber_templates` in Terraform →
+  `subscription_registry.templates`, per app) is a named per-workflow grant: a subscription naming one is held to its
+  columns by the API (`TEMPLATE_DENIED`), the registry trigger, and the hub (it runs the rule with the template's columns
+  as its grant). A tier (`realtime` | `deferred`) picks the hub: `subscription_hub_<entity>` or `subscription_hub_deferred`
+  (same code, `hl7.subscriptions.tier`, a longer `pipelines.trigger.interval`), keyed `deferred:<source>` in heartbeat
+  and progress. The hub resources share one YAML anchor; keep them in step (`tests/test_config_wiring.py`).
+- **One realtime hub pipeline per silver source.** In one pipeline, the five sources' batches shared a driver and a
+  Python process: a batch took ~1.4 s alone and ~4–5 s once every source had live rules (5–8 batches overlapping), so
+  a shorter trigger made delivery slower, not faster. Set the hub's `pipelines.trigger.interval` explicitly
+  (`hub_trigger_interval_seconds`): SDP's default for streaming flows is 4 s, which was most of delivery.
+  `hub_progress.age_ms` (the newest record's age when the batch function starts) and `spark_ms` (Spark's own split of
+  the batch) show time spent outside the hub's phases. Measured and rejected: running a single-read plan on the batch
+  itself instead of collecting it (write 2.0–2.7 s vs ~1.7 s).
 - **The Apps proxy may cut long requests.** Clients poll `?wait` in short calls (≤25 s); the API caps each call at
   60 s.
 - **Monitoring reads the registry through Unity Catalog.** `make registry` registers the database as `<catalog>_registry`
@@ -292,7 +322,11 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   - `silver_encounters`: ADT;
   - `silver_observations`: one per OBX, with the LOINC/alternate code;
   - `silver_orders`: ORM;
-  - `silver_diagnoses`: one per DG1, with code, system, and type.
+  - `silver_diagnoses`: one per DG1, with code, system, and type;
+  - `silver_documents`: MDM, with type, ID, status, and the text of its OBX lines (also observations).
+
+  Encounters carry the chief complaint (PV2-3), admission type, prior location (transfers), and discharge time and
+  disposition; orders and observations carry the order ID and diagnostic service (OBR-24, e.g. `RAD`).
 
   Every row starts its entity fields with `CONTEXT` (patient, visit, header) and ends with `LINEAGE` (`raw_ts`,
   `bronze_ts`, `raw_partition`, `raw_offset`). So a rule on one entity needs no join: real criteria ("ADT A04 at
@@ -303,6 +337,9 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   its own 34-column contract. The HL7 field → column mapping is documented at the top of `hl7rt/hl7v2.py`.
 - Build HL7 test messages by field number (`hl7rt.generators.hl7v2.segment`), never by hand-counting pipes.
   One hand-written golden message checks the builder.
+- **The generator plays coherent ED journeys** (`Journeys`, `generator_journeys_per_minute`) next to random background
+  traffic: one patient and visit from registration to discharge or transfer, with radiology and a note for
+  respiratory complaints. Journey MRNs are outside the background population, so a patient rule sees only its journey.
 - **One silver flow writes every entity topic.** It parses each message once, builds an array of `(topic, value)`, and
   `explode`s it. The sink routes by `topic`. Entity JSON uses `to_json(..., {"ignoreNullFields": "false"})` so every
   record has the full shape subscribers code against. (Spark's default drops null fields.) After going live, change an

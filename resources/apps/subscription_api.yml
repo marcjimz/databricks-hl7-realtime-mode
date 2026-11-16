@@ -22,6 +22,8 @@ resources:
             value: ${var.registry_endpoint}
           - name: HL7_REGISTRY_DATABASE
             value: ${var.registry_database}
+          - name: HL7_HUB_DEFERRED_INTERVAL_SECONDS
+            value: ${var.hub_deferred_interval_seconds}
           - name: DATABRICKS_WAREHOUSE_ID
             value_from: sql-warehouse
       resources:

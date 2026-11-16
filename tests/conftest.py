@@ -84,6 +84,8 @@ APPS = {
               ["patient_id", "value_num", "observation_cd_desc"]),
     "app_b": ("app-b", "sp-b", "cat.subscribers.app-b", ["silver_observations", "silver_encounters"], ["patient_id"]),
 }  # fmt: skip
+# Data templates (app, name, sources, fields): app-a's narrower grant for one workflow.
+TEMPLATES = [("app_a", "lab-values", ["silver_observations"], ["patient_id", "value_num"])]
 
 
 def _bin(name):
@@ -118,6 +120,9 @@ def pg(tmp_path_factory):
                   "allowed_fields, service_principal, eventhubs_credential) VALUES (:r, :n, :t, :s, :f, :sp, :c)",
                   r=role, n=name, t=topic, s=sources, f=fields, sp=sp,
                   c=f"sub_{name.replace('-', '_')}_eventhubs")  # fmt: skip
+    for role, name, sources, fields in TEMPLATES:
+        owner.run("INSERT INTO subscription_registry.templates (app_role, name, sources, fields) "
+                  "VALUES (:r, :n, :s, :f)", r=role, n=name, s=sources, f=fields)  # fmt: skip
     owner.run("CREATE ROLE stranger LOGIN IN ROLE subscriber")  # a subscriber role with no app binding
     yield lambda role="owner": pg8000.Connection(role, unix_sock=f"{sock}/.s.PGSQL.5432", database="postgres")
     owner.close()

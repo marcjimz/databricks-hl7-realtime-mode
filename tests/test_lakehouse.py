@@ -82,7 +82,7 @@ def test_mirror_rows_have_ingest_time(spark):
 def test_every_mirror_table_has_its_upsert_key_columns(spark):
     """Delivery is at-least-once; each table upserts on lakehouse.KEYS, so those columns must exist and be set."""
     values = {}
-    for msg in (s.adt_a04(), s.oru_r01(), s.orm_o01(), "garbage"):
+    for msg in (s.adt_a04(), s.oru_r01(), s.orm_o01(), s.mdm_t02(), "garbage"):
         for table, v in _silver_values(spark, msg, T0, T0 + timedelta(milliseconds=10)).items():
             values.setdefault(table, v)
     rows = {

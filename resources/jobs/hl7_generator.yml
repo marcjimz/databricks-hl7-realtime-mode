@@ -15,6 +15,7 @@ resources:
               - --service-credential=${var.eh_service_credential}
               - --topic=${var.hl7_raw_topic}
               - --rate=${var.generator_rate}
+              - --journeys-per-minute=${var.generator_journeys_per_minute}
       environments:
         - environment_key: generator
           spec:

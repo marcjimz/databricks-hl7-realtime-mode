@@ -35,7 +35,8 @@ export DATABRICKS_AUTH_TYPE    ?= azure-cli
 export BUNDLE_VAR_catalog      ?= $(call tf_out,catalog)
 export BUNDLE_VAR_eh_namespace ?= $(call tf_out,eh_namespace)
 
-PIPELINES  := hl7_bronze hl7_silver lakehouse epic_json subscription_hub
+HUBS       := $(addprefix subscription_hub_,encounters observations orders diagnoses documents deferred)
+PIPELINES  := hl7_bronze hl7_silver lakehouse epic_json $(HUBS)
 GENERATORS := hl7_generator epic_json_generator
 active_runs = $(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))'
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")
@@ -57,8 +58,8 @@ test:
 	mvn -q -f examples/subscribers/java/pom.xml test
 
 lint:
-	uv run ruff check src tests infra examples/subscribers/python
-	uv run ruff format --check src tests infra examples/subscribers/python
+	uv run ruff check src tests infra examples/subscribers/python examples/benchmarks
+	uv run ruff format --check src tests infra examples/subscribers/python examples/benchmarks
 	terraform fmt -check -recursive infra
 
 # The plan is applied only after you confirm it (never auto-approved).

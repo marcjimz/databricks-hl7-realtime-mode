@@ -124,7 +124,7 @@ public final class App {
             case READY -> { }
             case FAILED -> exit(3, "the hub can't run " + status.getProblems());
             default -> exit(4, status.getState() + ": " + status.getProblems()
-                    + " (is the subscription_hub pipeline running? make demo dev)");
+                    + " (are the subscription hub pipelines running? make demo dev)");
         }
 
         // 3. Consume this app's topic with a token Unity Catalog mints from its service credential (no Azure secret here).
@@ -144,7 +144,7 @@ public final class App {
         try {
             Status now = api.getStatus(0);
             if (now.getState() == StateEnum.HUB_STALE) {
-                System.out.printf("WARNING     %s: is the subscription_hub pipeline running?%n", now.getProblems());
+                System.out.printf("WARNING     %s: are the subscription hub pipelines running?%n", now.getProblems());
             }
         } catch (ApiException | RuntimeException e) {
             System.out.printf("WARNING     health check failed (%s); still listening%n", e.getMessage());

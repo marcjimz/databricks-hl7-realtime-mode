@@ -82,10 +82,37 @@ def test_required_config_keys_are_wired():
         assert not missing, f"{f.name}:{name} is missing configuration for: {sorted('hl7.' + k for k in missing)}"
 
 
+def _hubs():
+    return yaml.safe_load((ROOT / "resources/pipelines/subscription_hub.yml").read_text())["resources"]["pipelines"]
+
+
 def test_the_hub_has_a_topic_for_every_source():
-    """The hub reads `topics.<source>` in a loop over SOURCES, which the literal-key check above can't see."""
+    """The hub reads `topics.<source>` in a loop over its sources, which the literal-key check above can't see."""
     from hl7rt import subscriptions
 
-    spec = yaml.safe_load((ROOT / "resources/pipelines/subscription_hub.yml").read_text())
-    configured = spec["resources"]["pipelines"]["subscription_hub"]["configuration"]
-    assert {f"hl7.topics.{s}" for s in subscriptions.SOURCES} <= set(configured)
+    for name, hub in _hubs().items():
+        assert {f"hl7.topics.{s}" for s in subscriptions.SOURCES} <= set(hub["configuration"]), name
+
+
+def test_every_source_has_its_own_realtime_hub_and_the_hubs_differ_only_in_what_they_serve():
+    """Same code, one realtime pipeline per source (sources in one pipeline slowed each other), one deferred pipeline
+    for all sources; only the name, sources, tier, and trigger may differ."""
+    from hl7rt import subscriptions
+
+    hubs, served = _hubs(), []
+    deferred = hubs.pop("subscription_hub_deferred")
+    assert deferred["configuration"].pop("hl7.subscriptions.tier") == "deferred"
+    assert "hl7.subscriptions.sources" not in deferred["configuration"], "the deferred hub serves every source"
+    assert deferred["configuration"].pop("pipelines.trigger.interval").endswith(" seconds")
+    for name, hub in hubs.items():
+        assert hub["configuration"].pop("hl7.subscriptions.tier") == "realtime", name
+        assert hub["configuration"].pop("pipelines.trigger.interval").endswith(" seconds"), name
+        served.append(hub["configuration"].pop("hl7.subscriptions.sources"))
+        assert {k: v for k, v in hub.items() if k != "name"} == {k: v for k, v in deferred.items() if k != "name"}
+    assert sorted(served) == sorted(subscriptions.SOURCES), "one realtime hub per source"
+
+
+def test_make_starts_and_stops_every_hub():
+    makefile = (ROOT / "Makefile").read_text()
+    hubs = makefile.split("HUBS       := $(addprefix subscription_hub_,")[1].split(")")[0].split()
+    assert {f"subscription_hub_{h}" for h in hubs} == set(_hubs())

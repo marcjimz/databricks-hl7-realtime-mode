@@ -24,6 +24,7 @@ KEYS = {
     "silver_observations": ["raw_partition", "raw_offset", "position"],
     "silver_orders": ["raw_partition", "raw_offset"],
     "silver_diagnoses": ["raw_partition", "raw_offset", "position"],
+    "silver_documents": ["raw_partition", "raw_offset"],
     "quarantine_hl7": ["raw_partition", "raw_offset"],
 }
 
