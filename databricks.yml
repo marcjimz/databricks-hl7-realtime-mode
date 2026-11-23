@@ -6,12 +6,14 @@ bundle:
 
 include:
   - resources/**/*.yml
+  - hub/resources/*.yml  # the subscription hub, shared with hub/databricks.yml (a team's own hub); here: edp_shared
 
-# Pipelines only need src/; examples (including the Java subscriber) and Terraform stay local.
+# Pipelines only need src/; examples (including the Java subscriber), Terraform, and the team hub bundle stay local.
 sync:
   exclude:
     - examples/**
     - infra/**
+    - hub/**
 
 artifacts:
   hl7rt:
@@ -118,6 +120,24 @@ variables:
   hub_deferred_interval_seconds:
     description: Trigger interval of the deferred-tier hub (subscriptions with tier deferred, e.g. billing), in seconds.
     default: 60
+  # The hub this bundle deploys (hub/resources/subscription_hub.yml): edp_shared, the platform's, which serves every
+  # app not assigned to a team hub and runs every app's deferred rules. Team hubs deploy the same file from hub/.
+  subscription_hub:
+    description: The platform's subscription hub (src/registry/registry.sql seeds it; terraform's default for apps).
+    default: edp_shared
+  hub_service_credential:
+    description: The UC service credential edp_shared reads silver and writes the apps' topics with (namespace-wide).
+    default: ${var.eh_service_credential}
+  hub_schema:
+    description: The hub pipelines' target schema (they write no tables).
+    default: ${var.schema}
+  hub_registry_connections:
+    description: Lakebase connections a hub pipeline keeps for its batches (S7 exhausted the registry with one per thread).
+    default: "4"
+  hub_on_failure:
+    description: What a hub does when an app's topic refuses writes. park = keep the app's notifications in the registry
+      and deliver them in order once it's back, while the other apps go on; block = wait for it (one app per hub only).
+    default: park
   registry_catalog:
     description: The registry database in Unity Catalog (registered by make registry), read by the subscriptions dashboard.
     default: ${var.catalog}_registry

@@ -51,6 +51,20 @@ output "subscriber_apps" {
       hub                    = azurerm_eventhub.subscriber[k].name
       connector_id           = azurerm_databricks_access_connector.subscriber[k].id
       connector_principal_id = azurerm_databricks_access_connector.subscriber[k].identity[0].principal_id
+      subscription_hub       = v.subscription_hub # the subscription hub that runs its realtime rules
+    }
+  }
+}
+
+output "subscriber_hubs" {
+  description = "Per team subscription hub: its SP (which deploys and runs hub/), rule cap, connector (+ identity), and apps. Read by make uc / registry / hub."
+  value = {
+    for k, v in var.subscriber_hubs : k => {
+      application_id         = v.application_id
+      max_enabled_rules      = v.max_enabled_rules
+      connector_id           = azurerm_databricks_access_connector.hub[k].id
+      connector_principal_id = azurerm_databricks_access_connector.hub[k].identity[0].principal_id
+      apps                   = sort([for app, a in var.subscriber_apps : app if a.subscription_hub == k])
     }
   }
 }

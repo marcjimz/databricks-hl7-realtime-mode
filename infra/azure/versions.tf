@@ -1,5 +1,5 @@
 terraform {
-  required_version = ">= 1.5"
+  required_version = ">= 1.9" # a variable's validation may read another variable (subscriber_apps -> subscriber_hubs)
   required_providers {
     azurerm = {
       source  = "hashicorp/azurerm"

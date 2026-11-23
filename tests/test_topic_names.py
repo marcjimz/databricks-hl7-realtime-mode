@@ -31,6 +31,14 @@ def test_topic_variables_are_catalog_schema_table():
             assert TOPIC.fullmatch(str(var.get("default"))), msg
 
 
+def test_a_team_hub_reads_the_platforms_silver_topics():
+    """hub/databricks.yml (a team's own subscription hub) names silver exactly as the platform does."""
+    team = yaml.safe_load((ROOT / "hub/databricks.yml").read_text())["variables"]
+    topics = {n: v["default"] for n, v in team.items() if n.endswith("_topic")}
+    assert topics and all(n.startswith("hl7_silver_") for n in topics)
+    assert topics == {n: _variables()[n]["default"] for n in topics}
+
+
 def _mirror_tables() -> dict[str, str]:
     """lakehouse table name -> the hl7.topics.* config key it reads (`_layer("table", "topics.x", ...)`)."""
     tree = ast.parse((ROOT / "src/pipelines/lakehouse/mirror.py").read_text())

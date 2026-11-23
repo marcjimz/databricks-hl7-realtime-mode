@@ -21,15 +21,26 @@ catalog               = "hl7_rtm" # created by `make uc`; hubs are named <catalo
 # }
 
 # Subscriber apps (docs/subscriptions.md): each brings its own Databricks service principal, and is granted templates
-# and/or sources and columns of its own.
+# and/or sources and columns of its own. Its realtime rules run on edp_shared, the platform's subscription hub, unless
+# subscription_hub names a team hub (below).
 # subscriber_apps = {
 #   "ed-monitor" = {
 #     application_id = "00000000-0000-0000-0000-000000000000"
 #     templates      = ["ed-respiratory-monitoring"]
 #   }
 #   "lab-alerts" = {
+#     application_id   = "00000000-0000-0000-0000-000000000000"
+#     sources          = ["silver_observations"]
+#     fields           = ["patient_id", "observation_cd_desc", "value_num", "units", "abnormal_flag"]
+#     subscription_hub = "lab_team"
+#   }
+# }
+
+# Team subscription hubs (bring your own hub; hub/README.md): the team's service principal deploys hub/ and runs it,
+# serving only the apps that name it. make up, make uc, and make registry give it its identity, credential, registry
+# role, and schema; then the team deploys it (make hub dev HUB=lab_team), before its apps register rules.
+# subscriber_hubs = {
+#   "lab_team" = {
 #     application_id = "00000000-0000-0000-0000-000000000000"
-#     sources        = ["silver_observations"]
-#     fields         = ["patient_id", "observation_cd_desc", "value_num", "units", "abnormal_flag"]
 #   }
 # }
