@@ -29,6 +29,7 @@ dist/
 # Tooling
 .isaac/
 .claude/settings.local.json
+.claude/worktrees/
 .idea/
 .vscode/
 .DS_Store

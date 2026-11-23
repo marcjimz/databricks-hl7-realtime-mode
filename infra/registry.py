@@ -93,9 +93,7 @@ def _login(db, principal: str):
 def _hub_grants(db, hub: str, principal: str, me: str):
     """A team hub's Postgres identity: hub_<name> in `hub` (whose grants and RLS let it read only its apps' rules and
     write only its own rows), and the hub's service principal, the one member, so its pipeline connects as itself."""
-    r = hub_role(hub)
-    db.run(f"DO $$ BEGIN CREATE ROLE {r} NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$")
-    db.run(f"GRANT hub TO {r}")
+    r = hub_role(hub)  # created, in `hub`, by subscription_registry.onboard_hub
     _login(db, principal)
     members = (
         "SELECT u.rolname FROM pg_auth_members m JOIN pg_roles u ON u.oid = m.member "
@@ -118,13 +116,9 @@ def onboard_hubs(db, hubs: dict, apps: dict, me: str, catalog: str) -> list[str]
         n=SHARED_HUB, p=me, c=f"{catalog}_eventhubs",
     )  # fmt: skip
     for name, h in hubs.items():
+        db.run("SELECT subscription_registry.onboard_hub(:n, :p, :c, :m)", n=name, p=h["application_id"],
+               c=hub_credential(name), m=h.get("max_enabled_rules", 2000))  # fmt: skip
         _hub_grants(db, name, h["application_id"], me)
-        db.run(
-            "INSERT INTO subscription_registry.hubs (name, principal, eventhubs_credential, max_enabled_rules) "
-            "VALUES (:n, :p, :c, :m) ON CONFLICT (name) DO UPDATE SET principal = excluded.principal, "
-            "eventhubs_credential = excluded.eventhubs_credential, max_enabled_rules = excluded.max_enabled_rules",
-            n=name, p=h["application_id"], c=hub_credential(name), m=h.get("max_enabled_rules", 2000),
-        )  # fmt: skip
         done.append(f"ok       hub {name} runs as {h['application_id']} ({hub_role(name)}, {hub_credential(name)})")
     for app, a in apps.items():
         hub = a.get("subscription_hub") or SHARED_HUB
