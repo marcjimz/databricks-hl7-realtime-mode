@@ -44,7 +44,15 @@ class AppTest {
         assertNull(p.getProperty("--duration"));
 
         assertThrows(IllegalArgumentException.class, () -> App.settings(List.of(f.toString(), "client_secret=x")));
-        assertThrows(IllegalArgumentException.class, () -> App.required(p, "eventhubs.namespace"));
+        assertThrows(IllegalArgumentException.class, () -> App.required(p, "api.app"), "a setting the app needs");
+    }
+
+    @Test
+    void durationsReadLikeThePythonExamples() {
+        assertEquals(java.time.Duration.ofSeconds(40), App.duration(List.of("--duration=40")));
+        assertEquals(java.time.Duration.ofSeconds(90), App.duration(List.of("--duration=PT1M30S")));
+        assertNull(App.duration(List.of("--e2e")));
+        assertThrows(IllegalArgumentException.class, () -> App.duration(List.of("--duration=soon")));
     }
 
     @Test

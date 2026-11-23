@@ -73,22 +73,38 @@ public final class EventHubs {
 
     /** Kafka consumer settings: Entra OAUTHBEARER (no keys) plus Microsoft's Event Hubs client guidance. */
     public static Properties consumer(String bootstrapServers, String groupId) {
+        var p = auth(bootstrapServers);
+        p.put("group.id", groupId);
+        p.put("enable.auto.commit", "false");
+        p.put("auto.offset.reset", "latest");
+        p.put("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+        p.put("value.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
+        p.put("request.timeout.ms", "60000");
+        p.put("session.timeout.ms", "30000");
+        return p;
+    }
+
+    /** Kafka producer settings (the E2E checks use one to prove the app can't write to its own hub). */
+    public static Properties producer(String bootstrapServers) {
+        var p = auth(bootstrapServers);
+        p.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+        p.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+        p.put("request.timeout.ms", "20000");
+        p.put("delivery.timeout.ms", "30000");
+        p.put("max.block.ms", "30000");
+        return p;
+    }
+
+    private static Properties auth(String bootstrapServers) {
         var p = new Properties();
         p.put("bootstrap.servers", bootstrapServers);
         p.put("security.protocol", "SASL_SSL");
         p.put("sasl.mechanism", "OAUTHBEARER");
         p.put("sasl.jaas.config", "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;");
         p.put("sasl.login.callback.handler.class", Handler.class.getName());
-        p.put("group.id", groupId);
-        p.put("enable.auto.commit", "false");
-        p.put("auto.offset.reset", "latest");
-        p.put("key.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
-        p.put("value.deserializer", "org.apache.kafka.common.serialization.StringDeserializer");
         // learn.microsoft.com/azure/event-hubs/apache-kafka-configurations: Azure closes idle connections after 240 s.
         p.put("metadata.max.age.ms", "180000");
         p.put("connections.max.idle.ms", "180000");
-        p.put("request.timeout.ms", "60000");
-        p.put("session.timeout.ms", "30000");
         return p;
     }
 

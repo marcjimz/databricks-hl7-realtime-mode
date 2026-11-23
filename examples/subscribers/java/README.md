@@ -1,11 +1,11 @@
 # Example subscriber (Java 17)
 
 An example of an external application using the platform. It isn't part of the platform: any language can do the same
-through the contract ([docs/integration.md](../../docs/integration.md)). It subscribes to silver records at runtime with
+through the contract ([docs/integration.md](../../../docs/integration.md)). It subscribes to silver records at runtime with
 Databricks SQL, then consumes its own Event Hub, signing in only as its Databricks service principal.
 
 **The API client is generated from the contract.** At build time, Maven runs openapi-generator on
-[`docs/api/openapi.json`](../../docs/api/openapi.json). That produces `SubscriptionsApi` (one Java method per
+[`docs/api/openapi.json`](../../../docs/api/openapi.json). That produces `SubscriptionsApi` (one Java method per
 operation: `getConnection`, `declare`, `getStatus`, `putSubscription`, `cancel`, `validate`) and `api.model` (one class per request,
 response, and the `Notification` message) under `target/generated-sources`. The app's code uses only those types, so it
 can't drift from the API.
@@ -27,10 +27,27 @@ The app configures **two things**:
 | The Kafka bootstrap servers | `bootstrapServers` |
 | The Unity Catalog service credential for Event Hubs (ACCESS for this service principal only) | `credential` |
 | What to request the Kafka token for | `tokenScope` |
+| The hub that runs its realtime rules (`edp_shared`, or its team's own) | `hub` |
+| The sources and columns it may read | `sources`, `fields` |
 
 Before that works, the platform team onboards the app: `subscriber_apps` in `infra/azure/terraform.tfvars` (the
 sources and columns it may read), then `make up`. To build it you need Java 17+ and Maven 3.9+; if your network blocks
 Maven Central, point Maven at a mirror in `~/.m2/settings.xml`.
+
+## Which hub runs your rules
+
+The app's code and settings are the same either way. The platform assigns the hub, and `getConnection` names it.
+
+- **The shared hub, `edp_shared` (the default).** There's nothing to deploy. The platform team onboards the app, and
+  the shared hub runs its rules.
+- **Your own hub**, for a team that wants compute of its own. It's one always-on pipeline, however many apps it serves.
+  1. The platform team adds the hub to Terraform (`subscriber_hubs`, with the service principal that runs it). It
+     assigns the app to that hub (`subscriber_apps.<app>.subscription_hub = "<hub>"`), then runs `make up`.
+  2. Deploy the hub bundle **first**: `make hub dev HUB=<hub>` on dev. Elsewhere, run `databricks bundle deploy` in
+     `hub/` with `--var subscription_hub=<hub> --var hub_principal=<the SP's application ID>`.
+  3. Run the app unchanged. The e2e check "This app's hub" shows `<hub>`, and the heartbeat check reads that hub's.
+
+  Rules with `tier: "deferred"` still run on `edp_shared`'s deferred hub and arrive on the same topic.
 
 `make registry` writes both settings to `apps/<app>.properties`. That file is gitignored, holds no secrets, and is
 rewritten on every run (the `e2e.*` URLs change when the workspace is rebuilt). Any setting can also be passed as
@@ -42,12 +59,13 @@ rewritten on every run (the `e2e.*` URLs change when the workspace is rebuilt). 
 # from the repo root
 mvn -q -f examples/subscribers/java package                           # generate the client, build, run the unit tests
 java -jar examples/subscribers/java/target/hl7-subscriber.jar         # declare MySubscriptions, then print notifications
-java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e   # 25 live checks: a PASS/FAIL table, exit 1 on any failure
+java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e   # 26 live checks: a PASS/FAIL/SKIP table, exit 1 on any failure
 ```
 
 With more than one file in `apps/`, name the app: `java -jar … examples/subscribers/apps/<app>.properties`.
-`--duration=PT5M` bounds a run. The walkthrough with expected output is in the
-[README](../../README.md#subscriptions-demo).
+`--duration=300` (seconds) or `--duration=PT5M` bounds a run. The dynamic patient monitor is
+[Python only](../python/README.md). The walkthrough with expected output is in the
+[README](../../../README.md#subscriptions-demo).
 
 ## Code
 
@@ -60,7 +78,7 @@ Classes by role (`src/main/java/com/databricks/hl7/subscriber/`). Read the first
 | `api/Api` | Wires the generated `SubscriptionsApi`: the URL, the SP's token on every call, and reading a refusal (`Refusal`: Databricks' error per rule) |
 | `notifications/Listener` | The delivery contract on the generated `Notification`: dedupe by `notificationId`, current revisions only, catch-up summary, commit after handling |
 | `platform/EventHubs` | The Unity Catalog-issued Entra token, the Kafka OAUTHBEARER callback, the consumer settings |
-| `e2e/E2E` | The 25 live checks (`--e2e`) |
+| `e2e/E2E` | The 26 live checks (`--e2e`), the same as the Python example's `e2e.py` |
 
 In the workspace, the same checks run as a serverless job, as the app's service principal:
 `DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle deploy`, then `... bundle run e2e` (from the repo

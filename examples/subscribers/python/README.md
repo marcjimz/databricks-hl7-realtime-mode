@@ -22,16 +22,32 @@ The app configures **two things**, the same as the Java example:
 | 2 | **The Subscription API's app name** (the app looks up its URL) | `api.app` (or `api.url`) | `make registry` |
 
 Everything else comes from the API (`get_connection`): its topic, the Kafka bootstrap servers, its Unity Catalog
-credential for Event Hubs, and the token scope. `make registry` writes both settings to
-`examples/subscribers/apps/<app>.properties`, shared with the Java example. You also need `uv sync` (it installs
-confluent-kafka and openapi-python-client).
+credential for Event Hubs, the token scope, the hub that runs its rules (`hub`), and what it may read (`sources`,
+`fields`). `make registry` writes both settings to `examples/subscribers/apps/<app>.properties`, shared with the Java
+example. You also need `uv sync` (it installs confluent-kafka and openapi-python-client).
+
+## Which hub runs your rules
+
+The app's code and settings are the same either way. The platform assigns the hub, and `get_connection` names it.
+
+- **The shared hub, `edp_shared` (the default).** There's nothing to deploy. The platform team onboards the app
+  (`subscriber_apps` in `infra/azure/terraform.tfvars`, then `make up`), and the shared hub runs its rules.
+- **Your own hub**, for a team that wants compute of its own. It's one always-on pipeline, however many apps it serves.
+  1. The platform team adds the hub to Terraform (`subscriber_hubs`, with the service principal that runs it). It
+     assigns the app to that hub (`subscriber_apps.<app>.subscription_hub = "<hub>"`), then runs `make up`.
+  2. Deploy the hub bundle **first**: `make hub dev HUB=<hub>` on dev. Elsewhere, run `databricks bundle deploy` in
+     `hub/` with `--var subscription_hub=<hub> --var hub_principal=<the SP's application ID>`.
+  3. Run the app unchanged. The e2e check "This app's hub" shows `<hub>`, and the heartbeat check reads that hub's.
+
+  Rules with `tier: "deferred"` still run on `edp_shared`'s deferred hub and arrive on the same topic.
 
 ## Run (from the repo root)
 
 ```bash
-uv run python examples/subscribers/python/subscriber.py --e2e          # the 25 end-to-end checks (~2 min)
+uv run python examples/subscribers/python/subscriber.py --e2e          # the 26 end-to-end checks (~2 min)
 uv run python examples/subscribers/python/subscriber.py                # declare my_subscriptions.py, then listen
-uv run python examples/subscribers/python/subscriber.py --duration=40  # listen for 40 s, then exit 0
+uv run python examples/subscribers/python/subscriber.py --duration=40  # listen for 40 s (or PT40S), then exit 0
+uv run python examples/subscribers/python/monitor.py --duration=600    # dynamic patient monitoring (Python only)
 ```
 
 - **Edit `my_subscriptions.py`**, then run again. No build: the API compiles the SQL, and the hub applies it at its next
@@ -53,8 +69,14 @@ uv run python examples/subscribers/python/subscriber.py --duration=40  # listen 
 | `api.py` | Wires the generated client: URL, the SP's token per call, refusals (`api/Api`) |
 | `notifications.py` | The delivery contract: dedupe, current revisions, catch-up (`notifications/Listener`) |
 | `eventhubs.py` | Unity Catalog token, OAUTHBEARER, Event Hubs client settings (`platform/EventHubs`) |
-| `e2e.py` | The 25 live checks (`e2e/E2E`) |
+| `e2e.py` | The 26 live checks (`e2e/E2E`) |
 | `build.py` | Generates the client from the contract (Maven's openapi-generator step) |
+| `monitor.py` | Dynamic patient monitoring: follows ED registrations and edits the patient rules per census change (no Java version) |
+| `patient_rules.py` | The monitor's rules and census logic, with no I/O |
 
-Unit tests: `tests/test_python_subscriber.py` (run by `make test`). Among them, the generated client runs the whole
-handshake against the real Subscription API in-process.
+Unit tests (run by `make test`):
+- `tests/test_python_subscriber.py`. Among them, the generated client runs the whole handshake against the real
+  Subscription API in-process.
+- `tests/test_subscriber_examples.py`. It checks that both examples run the same checks in the same order, and that the
+  monitor exits from its main thread.
+- `tests/test_monitor_example.py`.
