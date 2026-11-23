@@ -72,7 +72,7 @@ CREATE OR REPLACE VIEW ${catalog}.powerbi.subscriptions COMMENT 'Subscriptions t
 SELECT app_name, subscription, revision, source, state, rule, registered_at, confirmed_at, seconds_to_confirm
 FROM ${registry_catalog}.subscription_monitor.subscriptions WHERE state <> 'CANCELLED';
 
-CREATE OR REPLACE VIEW ${catalog}.powerbi.hub COMMENT 'Subscription hub heartbeat per silver source' AS
-SELECT source, CASE WHEN seconds_since_last_batch > 120 THEN 'STALE' ELSE 'OK' END AS status,
+CREATE OR REPLACE VIEW ${catalog}.powerbi.hub COMMENT 'Subscription hub heartbeat per hub and silver source' AS
+SELECT concat(hub, ': ', source) AS source, CASE WHEN seconds_since_last_batch > 120 THEN 'STALE' ELSE 'OK' END AS status,
   seconds_since_last_batch, last_batch_at, rules
 FROM ${registry_catalog}.subscription_monitor.hub;
