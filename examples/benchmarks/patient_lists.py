@@ -92,8 +92,8 @@ class Registry:
             self.db.run(f'CREATE ROLE "{ROLE}" NOLOGIN IN ROLE subscriber')
         self.db.run(
             "INSERT INTO subscription_registry.apps (app_role, app_name, destination_topic, allowed_sources, "
-            "allowed_fields) SELECT :r, :n, :t, allowed_sources, allowed_fields FROM subscription_registry.apps "
-            "WHERE app_role = :like ON CONFLICT (app_role) DO NOTHING",
+            "allowed_fields, hub) SELECT :r, :n, :t, allowed_sources, allowed_fields, hub FROM "
+            "subscription_registry.apps WHERE app_role = :like ON CONFLICT (app_role) DO NOTHING",
             r=ROLE, n=APP, t=topic, like=like_role,
         )  # fmt: skip
         self.db.run(

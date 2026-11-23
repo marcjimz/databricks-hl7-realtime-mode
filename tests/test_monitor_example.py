@@ -9,7 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples/subscribers/python"))
 import patient_rules as pr  # noqa: E402
 
-from hl7rt import subscriptions  # noqa: E402
+from hl7rt import matching, subscriptions  # noqa: E402
 from hl7rt.subscriptions import Rule  # noqa: E402
 from subscription_api.rules import columns, parse  # noqa: E402
 
@@ -34,12 +34,13 @@ def test_every_rule_is_one_the_api_accepts_and_reads_only_the_templates_columns(
 
 
 @pytest.mark.parametrize("name", pr.PATIENT_RULES)
-def test_each_patient_rule_is_indexed_on_the_patient_list(spark, name):
+def test_each_patient_rule_is_matched_on_the_driver_indexed_on_the_patient_list(name):
     _, rule = _rule(name, pr.patient_rules(CENSUS)[name])
-    c = subscriptions.compile_rules([rule], spark=spark)
-    assert c.data_rules == 1 and c.scan is None
-    assert c.index.columns == {"patient_id"}
-    assert len(c.index) == len(CENSUS) * c.rules_table.count(), "one index row per patient, per branch"
+    m = matching.Matcher()
+    m.place(subscriptions.runnable([rule])[0][0], "app")  # simple, or it raises RuleNotSimple
+    branches = len(m.entries[rule.subscription_id].groups)
+    assert not m._scan and set(m._columns) == {"patient_id"}
+    assert m.index_size() == len(CENSUS) * branches, "one index entry per patient, per branch"
 
 
 def test_an_empty_census_cancels_the_patient_rules():

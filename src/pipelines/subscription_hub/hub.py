@@ -1,170 +1,91 @@
-"""Subscription hub (micro-batch, NOT Real-Time Mode): every silver entity topic -> each app's own topic, by live rules.
+"""Subscription hub (micro-batch, NOT Real-Time Mode): silver entity topics -> each served app's own topic, by live
+rules.
+
+One pipeline per hub and tier (hub/resources/subscription_hub.yml): edp_shared, the platform's, or a team's own hub
+(hub/databricks.yml), each serving only the apps assigned to it; edp_shared's deferred pipeline runs every app's
+deferred rules. A flow per silver source (hl7.subscriptions.sources; unset, all of them), all sharing one engine
+(hl7rt.engine): rules placed when they change, each batch read once, simple rules matched on the driver, the batch's
+decisions bound before they're published through a producer per app, so a retried batch decides as its first attempt
+did and one app's broken destination never holds up another's.
 
 Rules are Databricks SQL registered at runtime through the Subscription API (src/subscription_api) and stored in the
-Lakebase registry; the pipeline graph never changes. Each micro-batch:
-  1. check the registry's generation (one query) and read the subscriptions that changed, if any,
-  2. evaluate this source's compiled rule set in one pass and write the matches to each app's topic (the Kafka sink
-     routes by the `topic` column). If the batch fails, find the rules that fail on it, report them FAILED, and write
-     the rest,
-  3. record ACTIVE / CANCELLED / FAILED per revision, a heartbeat, and where the batch's time went (hub_progress).
-
-A source's rule set is recompiled only when one of its own subscriptions changed (each source has its own generation),
-and only the changed rules are parsed again (checks and AND groups are cached per revision). When the last compile was
-quick (SYNC_COMPILE_MS), the batch that saw the change compiles it, so the change is live in that batch; otherwise a
-background thread does, and batches keep using the last compiled set meanwhile, so a change never blocks delivery.
-
-foreach_batch_sink is Public Preview (PREVIEW channel); Real-Time Mode doesn't support foreachBatch, so this hop is
-seconds, not milliseconds. Delivery is at-least-once with stable notification IDs.
+Lakebase registry; the pipeline graph never changes. foreach_batch_sink is Public Preview (PREVIEW channel); Real-Time
+Mode doesn't support foreachBatch, so this hop is seconds, not milliseconds. Delivery is at-least-once with stable
+notification IDs.
 """
-
-import threading
-import time
-from zoneinfo import ZoneInfo
 
 from pyspark import pipelines as dp
 
-from hl7rt import eventhubs, subscriptions
+from hl7rt import delivery, eventhubs, subscriptions
 from hl7rt.config import conf
-from hl7rt.registry import Registry
+from hl7rt.engine import Engine
+from hl7rt.registry import Pool, Registry
 
-# This hub's delivery tier: realtime, or deferred (the same code on a longer trigger; see its pipeline resource)
-_registry = Registry(
-    conf(spark, "registry.endpoint"), conf(spark, "registry.database"), conf(spark, "subscriptions.tier")
-)
-_CHUNK = int(conf(spark, "subscriptions.chunk"))  # rules per projection: small enough for Spark to compile and cache it
-SYNC_COMPILE_MS = 1_000  # recompile in the batch when the last compile took less than this; else in the background
+_NAMESPACE, _CREDENTIAL = conf(spark, "eh.namespace"), conf(spark, "eh.service_credential")
+_ENDPOINT, _DATABASE = conf(spark, "registry.endpoint"), conf(spark, "registry.database")
+_SOURCES = conf(spark, "subscriptions.sources", ",".join(subscriptions.SOURCES)).split(",")
 
 
-class _RuleSet:
-    """A source's compiled rules, rebuilt whenever its generation moves: in the batch if that's quick, else in the
-    background."""
+class _ServiceCredential:
+    """The hub's UC service credential as an azure-identity TokenCredential, for the producers' Entra tokens."""
 
-    def __init__(self, source: str):
-        self.source, self.current, self._building = source, None, False
-        self._lock = threading.Lock()
+    def get_token(self, scope):
+        from databricks.sdk.runtime import dbutils
 
-    def get(self, generation) -> tuple[subscriptions.Compiled, bool]:
-        """The set to use for this batch, and whether it was compiled in the batch (only a source's first)."""
-        if self.current is None:
-            self.current = self._compile(generation)
-            return self.current, True
-        with self._lock:
-            if (
-                self.current.generation != generation
-                and not self._building
-                and (self.current.compile_ms < SYNC_COMPILE_MS)
-            ):
-                self.current = self._compile(generation)
-                return self.current, True
-            if self.current.generation != generation and not self._building:
-                self._building = True
-                threading.Thread(target=self._rebuild, args=(generation,), daemon=True).start()
-        return self.current, False
+        return dbutils.credentials.getServiceCredentialsProvider(_CREDENTIAL).get_token(scope)
 
-    def drop(self, failed: set[str]):
-        """Rules found failing at runtime leave the set at once (they're FAILED until a new revision)."""
-        self.current = self._compile(self.current.generation, exclude=failed)
 
-    def _compile(self, generation, exclude=frozenset()):
-        rules = [r for r in _registry.rules(self.source) if r.subscription_id not in exclude]
-        return subscriptions.compile_rules(rules, generation, _CHUNK, spark)
+def _producer(app: str):
+    from confluent_kafka import Producer
 
-    def _rebuild(self, generation):
+    return Producer(delivery.producer_config(_NAMESPACE, _ServiceCredential()))
+
+
+_engine = Engine(
+    Registry(
+        Pool.lakebase(_ENDPOINT, _DATABASE, int(conf(spark, "registry.connections"))),  # the batch threads'
+        conf(spark, "subscriptions.hub"), conf(spark, "subscriptions.tier"), _SOURCES,
+        drain_pool=Pool.lakebase(_ENDPOINT, _DATABASE, 1),  # every drainer's, whatever number of apps drain
+    ),
+    _producer, conf(spark, "subscriptions.on_failure"), int(conf(spark, "subscriptions.chunk")),
+)  # fmt: skip
+
+
+def _query(topic: str, flow: str):
+    """This flow's streaming query ID (bindings are keyed by it: a new checkpoint is a new query) and Spark's split of
+    its last batch (durationMs: offsets, planning, our batch function, commits)."""
+    for q in spark.streams.active:
         try:
-            self.current = self._compile(generation)
-        finally:
-            with self._lock:
-                self._building = False
-
-
-def _spark_ms(topic: str) -> dict | None:
-    """Spark's split of this flow's last batch (durationMs: offsets, planning, our batch function, commits)."""
-    try:
-        for q in spark.streams.active:
             p = q.lastProgress
-            if p and any(topic in s["description"] for s in p["sources"]):
-                return dict(p["durationMs"])
-    except Exception:  # noqa: BLE001 - telemetry only
-        pass
-    return None
-
-
-def _age_ms(rows, started: float) -> int | None:
-    """How old the batch's newest record (its broker time) was when the batch function began."""
-    if not rows:
-        return None
-    newest = max(r["_source_ts"] for r in rows)
-    if newest.tzinfo is None:  # collected in the session time zone
-        newest = newest.replace(tzinfo=ZoneInfo(spark.conf.get("spark.sql.session.timeZone")))
-    return int((started - newest.timestamp()) * 1000)
-
-
-def _write(records, source, rule_set, rows=None):
-    out = subscriptions.notifications(records, source, rule_set, rows)
-    if out is not None:
-        # A hung Event Hubs connection would hold the write until the delivery timeout (2 min) and fail the batch;
-        # give up on a request after 5 s and retry on a new connection, as the RTM sinks do.
-        options = {**eventhubs.kafka_options_from_conf(spark), **eventhubs.HUNG_REQUEST_GUARD}
-        out.write.format("kafka").options(**options).save()
+            if (q.name and q.name.endswith(flow)) or (p and any(topic in s["description"] for s in p["sources"])):
+                return str(q.id), dict(p["durationMs"]) if p else None
+        except Exception:  # noqa: BLE001 - telemetry only
+            continue
+    return "unknown", None
 
 
 def _hub(source: str, topic: str):
-    rule_set = _RuleSet(source)
+    flow = f"subscribe_{source}"
 
     def match(batch, batch_id):
-        started, t0 = time.time(), time.monotonic()
-        _registry.refresh()
-        t1 = time.monotonic()
-        compiled, compiled_now = rule_set.get(_registry.source_generation(source))
-        t2 = time.monotonic()
-        # Read the micro-batch once, into memory (it's bounded by maxOffsetsPerTrigger): every chunk of rules is then
-        # evaluated against local rows, not a fresh read of the topic per chunk. (Measured: even a plan that reads the
-        # batch once is slower run on the batch itself, 2.0-2.7 s vs ~1.7 s per write, so every batch is collected.)
-        parsed = subscriptions.events(batch, source)
-        rows = parsed.collect()
-        records = spark.createDataFrame(rows, parsed.schema) if rows else None
-        failed = dict(compiled.failed)
-        try:
-            if records is not None:
-                _write(records, source, compiled, rows)
-        except Exception:  # noqa: BLE001 - one rule's runtime error must not stop every app's delivery
-            failed |= subscriptions.failing(records, compiled.rules)
-            rule_set.drop(set(failed))
-            compiled = rule_set.current
-            _write(records, source, compiled, rows)
-        t3 = time.monotonic()
-        revisions = {r.subscription_id: r.revision for r in _registry.rules(source)}
-        for subscription_id, error in failed.items():
-            if subscription_id in revisions:
-                _registry.report(subscription_id, revisions[subscription_id], "FAILED", error)
-        for r in compiled.rules:
-            _registry.report(r.subscription_id, r.revision, "ACTIVE")
-        for subscription_id, revision in _registry.cancelled(source):
-            _registry.report(subscription_id, revision, "CANCELLED")
-        _registry.heartbeat(source, batch_id, len(compiled.rules))
-        t4 = time.monotonic()
-        ms = {"refresh": t1 - t0, "prepare": (t2 - t1) if compiled_now else 0, "write": t3 - t2, "report": t4 - t3}
-        ms = {k: int(v * 1000) for k, v in ms.items()} | {"compile": compiled.compile_ms}
-        _registry.progress(source, batch_id, len(compiled.rules), ms, _age_ms(rows, started), _spark_ms(topic))
+        query_id, spark_ms = _query(topic, flow)
+        _engine.process(batch, batch_id, source, query_id, spark_ms)
 
     sink = f"subscription_hub_{source}"
     dp.foreach_batch_sink(name=sink)(match)
 
-    @dp.append_flow(target=sink, name=f"subscribe_{source}")
+    @dp.append_flow(target=sink, name=flow)
     def read():
         return (
             spark.readStream.format("kafka")
-            .options(**eventhubs.kafka_options_from_conf(spark))
-            .option("subscribe", topic)
-            .option("startingOffsets", "latest")  # a new checkpoint starts at the live edge; then it resumes
-            .option(
-                "maxOffsetsPerTrigger", conf(spark, "subscriptions.max_records_per_batch")
-            )  # bounds what's collected
+            .options(
+                **eventhubs.hub_read_options(
+                    _NAMESPACE, _CREDENTIAL, topic, conf(spark, "subscriptions.max_records_per_batch")
+                )
+            )  # fmt: skip
             .load()
         )
 
 
-# The sources this pipeline serves (realtime: one per pipeline, so sources don't share a driver; deferred: all)
-_SOURCES = conf(spark, "subscriptions.sources", ",".join(subscriptions.SOURCES)).split(",")
 for _source in _SOURCES:
     _hub(_source, conf(spark, f"topics.{_source}"))
