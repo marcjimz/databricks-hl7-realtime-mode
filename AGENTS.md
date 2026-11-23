@@ -21,9 +21,11 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
   table per entity. There's no gold layer on the hot path: nothing there needs a join, so silver writes the entity rows
   itself (one hop less). `gold` is kept for future business views built off the hot path.
 - **Subscriptions** over silver: apps register Databricks SQL rules at runtime through the Subscription API (a Databricks
-  App; the rules live in a Lakebase registry), a micro-batch hub pipeline
-  delivers matches to each app's own hub, and a Java app (`examples/subscribers/java`) shows the client side. See
-  "Subscription rules" and docs/subscriptions.md. The earlier SQL-file design is in `examples/subscriptions/`.
+  App; the rules live in a Lakebase registry), a micro-batch subscription hub delivers matches to each app's own topic,
+  and the same example client in Python and Java (`examples/subscribers/`) shows the client side. Two ways to run an
+  app's rules, same rules and API: the platform's shared hub `edp_shared` (default), or a team's own hub deployed from
+  the `hub/` bundle. See "Subscription rules" and docs/subscriptions.md. The earlier SQL-file design is in
+  `examples/subscriptions/`.
 - Phases 0–5 were built on an AWS workspace (cross-cloud to Event Hubs); the repo now targets one Azure region end
   to end. New work: one branch + one PR per unit, verified on dev before merging.
 
@@ -58,6 +60,8 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
 ```
 databricks.yml        variables + targets; include: resources/**
 resources/<type>/     bundle resources grouped by type: jobs/, pipelines/, schemas/, dashboards/
+hub/                  the subscription hub's ONE pipeline definition (resources/subscription_hub.yml, which the main
+                      bundle includes as edp_shared) and the bundle a team deploys to run its own hub
 src/hl7rt/            shared library: pure DataFrame transforms, Event Hubs helpers, generators (unit-tested)
 src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path = src/)
 src/dashboards/       the AI/BI dashboard definitions (.lvdash.json); powerbi/: the live Power BI dashboard's views and
@@ -206,6 +210,24 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
     `PATCH`.
 - **Each app reads only its own hub:** its own access connector with Data Receiver on that hub, behind its own UC
   service credential, ACCESS granted to its SP only (`subscriber_apps` in Terraform, then `make uc`).
+- **Two ways to run an app's rules; the platform assigns which** (`subscriber_apps.<app>.subscription_hub`, default
+  `edp_shared` → `subscription_registry.apps.hub`; an app never chooses). Same rules, API, and app code either way.
+  - **`edp_shared`:** the main bundle deploys `hub/resources/subscription_hub.yml` with `subscription_hub=edp_shared`,
+    plus `subscription_hub_deferred`, which runs **every** app's deferred rules (`runs_deferred`; a team hub stays one
+    pipeline). It runs as the deployer (the registry owner, which bypasses RLS), so its queries filter by hub.
+  - **A team's own hub** (`subscriber_hubs` in Terraform): the team deploys the `hub/` bundle (`make hub dev HUB=<name>`)
+    as its SP (`run_as`). Its identity is scoped everywhere: connector `<prefix>-hub-<name>` with Receiver on the
+    silver hubs and Sender only on its apps' hubs, UC credential `hub_<name>_eventhubs` (ACCESS for its SP), Lakebase
+    role `hub_<name>` (a member of group `hub`; RLS reads only its apps' rules and writes only rows with its hub), and
+    schema `<catalog>.hub_<name>` (a pipeline needs a target). Its SP reads every silver column: running a hub means
+    being trusted with silver.
+  - **Why not a pipeline per app:** an always-on serverless pipeline costs ~$3.80/h whatever it reads (S6 billing:
+    8.2–8.8 DBU/h per 5-flow pipeline, flat in apps and rules), so a dedicated hub is for a business unit.
+  - **Hub state is keyed by hub:** `status` (PK subscription, hub; a status counts only from the hub that runs the rule),
+    `hub_heartbeat` (hub, tier, source), `hub_progress`, and the engine's tables. Every insert names its columns.
+  - **The bundle code for a team hub doesn't live in `/Workspace/Shared`** (every user may write there, and it runs with
+    an SP that reads all of silver): it deploys under the deployer's home, CAN_VIEW for the SP. Deploy each hub from
+    one identity.
 - **No silent states in the app.** It exits non-zero on a refused or failed rule, an unconfirmed activation, a stopped
   hub (heartbeat), a non-SP identity, or an app that isn't onboarded. It prints only the revisions it just registered.
   - **It never skips a match.** Its consumer group resumes from its last commit, so after time away it works through the
@@ -238,7 +260,7 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
 
   Keep logic on the server. Add a package only for a new role, not per class.
 - **The Python client mirrors the Java one, module for module** (`examples/subscribers/python`: subscriber, my_subscriptions,
-  api, notifications, eventhubs, e2e), with the same output, exit codes, and 25 checks. `build.py` generates its client
+  api, notifications, eventhubs, e2e), with the same output, exit codes, and 26 checks. `build.py` generates its client
   with openapi-python-client into `generated/` (gitignored) whenever the contract is newer; never hand-write a model there
   either. `tests/test_python_subscriber.py` runs the generated client against the real API in-process, so an API change
   that breaks clients fails `make test`. Keep both examples' `MySubscriptions` the same: they declare the SP's whole set.
@@ -289,9 +311,10 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
 - **Data templates and tiers are subscription properties.** A template (`subscriber_templates` in Terraform →
   `subscription_registry.templates`, per app) is a named per-workflow grant: a subscription naming one is held to its
   columns by the API (`TEMPLATE_DENIED`), the registry trigger, and the hub (it runs the rule with the template's columns
-  as its grant). A tier (`realtime` | `deferred`) picks the hub: `subscription_hub_<entity>` or `subscription_hub_deferred`
-  (same code, `hl7.subscriptions.tier`, a longer `pipelines.trigger.interval`), keyed `deferred:<source>` in heartbeat
-  and progress. The hub resources share one YAML anchor; keep them in step (`tests/test_config_wiring.py`).
+  as its grant). A tier (`realtime` | `deferred`) picks the pipeline: the app's hub, or `subscription_hub_deferred` on
+  `edp_shared` (`registry.runs_on(hub, tier)`; same code, `hl7.subscriptions.tier`, a longer
+  `pipelines.trigger.interval`). The deferred pipeline must equal the shared definition except name, tier, and trigger
+  (`tests/test_config_wiring.py`).
 - **One realtime hub pipeline per silver source.** In one pipeline, the five sources' batches shared a driver and a
   Python process: a batch took ~1.4 s alone and ~4–5 s once every source had live rules (5–8 batches overlapping), so
   a shorter trigger made delivery slower, not faster. Set the hub's `pipelines.trigger.interval` explicitly
@@ -307,8 +330,11 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   column's type. `tests/test_dashboard.py` keeps both dashboards portable.
 - **The Databricks SDK lets `DATABRICKS_*` environment variables override a profile.** The app pins
   `auth_type=oauth-m2m` from its profile and refuses to run as anything but a service principal.
-- **`--e2e` is the acceptance test** (25 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
-  every new guarantee, and keep docs/subscriptions.md's table in step. Plans beyond one SP: docs/SCALABILITY.md.
+- **`--e2e` is the acceptance test** (26 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
+  every new guarantee, in both languages, and keep docs/subscriptions.md's table in step
+  (`tests/test_subscriber_examples.py` fails if the two lists differ). Checks read what the app is granted from
+  `/connection` (a source it isn't granted, the fields its rule may use), so they pass under any grant or template.
+  Plans beyond one SP: docs/SCALABILITY.md.
 - **Serverless JAR tasks need environment_version 4+** (`java_dependencies`). Binding a job's `run_as` to an SP needs
   the deployer to have **Service Principal: User** on it, so the app's job is its own bundle (`examples/subscribers/java`):
   in the platform bundle it made every `make demo` fail for deployers without that role.

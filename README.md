@@ -42,7 +42,8 @@ its own Databricks service principal and the API's Databricks App name (it looks
 needs no change); the API tells it everything else:
 
 ```
-0. GET  <api>/api/v1/connection           → its topic, Kafka bootstrap servers, Unity Catalog credential, token scope
+0. GET  <api>/api/v1/connection           → its topic, Kafka bootstrap servers, Unity Catalog credential, token scope,
+                                            and the hub that runs its rules
 1. PUT  <api>/api/v1/subscriptions        {"subscriptions": [{"name": "critical-potassium",
                                             "sql": "SELECT patient_id, value_num FROM silver_observations
                                                     WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"}]}
@@ -55,6 +56,14 @@ needs no change); the API tells it everything else:
 Change the SQL and declare again: the new filter is live within seconds. The full handshake, notification format, and
 errors: [docs/integration.md](docs/integration.md). The example clients in `examples/subscribers/` (Python and Java, both
 generated from the contract) aren't part of the platform.
+
+**Two ways to run an app's rules, with the same rules, API, and app code:**
+- **`edp_shared`**, the platform's hub, is the default: nothing to deploy.
+- **A team's own hub**: the platform onboards it in Terraform (`subscriber_hubs`) and assigns the team's apps to it;
+  the team deploys the [`hub/`](hub/README.md) bundle first, as its own service principal, and its apps run unchanged.
+  A hub costs one always-on serverless pipeline (~$3.80/h estimated), so it's for a business unit, not one app.
+
+Which hub runs an app is the platform's choice, never the app's: [docs/subscriptions.md](docs/subscriptions.md#two-ways-to-subscribe).
 
 ## Results
 
@@ -123,10 +132,10 @@ returns the records the hub delivers.
 This walkthrough uses the **Java example** (`examples/subscribers/java`, prerequisites in its
 [README](examples/subscribers/java/README.md#prerequisites)) to drive that contract. The **Python example** does the same
 from the repo root with no Java or Maven ([README](examples/subscribers/python/README.md)): same output and exit codes,
-and the same 25 checks.
+and the same 26 checks.
 
 ```bash
-uv run python examples/subscribers/python/subscriber.py --e2e     # the 25 checks
+uv run python examples/subscribers/python/subscriber.py --e2e     # the 26 checks
 uv run python examples/subscribers/python/subscriber.py           # declare my_subscriptions.py, then listen
 ```
 
@@ -160,8 +169,8 @@ $ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/
 25 checks, 0 failed
 ```
 
-The 25 checks cover:
-- sign-in, and credential and topic isolation;
+The 26 checks cover:
+- sign-in, the app's hub, and credential and topic isolation;
 - no way around the API;
 - Databricks' own compile errors, and the shapes the hub won't run;
 - one refusal applying nothing;
@@ -285,11 +294,11 @@ ERROR       3 subscription(s) refused; fix MySubscriptions.java
 
 ### 5. Stop the hub
 
-The app doesn't listen silently to a stopped hub. Stop the observations hub (each silver source has its own):
+The app doesn't listen silently to a stopped hub. Stop `edp_shared`'s realtime pipeline (it runs every app on it):
 
 ```bash
 (export DATABRICKS_HOST=$(terraform -chdir=infra/azure output -raw workspace_url) DATABRICKS_AUTH_TYPE=azure-cli
- databricks pipelines stop $(databricks pipelines list-pipelines --filter "name LIKE 'hl7rt-dev-subscription-hub-observations'" \
+ databricks pipelines stop $(databricks pipelines list-pipelines --filter "name LIKE 'hl7rt-dev-hub-edp_shared'" \
    -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["pipeline_id"])') >/dev/null)
 ```
 
@@ -352,7 +361,8 @@ interval (5 minutes on a new capacity). Setup, cost, and what's verified: [docs/
 |---|---|
 | Subscription, tenant, region, metastore, name prefix, catalog, Event Hubs capacity | `infra/azure/terraform.tfvars` |
 | Topic names, cluster size, feed rate, checkpoint interval, warehouse, registry project | `databricks.yml` |
-| Subscriber apps (service principal, sources, columns) | `subscriber_apps` in `infra/azure/terraform.tfvars` |
+| Subscriber apps (service principal, sources, columns, hub) | `subscriber_apps` in `infra/azure/terraform.tfvars` |
+| Team hubs (name, service principal, rule cap) | `subscriber_hubs` in `infra/azure/terraform.tfvars`; deploy with `make hub dev HUB=<name>` |
 | Fabric tenant, subscription, capacity size and admins (Power BI dashboard) | `infra/fabric/terraform.tfvars` |
 
 ## Repo
@@ -364,6 +374,7 @@ infra/registry.py  Lakebase subscription registry bootstrap (make registry)
 infra/fabric/    Terraform: the Fabric capacity for the live Power BI dashboard
 infra/powerbi.py  Power BI dashboard deploy: views, grants, model, report (make powerbi)
 databricks.yml   bundle variables and targets; resources/ has the pipelines, jobs, and dashboards
+hub/             the subscription hub's pipeline definition, and the bundle a team deploys to run its own hub
 src/dashboards/  the AI/BI dashboards, and powerbi/ (views + the Power BI model and report as data)
 src/hl7rt/       the logic: HL7 parsing, silver entities, Event Hubs wiring, generators
 src/pipelines/   thin pipeline definitions (including the subscription hub)
@@ -372,8 +383,8 @@ src/subscription_api/  the Subscription API (Databricks App): the integration co
 tests/           unit tests (local Spark)
 docs/            integration guide + api/openapi.json (the contract), latency, subscriptions, Power BI, scalability plan,
                  Epic JSON notes, story.html (deck), SPIKE docs; diagrams/ (draw.io + slides)
-examples/        clients and parked designs: subscribers/java/ (an example subscriber; its API client is generated
-                 from the contract) and the earlier SQL-file subscriptions
+examples/        clients and parked designs: subscribers/python/ and subscribers/java/ (the same example subscriber
+                 twice; API clients generated from the contract) and the earlier SQL-file subscriptions
 ```
 
 Contributors and coding agents: see [AGENTS.md](AGENTS.md).

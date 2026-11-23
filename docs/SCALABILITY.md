@@ -124,7 +124,35 @@ Not done, and not needed at the cap:
 - an index for numeric-only rules;
 - a separate cap for expression-path rules.
 
-Sharding (below) is the lever past 1,000 rules, or for isolating a heavy tenant.
+Sharding (below) was the lever past 1,000 rules, or for isolating a heavy tenant. It's now built by business unit, as
+hubs (next section); the hash shard below stays a plan.
+
+### Hubs at 50 apps and 2,000 rules (spikes S6 and S7, 2026-11-19/20; the current engine)
+
+S6 compared one hub pipeline per app against one shared hub, with two real service principals; S7 ran the shared
+engine at 50 apps and 2,000 rules over a synthetic registry, each app with its own topic, on the same live silver
+(spike code and runs: `../hl7-rtm-spikes/app-hubs`, outside the repo). The engine (`src/hl7rt/engine.py`) is that
+spike's: matching on the driver, a producer per app, notifications parked per app when its topic refuses writes, and
+each batch bound to the revisions that decided it.
+
+| Topology at 50 apps / 2,000 rules | Delivery p99 steady | p99 under churn | Cost (estimated) |
+|---|---|---|---|
+| **One pipeline, a flow per source** (the default for every hub) | **2.9 s** | 6.5 s | ~$3.80/h |
+| One pipeline per source | 3.0 s | 2.8 s | ~$14.20/h |
+| Two business-unit pipelines, 25 apps each | 2.8 s | 16.3 s (one unit degraded alone, 13 min) | ~$7.65/h |
+
+- **Matching isn't the cost:** 2,000 rules matched in p99 under 0.1 s per batch; batch p99 2.8–2.9 s steady. Every
+  slow batch was the read of the silver batch (10–70 s stalls). The hub's silver reads now carry the 5 s hung-request
+  guard, which capped the same stalls on the RTM hops; its effect on the hub isn't measured yet.
+- **Cost is per pipeline, not per app or rule:** S6 billed 8.2–8.8 DBU/h for a five-flow pipeline whether it served one
+  app or two. A pipeline per app would cost ~$3.80/h each, so a dedicated hub is for a business unit
+  (`subscriber_hubs`), and the cap is per hub: 2,000 enabled rules per tier.
+- **Isolation (S6):** with one producer for all apps, a deleted app topic stalled the other app (p99 10.2 s against
+  3.0 s, 2,207 duplicates). With a producer per app and late acks unparked, the same failure left it at p99 2.8 s, 0
+  duplicates. A retried batch decided from its recorded revisions in 20 of 20 tries, though rules had changed.
+- **Missed in S7:** the churn target (p99 5 s; one pipeline measured 6.5 s) and edit → ACTIVE p99 3 s (3.0–4.0 s).
+  Duplicates came only around restarts (3,886 at one cold restart). Not measured: a mix of simple and expression rules
+  at scale, and the real registry at 2,000 rules.
 
 **Past the cap: shard the hub.**
 - **How:** the API assigns each rule a `shard` when it's registered, by hash of its subscription ID or by app for tenant
@@ -177,8 +205,9 @@ revision.
 **Must fix before production:**
 - **Per-app quota:** max subscriptions and max predicate nodes per app, enforced in the trigger with a QUOTA_EXCEEDED
   error. Today one app could register thousands of rules and slow the hub for everyone.
-- **Hub identity:** a dedicated service principal with SELECT on the registry and write access to `status` and
-  `hub_heartbeat` only, instead of the deploying user (who owns the registry and bypasses RLS).
+- **Hub identity:** done for team hubs (their own service principal, Event Hubs identity, and Lakebase role under RLS;
+  `hub/README.md`). `edp_shared` still runs as the deploying user, who owns the registry and bypasses RLS: give it the
+  same setup.
 - **App credentials:** workload identity (Entra federated credentials) for apps in production, instead of
   client secrets in `~/.databrickscfg`.
 
