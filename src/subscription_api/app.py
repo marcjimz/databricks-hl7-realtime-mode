@@ -7,7 +7,11 @@
   GET    /api/v1/subscriptions?wait=N   the app's subscriptions and the hub's state; with wait, until the hub runs
                                         exactly these revisions (READY), can't (FAILED), or isn't processing (HUB_STALE)
   POST   /api/v1/validate               the same checks as PUT, applying nothing
+  GET    /api/v1/connection             the app's topic, hub, grant, and how to read the topic
   GET    /api/v1/health
+
+The same calls whichever hub runs an app's rules (the platform assigns it: edp_shared, or a team's own hub): the
+registry says which hub runs each rule, and only that hub's verdict and heartbeat count.
 
 Per rule: the shape check (rules.py), then Databricks compiles it with DESCRIBE QUERY against the caller's own views
 (<catalog>.sub_<app>), so its errors (UNRESOLVED_COLUMN, PARSE_SYNTAX_ERROR, TABLE_OR_VIEW_NOT_FOUND, ...) pass through
@@ -42,11 +46,11 @@ CATALOG = os.environ.get("HL7_CATALOG", "hl7_rtm_demo")
 ENDPOINT = os.environ.get("HL7_REGISTRY_ENDPOINT", "")
 DATABASE = os.environ.get("HL7_REGISTRY_DATABASE", "databricks_postgres")
 WAREHOUSE = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
-EVENTHUBS_NAMESPACE = os.environ.get("HL7_EVENTHUBS_NAMESPACE", "")  # where every app's hub lives
+EVENTHUBS_NAMESPACE = os.environ.get("HL7_EVENTHUBS_NAMESPACE", "")  # where every app's topic lives
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # = the registry's CHECK on subscriptions.name
 HUB_STALE_AFTER = 120  # seconds without a hub batch for a source
 DEFERRED_INTERVAL = int(os.environ.get("HL7_HUB_DEFERRED_INTERVAL_SECONDS", "60"))  # the deferred hub's trigger
-TIERS = ("realtime", "deferred")
+RUNNING = ("PLACED", "ACTIVE")  # the hub's verdicts that mean it runs the revision
 MAX_WAIT = 60  # per call; clients poll (a proxy in between may cut long requests)
 WAIT_POLL = 0.25  # seconds between registry reads while a call waits (each is part of edit -> ACTIVE)
 
@@ -61,7 +65,7 @@ tells the API who is calling. The service principal must be an onboarded subscri
 **The handshake.** An app needs only its service principal and this API's Databricks App name (its URL is
 `GET https://<workspace>/api/2.0/apps/<name>` → `url`, which your CAN_USE grant allows).
 0. `GET /api/v1/connection`: your topic and how to read it (Kafka bootstrap servers, your Unity Catalog credential, and
-   the token scope to request).
+   the token scope to request), the hub that runs your rules, and the sources and columns you're granted.
 1. `PUT /api/v1/subscriptions` with the app's whole set of `{name, sql}`. Databricks compiles every rule in that call.
    Either all are accepted (each with a `revision` and your `destination` topic), or nothing is applied and each refusal
    carries Databricks' own error.
@@ -74,6 +78,11 @@ tells the API who is calling. The service principal must be an onboarded subscri
 
 A rule is `SELECT <columns> FROM <silver source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The
 same SQL against your views in the SQL editor returns the records you'll receive.
+
+**Hubs.** A hub is the pipeline that runs rules and delivers matches. The platform assigns each app one: `edp_shared`
+(the default), or a team's own hub, which serves only the apps assigned to it. Every app's `deferred` rules run on
+`edp_shared`'s deferred pipeline. Either way your calls, rules, and topic are the same; `hub` fields say which hub runs
+what, and only that hub's verdict and heartbeat count.
 
 **Compatibility.** Version 1 only adds fields: clients must ignore fields they don't know.
 """
@@ -93,9 +102,11 @@ _VERIFIED_CALLER = Header(default=None, include_in_schema=False)  # set by the A
 _TEMPLATE = Field(default=None, description="A data template granted to your app: the rule may read, filter on, and "
                   "receive only the template's columns (TEMPLATE_DENIED otherwise). Omitted: your app's whole grant.",
                   examples=["ed-respiratory-monitoring"])  # fmt: skip
-_TIER = Field(default="realtime", description="realtime: delivered within seconds (clinical). deferred: delivered by a "
-              "separate hub on a longer trigger, for work that can wait (e.g. billing); it never shares a batch with "
-              "realtime rules.")  # fmt: skip
+_TIER = Field(default="realtime", description="realtime: delivered within seconds (clinical), by your app's hub. "
+              "deferred: delivered by edp_shared's deferred pipeline on a longer trigger, for work that can wait (e.g. "
+              "billing); it never shares a batch with realtime rules.")  # fmt: skip
+_HUB = Field(default=None, description="The hub that runs it: your app's hub for realtime rules, edp_shared for "
+             "deferred ones", examples=["edp_shared"])  # fmt: skip
 
 
 class Item(BaseModel):
@@ -134,6 +145,7 @@ class Accepted(_Open):
     destination: str = Field(description="Your topic: where notifications arrive")
     template: str | None = Field(default=None, description="The data template the rule is held to, if any")
     tier: str = Field(default="realtime", description="realtime or deferred")
+    hub: str | None = _HUB
     unchanged: bool | None = Field(default=None, description="True when the rule was already active as is")
 
 
@@ -188,20 +200,36 @@ class Subscription(_Open):
     fields: list[str]
     template: str | None = None
     tier: str = "realtime"
-    state: str = Field(description="The hub's verdict for this revision: PENDING, ACTIVE, FAILED, or CANCELLED")
+    hub: str | None = _HUB
+    state: str = Field(description="The verdict of the hub that runs it, for this revision: PENDING (not yet), PLACED "
+                       "(in the hub's matcher: it decides every record from now on), ACTIVE (it has decided a batch "
+                       "with it), FAILED, or CANCELLED")  # fmt: skip
     error: str | None = Field(default=None, description="Spark's error when FAILED")
+
+
+class Heartbeat(_Open):
+    hub: str = Field(description="The hub", examples=["edp_shared"])
+    tier: str = Field(description="realtime or deferred: which of its pipelines")
+    source: str = Field(description="The silver source it read")
+    lastBatchAt: str = Field(description="When it last processed a batch of the source (ISO 8601)")
+    batchId: int = Field(json_schema_extra={"format": "int64"})
+    rules: int = Field(description="Rules it ran on the source in that batch")
 
 
 class Status(_Open):
     app: str
     state: Literal["READY", "PENDING", "FAILED", "HUB_STALE"] = Field(
-        description="READY: the hub runs exactly your current revisions. PENDING: not yet. FAILED: it can't run one "
-        "(see problems). HUB_STALE: the hub hasn't processed one of your sources recently."
+        description="READY: the hub runs exactly your current revisions (each PLACED or ACTIVE). PENDING: not yet. "
+        "FAILED: it can't run one (see problems). HUB_STALE: the hub that runs one of your rules hasn't processed its "
+        "source recently."
     )  # fmt: skip
     problems: list[str]
     subscriptions: list[Subscription]
-    hub: dict[str, str] = Field(description="Source -> the hub's last batch time (ISO 8601); the deferred hub's "
-                                "sources are prefixed 'deferred:'")  # fmt: skip
+    hub: dict[str, str] = Field(description="Source -> the last batch time (ISO 8601) of the hubs that run your rules; "
+                                "the deferred tier's sources are prefixed 'deferred:'")  # fmt: skip
+    hubName: str = Field(description="Your app's hub: the one that runs your realtime rules", examples=["edp_shared"])
+    heartbeats: list[Heartbeat] = Field(description="The heartbeats of the hubs that run your rules (your hub's "
+                                        "realtime pipeline and the deferred pipeline), per source")  # fmt: skip
 
 
 class Health(_Open):
@@ -223,6 +251,11 @@ class Connection(_Open):
     )
     tokenScope: str = Field(description="The resource to request the Kafka token for",
                             examples=["https://hl7rtmaz-ehns.servicebus.windows.net/.default"])  # fmt: skip
+    hub: str = Field(description="The hub that runs your realtime rules (the platform assigns it): edp_shared, or "
+                     "your team's own hub. Your deferred rules run on edp_shared.",
+                     examples=["edp_shared"])  # fmt: skip
+    sources: list[str] = Field(description="The silver sources you may subscribe to")
+    fields: list[str] = Field(description="The columns you may read and filter on (a data template may narrow them)")
 
 
 class Notification(_Open):
@@ -325,16 +358,16 @@ def _caller(email: str | None) -> dict:
     if not email:
         raise Refused(401, {"code": "UNAUTHENTICATED", "message": "no verified caller"})
     conn, opened, rows = pool.open(
-        "SELECT app_role, app_name, destination_topic, eventhubs_credential "
+        "SELECT app_role, app_name, destination_topic, eventhubs_credential, hub, allowed_sources, allowed_fields "
         "FROM subscription_registry.apps WHERE service_principal = :sp",
         sp=email,
     )
     pool.put(conn, opened)
     if not rows:
         raise Refused(403, {"code": "APP_NOT_ONBOARDED", "message": f"{email} isn't an onboarded subscriber app"})
-    role, name, topic, credential = rows[0]
+    role, name, topic, credential, hub, sources, fields = rows[0]
     return {"role": role, "name": name, "schema": f"{CATALOG}.sub_{name.replace('-', '_')}", "topic": topic,
-            "credential": credential}  # fmt: skip
+            "credential": credential, "hub": hub, "sources": sources, "fields": fields}  # fmt: skip
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -465,16 +498,21 @@ def health():
     tags=["subscriptions"],
     response_model=Connection,
     responses=_ERRORS | {503: {"model": Error, "description": "The platform hasn't finished onboarding this app"}},
-    summary="Your topic and how to read it (Kafka bootstrap, Unity Catalog credential, token scope)",
+    summary="Your topic and how to read it (Kafka bootstrap, Unity Catalog credential, token scope), hub and grant",
 )
 def connection(x_forwarded_email: str | None = _VERIFIED_CALLER):
     who = _caller(x_forwarded_email)
     if not (EVENTHUBS_NAMESPACE and who["credential"] and who["topic"]):
         raise Refused(503, {"code": "NOT_CONFIGURED", "message": f"{who['name']}'s connection isn't set up yet "
                             "(the platform runs make registry)"})  # fmt: skip
+    with Session(who["role"]) as conn:  # its templates sit within its grant; listed too, in case one adds to it
+        templates = _templates(conn)
+    sources = set(who["sources"]).union(*(t["sources"] for t in templates.values()))
+    fields = set(who["fields"]).union(*(t["fields"] for t in templates.values()))
     return {"app": who["name"], "topic": who["topic"],
             "bootstrapServers": f"{EVENTHUBS_NAMESPACE}.servicebus.windows.net:9093", "credential": who["credential"],
-            "tokenScope": f"https://{EVENTHUBS_NAMESPACE}.servicebus.windows.net/.default"}  # fmt: skip
+            "tokenScope": f"https://{EVENTHUBS_NAMESPACE}.servicebus.windows.net/.default", "hub": who["hub"],
+            "sources": sorted(sources), "fields": sorted(fields)}  # fmt: skip
 
 
 @app.post(
@@ -556,12 +594,14 @@ def cancel(name: str, x_forwarded_email: str | None = _VERIFIED_CALLER):
 
 
 def _state(listing: dict) -> dict:
+    """READY, PENDING, FAILED, or HUB_STALE from the registry's listing, whose `hub` holds only the heartbeats of the
+    hubs that run the caller's rules (another hub beating says nothing about this app's)."""
     subs = [s for s in listing["subscriptions"] if s["enabled"]]
     failed = [f"{s['name']}: {s['error']}" for s in subs if s["state"] == "FAILED"]
-    pending = [s["name"] for s in subs if s["state"] != "ACTIVE"]
+    pending = [s["name"] for s in subs if s["state"] not in RUNNING]
     now = time.time()
 
-    def fresh(key):  # the deferred hub runs a batch per trigger interval
+    def fresh(key):  # the deferred pipeline runs a batch per trigger interval
         at = listing["hub"].get(key)
         return at is not None and now - _epoch(at) < HUB_STALE_AFTER + (DEFERRED_INTERVAL if ":" in key else 0)
 
@@ -572,10 +612,12 @@ def _state(listing: dict) -> dict:
     if pending:
         return {"state": "PENDING", "problems": pending}
     if stale:
+        hub = f"hub {listing.get('hubName')}"
         return {
             "state": "HUB_STALE",
-            "problems": [f"the hub hasn't processed {s} for {HUB_STALE_AFTER} s" for s in stale],
-        }
+            "problems": [f"the {'deferred hub' if ':' in s else hub} hasn't processed {s} for {HUB_STALE_AFTER} s"
+                         for s in stale],
+        }  # fmt: skip
     return {"state": "READY", "problems": []}
 
 

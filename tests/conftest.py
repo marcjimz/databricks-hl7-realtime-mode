@@ -77,15 +77,21 @@ def bronze_df(spark):
     return _make
 
 
-# A throwaway PostgreSQL with the registry applied: two onboarded apps (NOLOGIN on Lakebase; LOGIN here so tests can
-# act as one directly), a `stranger` with no binding, and `api`, the Subscription API's role.
+# A throwaway PostgreSQL with the registry applied: three onboarded apps (NOLOGIN on Lakebase; LOGIN here so tests can
+# act as one directly), a `stranger` with no binding, and `api`, the Subscription API's role. app-a and app-b use the
+# shared hub (edp_shared); app-c uses a team's own hub, bu_demo, whose pipeline runs as `hub_sp` (a member of
+# hub_bu_demo, as a team's service principal is on Lakebase).
 APPS = {
     "app_a": ("app-a", "sp-a", "cat.subscribers.app-a", ["silver_observations"],
-              ["patient_id", "value_num", "observation_cd_desc"]),
-    "app_b": ("app-b", "sp-b", "cat.subscribers.app-b", ["silver_observations", "silver_encounters"], ["patient_id"]),
+              ["patient_id", "value_num", "observation_cd_desc"], "edp_shared"),
+    "app_b": ("app-b", "sp-b", "cat.subscribers.app-b", ["silver_observations", "silver_encounters"], ["patient_id"],
+              "edp_shared"),
+    "app_c": ("app-c", "sp-c", "cat.subscribers.app-c", ["silver_observations"],
+              ["patient_id", "value_num", "observation_cd_desc"], "bu_demo"),
 }  # fmt: skip
 # Data templates (app, name, sources, fields): app-a's narrower grant for one workflow.
 TEMPLATES = [("app_a", "lab-values", ["silver_observations"], ["patient_id", "value_num"])]
+TEAM_HUB = "bu_demo"
 
 
 def _bin(name):
@@ -113,18 +119,25 @@ def pg(tmp_path_factory):
     owner = pg8000.Connection("owner", unix_sock=f"{sock}/.s.PGSQL.5432", database="postgres")
     owner.run((Path(__file__).resolve().parents[1] / "src/registry/registry.sql").read_text())
     owner.run("CREATE ROLE api LOGIN IN ROLE subscription_service")  # the Subscription API's own role
-    for role, (name, sp, topic, sources, fields) in APPS.items():
+    # A team's hub, onboarded as infra/registry.py does: its row and role, and its pipeline's identity in the role.
+    owner.run("SELECT subscription_registry.onboard_hub(:h, 'sp-hub', :c)", h=TEAM_HUB, c=f"hub_{TEAM_HUB}_eventhubs")
+    owner.run(f"CREATE ROLE hub_sp LOGIN IN ROLE hub_{TEAM_HUB}")
+    for role, (name, sp, topic, sources, fields, hub) in APPS.items():
         owner.run(f"CREATE ROLE {role} LOGIN IN ROLE subscriber")  # NOLOGIN on Lakebase; LOGIN here to test it alone
         owner.run(f"GRANT {role} TO subscription_service")
         owner.run("INSERT INTO subscription_registry.apps (app_role, app_name, destination_topic, allowed_sources, "
-                  "allowed_fields, service_principal, eventhubs_credential) VALUES (:r, :n, :t, :s, :f, :sp, :c)",
-                  r=role, n=name, t=topic, s=sources, f=fields, sp=sp,
-                  c=f"sub_{name.replace('-', '_')}_eventhubs")  # fmt: skip
+                  "allowed_fields, service_principal, eventhubs_credential, hub) VALUES (:r, :n, :t, :s, :f, :sp, :c, "
+                  ":h)", r=role, n=name, t=topic, s=sources, f=fields, sp=sp,
+                  c=f"sub_{name.replace('-', '_')}_eventhubs", h=hub)  # fmt: skip
     for role, name, sources, fields in TEMPLATES:
         owner.run("INSERT INTO subscription_registry.templates (app_role, name, sources, fields) "
                   "VALUES (:r, :n, :s, :f)", r=role, n=name, s=sources, f=fields)  # fmt: skip
     owner.run("CREATE ROLE stranger LOGIN IN ROLE subscriber")  # a subscriber role with no app binding
-    yield lambda role="owner": pg8000.Connection(role, unix_sock=f"{sock}/.s.PGSQL.5432", database="postgres")
+
+    def connect(role="owner", database="postgres"):
+        return pg8000.Connection(role, unix_sock=f"{sock}/.s.PGSQL.5432", database=database)
+
+    yield connect
     owner.close()
     subprocess.run([pg_ctl, "-D", data, "-m", "immediate", "stop"], capture_output=True)
     shutil.rmtree(sock, ignore_errors=True)
