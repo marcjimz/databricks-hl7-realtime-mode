@@ -270,41 +270,52 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   connection whose first statement hits a network error is replaced, and one that failed is never pooled (a dead one
   once made every API call 500 for days); the hub's client reopens and retries its idempotent statement once.
   `tests/test_subscription_api.py` and `tests/test_hub_registry.py` kill the connection to prove it.
-- **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). Its flows run
-  batches concurrently, so the shared registry client serializes access (`tests/test_hub_registry.py`). Use pg8000:
-  psycopg[binary] aborted the serverless Python process. Serverless has no `persist`/`cache`, so a failed batch is
-  recomputed to find the failing rule.
-- **The hub runs at most 1,000 enabled rules** (`subscription_registry.limits`; the trigger serializes the count with an
-  advisory lock, and an upsert of an already-enabled name isn't a new rule). At the cap it delivers p99 ~7 s
-  (docs/SCALABILITY.md has the measured steps). Keep it fast with these rules:
-  - **Compile per registry change, never per batch, and only what changed.** The registry client reads only the
-    subscriptions whose generation moved, and each source has its own generation (`Registry.source_generation`), so
-    one app's edit never rebuilds another source's rules. Checks and AND groups are cached per revision/WHERE, so a
-    recompile re-parses only the changed rule. A quick recompile runs in the batch that saw it (`SYNC_COMPILE_MS`); a
-    slow one runs in a background thread while batches use the last set (`_RuleSet`). `hub_progress` records each
-    batch's phases: read it before optimizing.
-  - **`max(generation)` alone misses a write that commits out of order** (it took its number before a later write
-    committed). The client also compares the registry's sum of generations with its own and reloads everything when
-    they differ (`tests/test_hub_registry.py`).
-  - **Don't build expressions with PySpark `Column` calls per rule.** Each call is a round trip to the driver (about
-    70 ms per rule). Build one `F.expr` string per chunk, from checked parts only: the WHERE regenerated from its
-    parsed tree, quoted identifiers (`rules.identifier`), and escaped literals (`rules.literal`).
-  - **Simple rules are data, joined through an equality index** (`disjuncts()` and `index_key()` in rules.py,
-    `_data_matches`). Without the index, a cross join of records and rules was 10× slower. `OR` is flattened to AND
-    groups (DNF, at most `MAX_DISJUNCTS`; distribution holds in SQL's three-valued logic too), each indexed on its most
-    selective `=`/`IN` (IDs, then `*_cd`, then points of care, then the rest: never the first clause by default,
-    which is usually a low-selectivity `msg_type`). **The index is a hash map in the hub's memory** (`Index`:
-    (column, value) → groups), not a Spark table: the hub looks up its collected batch and joins only the candidates.
-    As a broadcast table it was ~1.2 M rows at the cap with 2,000-patient lists, re-shipped every batch and rebuilt
-    on every edit (delivery p99 18 s under churn, 11 s with the map; docs/SCALABILITY.md). A group's other clauses
-    are stored once in a small groups table. A record is delivered for the first group that holds (one notification per record and rule). Anything
-    not simple keeps the expression path. Both paths must match `spark.sql` and send identical notifications
-    (`tests/test_subscriptions.py`).
+- **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). One pipeline per
+  hub and tier, with a flow per silver source sharing one `hl7rt.engine.Engine`; flows run batches on concurrent
+  threads. Use pg8000: psycopg[binary] aborted the serverless Python process. Lakebase connections are bounded: batch
+  threads share a `registry.Pool` of `hl7.registry.connections`, drainers one more connection (S7 opened one per
+  drainer thread and exhausted Lakebase's 225 connections in two minutes, dev hubs included). One engine per hub and
+  lane: a second one waits for the session lock, then fails `HUB_ALREADY_RUNNING`.
+- **The hub runs at most 2,000 enabled rules per hub and tier** (`hubs.max_enabled_rules`; the trigger serializes the
+  count with an advisory lock per (hub, tier), a tier change counts as a new rule for its target, and an upsert of an
+  already-enabled name isn't a new rule). S7 measured one pipeline at 50 apps and 2,000 rules: delivery p99 2.9 s
+  steady, 6.5 s under churn (docs/SCALABILITY.md). Keep it fast with these rules:
+  - **Place rules when they change, never per batch, and only what changed.** The registry client reads only the
+    subscriptions whose generation moved, and each new revision is placed alone (`PLACED` from then on; `ACTIVE` once a
+    batch decided with it). `hub_progress` records each batch's phases (collect, match, bind, deliver, status): read
+    it before optimizing.
+  - **A (max, sum, count) of generations, not `max(generation)` alone:** a write that commits out of order (it took its
+    number before a later write committed), an app moved to another hub, or a deleted row shows only in the sum or
+    count, and the client then reloads everything (`tests/test_hub_registry.py`).
+  - **Simple rules are matched on the driver** (`hl7rt.matching`): `OR` flattened to AND groups (DNF, at most
+    `MAX_DISJUNCTS`; distribution holds in SQL's three-valued logic too), each indexed in memory on its most selective
+    `=`/`IN` (IDs, then `*_cd`, then points of care, then the rest: never the first clause by default, which is usually
+    a low-selectivity `msg_type`). A record is delivered for the first group that holds (one notification per record and
+    rule). In Spark, a cross join of records and rules was 10× slower than an index, and a broadcast index
+    table gave delivery p99 18 s under churn against 11 s for a hash map (docs/SCALABILITY.md).
+  - **Payloads are Spark's bytes:** Spark renders each field any rule selects once per record, as its `to_json` member
+    (`hl7rt.render`), and the driver joins a rule's members. Never format numbers or timestamps in Python.
+  - **Anything not simple runs as a Spark expression in the same read** (an array of the matched rules per chunk of
+    `hl7.subscriptions.chunk`, `subscriptions.matches_sql`). Don't build expressions with PySpark `Column` calls per
+    rule (a driver round trip each, ~70 ms): build one `F.expr` string per chunk, from checked parts only (the WHERE
+    regenerated from its parsed tree, `rules.identifier`, `rules.literal`). Both paths must match `spark.sql` and send
+    identical notifications (`tests/test_subscriptions.py`, `tests/test_matching.py`, whose oracle is
+    `subscriptions.notifications`, the expression path: keep it).
   - **Patients are SQL.** Dynamic workflows edit a rule's `patient_id IN (...)` list (a new revision, not a new rule:
     no cap slot). Rules may be 200,000 characters (`MAX_SQL`, ~10,000 IDs). Delivery is live from the revision's
     ACTIVE batch: no backfill.
-  - **Read each micro-batch once** (collect into a local DataFrame; batches are bounded by `maxOffsetsPerTrigger`).
-    Each union branch over the source would read it again.
+  - **Read each micro-batch once** (one collect; batches are bounded by `maxOffsetsPerTrigger`). Each union branch over
+    the source would read it again. A source with no rules on this hub isn't read, but its heartbeat is written.
+  - **Bind before publishing.** Each batch records, per app, the revisions that decided it and a digest of its
+    notification IDs (`bindings`, keyed by hub, lane, app, source, query ID, and batch ID). A retry (a failed attempt,
+    or a restart before the commit) decides from its binding, with the revisions as they ran (`revisions`: the registry
+    rewrites a revision's SQL in place), not the latest rules (S6: 20 of 20 retries matched, though rules had changed).
+  - **Deliver per app** (`hl7rt.delivery`): a producer per app, warmed when the app first has a placed rule (a cold
+    producer's first ack took > 2 s and parked every new app once in S7). When an app's topic doesn't acknowledge
+    within 3 × its recent p99 (2–10 s), its notifications are parked in `pending` and drained in order, under an
+    advisory lock per app, once it answers; never another app's. A delivery callback never touches the database (S6:
+    it killed the drainer); late acks are unparked afterwards. Block mode (`on_failure: block`, one app per hub) waits
+    in the batch and never raises: SDP fails the update after more than 2 flow failures.
   - **Serverless doesn't allow `persist`/`cache` or Spark codegen settings.** Restructure the plan instead.
   - **A running continuous pipeline doesn't pick up changed source files on deploy** unless its definition changed.
     Restart it (stop + start-update; it resumes from its checkpoint).
@@ -315,13 +326,13 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   `edp_shared` (`registry.runs_on(hub, tier)`; same code, `hl7.subscriptions.tier`, a longer
   `pipelines.trigger.interval`). The deferred pipeline must equal the shared definition except name, tier, and trigger
   (`tests/test_config_wiring.py`).
-- **One realtime hub pipeline per silver source.** In one pipeline, the five sources' batches shared a driver and a
-  Python process: a batch took ~1.4 s alone and ~4–5 s once every source had live rules (5–8 batches overlapping), so
-  a shorter trigger made delivery slower, not faster. Set the hub's `pipelines.trigger.interval` explicitly
-  (`hub_trigger_interval_seconds`): SDP's default for streaming flows is 4 s, which was most of delivery.
-  `hub_progress.age_ms` (the newest record's age when the batch function starts) and `spark_ms` (Spark's own split of
-  the batch) show time spent outside the hub's phases. Measured and rejected: running a single-read plan on the batch
-  itself instead of collecting it (write 2.0–2.7 s vs ~1.7 s).
+- **One pipeline per hub, a flow per source, 1 s trigger.** With Spark matching, five sources in one pipeline slowed each
+  other (~1.4 s batches alone, ~4–5 s together), so the earlier hub ran a pipeline per source. With driver matching, one
+  pipeline carried 50 apps and 2,000 rules at p99 2.9 s, at a fifth of the cost; one pipeline per source is the option
+  for the tightest tail under churn (2.8 s vs 6.5 s, ~3.7× the cost; set `hl7.subscriptions.sources`). Set the hub's
+  `pipelines.trigger.interval` explicitly (`hub_trigger_interval_seconds`): SDP's default for streaming flows is 4 s,
+  which was most of delivery. The silver reads carry the 5 s hung-request guard (`eventhubs.hub_read_options`): S7's
+  slow batches were all 10–70 s silver reads.
 - **The Apps proxy may cut long requests.** Clients poll `?wait` in short calls (≤25 s); the API caps each call at
   60 s.
 - **Monitoring reads the registry through Unity Catalog.** `make registry` registers the database as `<catalog>_registry`

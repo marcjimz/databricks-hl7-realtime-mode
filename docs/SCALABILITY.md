@@ -38,6 +38,8 @@ Each section names the test that will prove it, and the pass bar.
 
 ### The hub at its rule cap (measured)
 
+*This section and the next measured the previous engine (Spark matching, one pipeline per source, a cap of 1,000 rules across all apps). The current engine is measured in "Hubs at 50 apps and 2,000 rules" below; its cap is 2,000 rules per hub and tier.*
+
 The hub runs at most **1,000 enabled rules across all apps**. The registry enforces the cap (`RULE_LIMIT_REACHED`, in
 `subscription_registry.limits`) and the API returns it as a refusal. For calibration: Fabric Activator allows 500 rules
 per item. The cap has to *perform*, so here is how the hub got there. All runs are at demo load, rules matching 0.1% of
