@@ -1,0 +1,8 @@
+# cp terraform.tfvars.example terraform.tfvars (gitignored), then fill in. The Power BI / Fabric tenant, which may not
+# be the tenant of infra/azure.
+subscription_id = "<subscription in the Fabric tenant>"
+tenant_id       = "<Fabric tenant ID>"
+admins          = ["you@example.com"]
+owner           = "you@example.com"
+# location = "eastus2"
+# sku      = "F2"

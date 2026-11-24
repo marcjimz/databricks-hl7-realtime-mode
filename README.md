@@ -330,6 +330,20 @@ DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle deploy
 DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle run e2e
 ```
 
+## Live Power BI dashboard (optional)
+
+A Power BI report of the same metrics (latency, clinical activity, subscriptions) that re-queries Databricks every 5 s
+while it's open, with DirectQuery on views in `<catalog>.powerbi`, on its own Fabric capacity in any tenant:
+
+```bash
+make fabric-up     # the Fabric capacity (infra/fabric/terraform.tfvars; plan -> you confirm -> apply; F2 bills while running)
+make powerbi       # views, the read-only service principal's grants, and the Power BI model + report (prints the URLs)
+make fabric-pause  # stop Fabric billing (make fabric-resume to start again)
+```
+
+Two steps are in the Power BI UI, once: the model's data source credentials, and the capacity's minimum page-refresh
+interval (5 minutes on a new capacity). Setup, cost, and what's verified: [docs/powerbi.md](docs/powerbi.md).
+
 ## Configure
 
 | What | Where |
@@ -337,6 +351,7 @@ DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle run e2e
 | Subscription, tenant, region, metastore, name prefix, catalog, Event Hubs capacity | `infra/azure/terraform.tfvars` |
 | Topic names, cluster size, feed rate, checkpoint interval, warehouse, registry project | `databricks.yml` |
 | Subscriber apps (service principal, sources, columns) | `subscriber_apps` in `infra/azure/terraform.tfvars` |
+| Fabric tenant, subscription, capacity size and admins (Power BI dashboard) | `infra/fabric/terraform.tfvars` |
 
 ## Repo
 
@@ -344,13 +359,16 @@ DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle run e2e
 infra/azure/     Terraform: workspace, storage, access connector, Event Hubs
 infra/uc.sh      Unity Catalog bootstrap (make uc)
 infra/registry.py  Lakebase subscription registry bootstrap (make registry)
-databricks.yml   bundle variables and targets; resources/ has the pipelines, jobs, and dashboard
+infra/fabric/    Terraform: the Fabric capacity for the live Power BI dashboard
+infra/powerbi.py  Power BI dashboard deploy: views, grants, model, report (make powerbi)
+databricks.yml   bundle variables and targets; resources/ has the pipelines, jobs, and dashboards
+src/dashboards/  the AI/BI dashboards, and powerbi/ (views + the Power BI model and report as data)
 src/hl7rt/       the logic: HL7 parsing, gold, Event Hubs wiring, generators
 src/pipelines/   thin pipeline definitions (including the subscription hub)
 src/registry/    the subscription registry's schema, owner trigger, RLS, and API (Lakebase Postgres)
 src/subscription_api/  the Subscription API (Databricks App): the integration contract; Swagger at <api>/docs
 tests/           unit tests (local Spark)
-docs/            integration guide + api/openapi.json (the contract), latency, subscriptions, scalability plan,
+docs/            integration guide + api/openapi.json (the contract), latency, subscriptions, Power BI, scalability plan,
                  Epic JSON notes, story.html (deck), SPIKE docs; diagrams/ (draw.io + slides)
 examples/        clients and parked designs: subscribers/java/ (an example subscriber; its API client is generated
                  from the contract) and the earlier SQL-file subscriptions
