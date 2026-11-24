@@ -155,18 +155,19 @@ Run every command below from the repo root.
 ### 0. Check everything end to end
 
 ```
-$ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e
+$ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar examples/subscribers/apps/sp-hl7-app-a.properties --e2e
 …
-| 1 | Sign in | profile sp-hl7-realtime-demo | a service principal | 38fafc55-… | PASS |
-| 2 | Connection from the API | GET /api/v1/connection | this app's own topic and credential | hl7_rtm_demo.subscribers.sp-hl7-realtime-demo via sub_sp_hl7_realtime_demo_eventhubs @ hl7rtmaz-ehns.servicebus.windows.net:9093 | PASS |
-| 7 | Skip the API (the registry's Data API) | list_subscriptions via https://… | not available | refused 503 | PASS |
-| 8 | Column not granted | SELECT patient_id FROM silver_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
-| 12 | Subquery | SELECT patient_id FROM silver_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
+| 1 | Sign in | profile sp-hl7-app-a | a service principal | 2c05273b-… | PASS |
+| 2 | Connection from the API | GET /api/v1/connection | this app's own topic and credential | hl7_rtm_demo.subscribers.sp-hl7-app-a via sub_sp_hl7_app_a_eventhubs @ hl7rtmaz-ehns.servicebus.windows.net:9093 | PASS |
+| 3 | This app's hub | GET /api/v1/connection | the hub that runs its realtime rules | edp_shared | PASS |
+| 8 | Skip the API (the registry's Data API) | list_subscriptions via https://… | not available | refused 503 | PASS |
+| 9 | Column not granted | SELECT patient_id FROM silver_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
+| 13 | Subquery | SELECT patient_id FROM silver_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
 …
-| 24 | Cancel | DELETE e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
-| 25 | Hub heartbeat | silver_observations | a batch within 2 minutes | 2026-11-06T01:36:22… | PASS |
+| 25 | Cancel | DELETE e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
+| 26 | Hub heartbeat | edp_shared: silver_observations | a batch within 2 minutes | 2026-11-24T02:49:25… | PASS |
 
-25 checks, 0 failed
+26 checks, 0 failed, 1 skipped
 ```
 
 The 26 checks cover:
@@ -176,7 +177,7 @@ The 26 checks cover:
 - one refusal applying nothing;
 - register → active → notified → changed → cancelled.
 
-[The list](docs/subscriptions.md#end-to-end-checks). The run takes about 2 minutes and exits 1 if any check fails. Run
+[The list](docs/subscriptions.md#end-to-end-checks). The run takes about 2 minutes and exits 1 if any check fails. A check that doesn't apply to the app's grant is SKIP: check 10 needs a source the app isn't granted. Run
 it first: if it passes, the steps below will work.
 
 ### 1. Run the app

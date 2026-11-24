@@ -84,9 +84,27 @@ the PREVIEW channel. The RTM hot path is unchanged.
   usually takes to acknowledge (3 × its recent p99, 2–10 s), its notifications are parked in the registry (`pending`)
   and delivered in order when the topic is back; the other apps' notifications go on.
 
-**Measured, this engine** (spike S7, 2026-11-20, dev, demo load: the same engine over a synthetic registry, every app
-with its own topic, rules matching ~0.1% of a source's records each). Delivery is the app-topic broker time minus the
-source record's broker time:
+**Measured, this engine, on dev** (2026-11-24, demo load, 30 minutes): both patterns at once. app-a on `edp_shared`
+and app-b on its own hub `bu_demo` (run as app-b's service principal), each with the same 7 realtime rules across all
+five sources: one expression rule (`startswith`), and a 200-patient list edited every 20 s. Delivery is the app-topic
+broker time minus the source record's broker time:
+
+| Hub | Notifications | Delivery p50 | p90 | p99 | max | Duplicates | Edit → PLACED p50 / p99 | Edit → ACTIVE p50 / p99 |
+|---|---|---|---|---|---|---|---|---|
+| `edp_shared` (app-a) | 78,571 | 1.31 s | 1.86 s | 2.48 s | 14.0 s | 0 | 1.15 / 2.79 s | 2.0 / 4.33 s |
+| `bu_demo` (app-b) | 78,533 | 1.28 s | 1.83 s | 2.47 s | 13.7 s | 0 | 1.04 / 3.19 s | 1.82 / 3.94 s |
+
+- **Both hubs decided exactly the same records** for every rule (e.g. 24,266 and 24,266 for one rule, 7,379 and 7,379
+  for the expression rule), each on its own pipeline, checkpoint, and identity.
+- **The expression rule's tail is the simple rules' tail** (p99 2.44 / 2.52 s): it runs in the same read.
+- **Batch phases** (p99): the silver read and collect 1.1 s, matching ≤ 5 ms, binding ~40 ms, delivery ~0.5 s. Nothing
+  was parked.
+- **The max:** three minutes had a p99 over 7 s. Two of them (03:12 and 03:21 UTC) hit both hubs at once, so the cause
+  is upstream of the hubs; one (03:32) hit only `bu_demo` (12.2 s against 3.5 s). Not traced.
+- **Edits:** 105 per app, all ACTIVE; times include the API call (the PUT) and the status poll (every 0.25 s).
+
+**Measured, this engine at scale** (spike S7, 2026-11-20, dev, demo load: the same engine over a synthetic registry,
+every app with its own topic, rules matching ~0.1% of a source's records each):
 
 | Apps (rules) | Topology | Delivery p99 steady | p99 under churn (30 membership edits/s) | Cost (estimated) |
 |---|---|---|---|---|

@@ -328,7 +328,8 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   (`tests/test_config_wiring.py`).
 - **One pipeline per hub, a flow per source, 1 s trigger.** With Spark matching, five sources in one pipeline slowed each
   other (~1.4 s batches alone, ~4–5 s together), so the earlier hub ran a pipeline per source. With driver matching, one
-  pipeline carried 50 apps and 2,000 rules at p99 2.9 s, at a fifth of the cost; one pipeline per source is the option
+  pipeline carried 50 apps and 2,000 rules at p99 2.9 s (S7), and on dev `edp_shared` and a team hub each delivered
+  p99 2.5 s with 7 rules (2026-11-24), at a fifth of the cost; one pipeline per source is the option
   for the tightest tail under churn (2.8 s vs 6.5 s, ~3.7× the cost; set `hl7.subscriptions.sources`). Set the hub's
   `pipelines.trigger.interval` explicitly (`hub_trigger_interval_seconds`): SDP's default for streaming flows is 4 s,
   which was most of delivery. The silver reads carry the 5 s hung-request guard (`eventhubs.hub_read_options`): S7's

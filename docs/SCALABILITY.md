@@ -152,6 +152,9 @@ each batch bound to the revisions that decided it.
 - **Isolation (S6):** with one producer for all apps, a deleted app topic stalled the other app (p99 10.2 s against
   3.0 s, 2,207 duplicates). With a producer per app and late acks unparked, the same failure left it at p99 2.8 s, 0
   duplicates. A retried batch decided from its recorded revisions in 20 of 20 tries, though rules had changed.
+- **In the repo, on dev (2026-11-24):** `edp_shared` and a team hub (`bu_demo`, its own service principal) side by
+  side, 7 realtime rules each (one expression rule, one 200-patient list edited every 20 s): delivery p99 2.48 / 2.47 s,
+  max 14.0 / 13.7 s, 0 duplicates, the same records on both hubs, edit → ACTIVE p99 4.3 / 3.9 s (docs/subscriptions.md).
 - **Missed in S7:** the churn target (p99 5 s; one pipeline measured 6.5 s) and edit → ACTIVE p99 3 s (3.0–4.0 s).
   Duplicates came only around restarts (3,886 at one cold restart). Not measured: a mix of simple and expression rules
   at scale, and the real registry at 2,000 rules.
