@@ -133,7 +133,7 @@ hubs (next section); the hash shard below stays a plan.
 
 S6 compared one hub pipeline per app against one shared hub, with two real service principals; S7 ran the shared
 engine at 50 apps and 2,000 rules over a synthetic registry, each app with its own topic, on the same live silver
-(spike code and runs: `../hl7-rtm-spikes/app-hubs`, outside the repo). The engine (`src/hl7rt/engine.py`) is that
+(the spikes' code and runs are kept outside the repo; their resources were deleted after the runs). The engine (`src/hl7rt/engine.py`) is that
 spike's: matching on the driver, a producer per app, notifications parked per app when its topic refuses writes, and
 each batch bound to the revisions that decided it.
 
