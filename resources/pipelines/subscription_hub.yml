@@ -1,32 +1,80 @@
 # Subscription hub — silver entity topics -> each subscriber app's own topic, by rules registered at runtime in Lakebase.
 # Micro-batch (NOT Real-Time Mode): it needs foreachBatch to apply a changing rule set, which RTM doesn't support.
-# foreach_batch_sink is Public Preview, so this pipeline (only) runs on the PREVIEW channel.
+# foreach_batch_sink is Public Preview, so these pipelines (only) run on the PREVIEW channel.
+# The same code runs as several pipelines (each names its sources in hl7.subscriptions.sources; unset, all of them):
+#   - realtime tier: one pipeline per silver source. In one pipeline, the five sources' batches shared a driver and a
+#     Python process and slowed each other (measured: ~1.4 s batches alone, ~4-5 s together; docs/subscriptions.md).
+#   - deferred tier (work that can wait, e.g. billing): one pipeline for every source, on a longer trigger, so that load
+#     never shares a batch with clinical rules.
+# They differ only in name, sources, tier, and trigger (tests/test_config_wiring.py).
+x-hub: &hub
+  catalog: ${var.catalog}
+  schema: ${resources.schemas.hl7.name}
+  serverless: true
+  continuous: true
+  channel: PREVIEW
+  root_path: ../../src
+  libraries:
+    - glob:
+        include: ../../src/pipelines/subscription_hub/**
+  environment:
+    dependencies:
+      - pg8000>=1.31        # pure Python; psycopg[binary] aborted the serverless Python process
+      - databricks-sdk>=0.159  # Lakebase endpoint + database credential APIs
+      - sqlglot>=30.27         # the hub re-checks each SQL rule (src/subscription_api/rules.py)
+x-hub-conf: &hub_conf
+  hl7.eh.namespace: ${var.eh_namespace}
+  hl7.eh.service_credential: ${var.eh_service_credential}
+  hl7.registry.endpoint: ${var.registry_endpoint}
+  hl7.registry.database: ${var.registry_database}
+  hl7.topics.silver_encounters: ${var.hl7_silver_encounters_topic}
+  hl7.topics.silver_observations: ${var.hl7_silver_observations_topic}
+  hl7.topics.silver_orders: ${var.hl7_silver_orders_topic}
+  hl7.topics.silver_diagnoses: ${var.hl7_silver_diagnoses_topic}
+  hl7.topics.silver_documents: ${var.hl7_silver_documents_topic}
+  hl7.subscriptions.chunk: ${var.hub_rules_per_projection}
+  hl7.subscriptions.max_records_per_batch: ${var.hub_max_records_per_batch}
+x-realtime: &realtime
+  <<: *hub_conf
+  hl7.subscriptions.tier: realtime
+  pipelines.trigger.interval: ${var.hub_trigger_interval_seconds} seconds  # SDP's default is 4 s
+
 resources:
   pipelines:
-    subscription_hub:
-      name: hl7rt-${bundle.target}-subscription-hub
-      catalog: ${var.catalog}
-      schema: ${resources.schemas.hl7.name}
-      serverless: true
-      continuous: true
-      channel: PREVIEW
-      root_path: ../../src
-      libraries:
-        - glob:
-            include: ../../src/pipelines/subscription_hub/**
-      environment:
-        dependencies:
-          - pg8000>=1.31        # pure Python; psycopg[binary] aborted the serverless Python process
-          - databricks-sdk>=0.159  # Lakebase endpoint + database credential APIs
-          - sqlglot>=30.27         # the hub re-checks each SQL rule (src/subscription_api/rules.py)
+    subscription_hub_encounters:
+      <<: *hub
+      name: hl7rt-${bundle.target}-subscription-hub-encounters
       configuration:
-        hl7.eh.namespace: ${var.eh_namespace}
-        hl7.eh.service_credential: ${var.eh_service_credential}
-        hl7.registry.endpoint: ${var.registry_endpoint}
-        hl7.registry.database: ${var.registry_database}
-        hl7.topics.silver_encounters: ${var.hl7_silver_encounters_topic}
-        hl7.topics.silver_observations: ${var.hl7_silver_observations_topic}
-        hl7.topics.silver_orders: ${var.hl7_silver_orders_topic}
-        hl7.topics.silver_diagnoses: ${var.hl7_silver_diagnoses_topic}
-        hl7.subscriptions.chunk: ${var.hub_rules_per_projection}
-        hl7.subscriptions.max_records_per_batch: ${var.hub_max_records_per_batch}
+        <<: *realtime
+        hl7.subscriptions.sources: silver_encounters
+    subscription_hub_observations:
+      <<: *hub
+      name: hl7rt-${bundle.target}-subscription-hub-observations
+      configuration:
+        <<: *realtime
+        hl7.subscriptions.sources: silver_observations
+    subscription_hub_orders:
+      <<: *hub
+      name: hl7rt-${bundle.target}-subscription-hub-orders
+      configuration:
+        <<: *realtime
+        hl7.subscriptions.sources: silver_orders
+    subscription_hub_diagnoses:
+      <<: *hub
+      name: hl7rt-${bundle.target}-subscription-hub-diagnoses
+      configuration:
+        <<: *realtime
+        hl7.subscriptions.sources: silver_diagnoses
+    subscription_hub_documents:
+      <<: *hub
+      name: hl7rt-${bundle.target}-subscription-hub-documents
+      configuration:
+        <<: *realtime
+        hl7.subscriptions.sources: silver_documents
+    subscription_hub_deferred:
+      <<: *hub
+      name: hl7rt-${bundle.target}-subscription-hub-deferred
+      configuration:
+        <<: *hub_conf
+        hl7.subscriptions.tier: deferred
+        pipelines.trigger.interval: ${var.hub_deferred_interval_seconds} seconds

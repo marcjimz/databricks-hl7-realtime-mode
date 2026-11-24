@@ -1,7 +1,11 @@
 """The hub's side of the subscription registry (Lakebase Postgres; schema in src/registry/registry.sql).
 
-Read once per micro-batch: one indexed max(generation) query, and a full reload only when it moved. Writes the hub's
-verdict per revision (status) and a heartbeat per source, so apps can tell a quiet stream from a stopped hub.
+Read once per micro-batch: one query for the registry's (max, sum) of generations, and when that moved, only the
+subscriptions changed since (an indexed range on generation). Every write takes a new generation, so a change shows in
+both numbers; a write that committed after a later one was read shows in the sum, and the client then reloads
+everything. Each source has its own generation (from its subscriptions' generations), so a change to one source's rules
+leaves the others' compiled sets alone. Writes the hub's verdict per revision (status) and a heartbeat per source, so
+apps can tell a quiet stream from a stopped hub.
 
 The hub's flows (one per silver source) run batches on concurrent threads and share this one connection, which pg8000
 doesn't allow, so every call holds a lock (each is a single short query).
@@ -11,6 +15,7 @@ Python; psycopg[binary] aborted the serverless pipeline process (native library 
 """
 
 import contextlib
+import json
 import threading
 import time
 from functools import wraps
@@ -20,11 +25,18 @@ from pg8000.exceptions import InterfaceError
 from hl7rt.subscriptions import Rule
 from subscription_api.db import TOKEN_SECONDS, connect
 
+# A subscription that names a data template is held to the template's columns (none, if the template was removed).
 _RULES = (
     "SELECT s.subscription_id::text, s.name, s.revision, s.enabled, s.source, s.where_sql, s.fields, "
-    "a.destination_topic, a.allowed_fields "
-    "FROM subscription_registry.subscriptions s JOIN subscription_registry.apps a ON a.app_role = s.owner"
+    "a.destination_topic, CASE WHEN s.template IS NULL THEN a.allowed_fields ELSE coalesce(t.fields, '{}') END, "
+    "s.generation, s.tier "
+    "FROM subscription_registry.subscriptions s JOIN subscription_registry.apps a ON a.app_role = s.owner "
+    "LEFT JOIN subscription_registry.templates t ON t.app_role = s.owner AND t.name = s.template"
 )
+_SIGNATURE = (
+    "SELECT coalesce(max(generation), 0), coalesce(sum(generation), 0)::text FROM subscription_registry.subscriptions"
+)
+LOOKBACK = 100  # generations re-read on each change: writes in flight together commit within a few numbers
 
 
 def _locked(method):
@@ -44,11 +56,15 @@ def _locked(method):
 
 
 class Registry:
-    def __init__(self, endpoint: str, database: str):
-        self._endpoint, self._database = endpoint, database
-        self._conn, self._opened, self._generation = None, 0.0, None
+    """One hub's view of the registry: the subscriptions of its delivery tier (realtime or deferred)."""
+
+    def __init__(self, endpoint: str, database: str, tier: str = "realtime"):
+        self._endpoint, self._database, self.tier = endpoint, database, tier
+        self._conn, self._opened, self._generation, self._signature = None, 0.0, None, None
+        self._rows: dict[str, tuple] = {}  # subscription id -> its row (_RULES)
         self._enabled: list[tuple] = []
         self._disabled: list[tuple] = []
+        self._sources: dict[str, tuple] = {}  # source -> (max, sum, count) of its subscriptions' generations
         self._reported: dict[str, tuple[int, str]] = {}
         self._lock = threading.RLock()
 
@@ -67,15 +83,28 @@ class Registry:
 
     @_locked
     def refresh(self) -> bool:
-        """Reload subscriptions if the registry changed since the last call. True when it did."""
+        """Read the subscriptions changed since the last call (all of them the first time). True when any did."""
         db = self._db()
-        generation = db.run("SELECT coalesce(max(generation), 0) FROM subscription_registry.subscriptions")[0][0]
-        if generation == self._generation:
+        top, total = db.run(_SIGNATURE)[0]
+        signature = (int(top), int(total))
+        if signature == self._signature:
             return False
-        rows = db.run(_RULES)
-        self._enabled = [r for r in rows if r[3]]
-        self._disabled = [r for r in rows if not r[3]]
-        self._generation = generation
+        rows = None
+        if self._signature is not None:
+            rows = dict(self._rows)
+            rows.update({r[0]: r for r in db.run(_RULES + " WHERE s.generation > :g", g=self._generation - LOOKBACK)})
+            if sum(r[9] for r in rows.values()) != signature[1]:
+                rows = None  # a write committed out of order, or a row was deleted: read everything
+        if rows is None:
+            rows = {r[0]: r for r in db.run(_RULES)}
+        self._rows, self._generation, self._signature = rows, signature[0], signature
+        mine = [r for r in rows.values() if r[10] == self.tier]
+        self._enabled = [r for r in mine if r[3]]
+        self._disabled = [r for r in mine if not r[3]]
+        sources: dict[str, list[int]] = {}
+        for r in mine:
+            sources.setdefault(r[4], []).append(r[9])
+        self._sources = {source: (max(g), sum(g), len(g)) for source, g in sources.items()}
         return True
 
     @_locked
@@ -111,13 +140,26 @@ class Registry:
         return self._generation
 
     @_locked
-    def progress(self, source: str, batch_id: int, rules: int, ms: dict[str, int]):
+    def source_generation(self, source: str) -> tuple:
+        """`source`'s own generation: changes when one of its subscriptions does, or one moves to another source."""
+        return self._sources.get(source, (0, 0, 0))
+
+    def hub_key(self, source: str) -> str:
+        """How this hub names `source` in its heartbeat and progress: the source, prefixed by the tier if deferred."""
+        return source if self.tier == "realtime" else f"{self.tier}:{source}"
+
+    @_locked
+    def progress(self, source: str, batch_id: int, rules: int, ms: dict[str, int], age_ms=None, spark_ms=None):
         """Where this batch's time went (subscription_registry.hub_progress), for docs/SCALABILITY.md."""
         self._db().run(
             "INSERT INTO subscription_registry.hub_progress (source, batch_id, rules, refresh_ms, prepare_ms, "
-            "compile_ms, write_ms, report_ms) VALUES (:s, :b, :n, :refresh, :prepare, :compile, :write, :report) "
-            "ON CONFLICT (source, batch_id) DO NOTHING",
-            s=source, b=batch_id, n=rules, **ms,
+            "compile_ms, write_ms, report_ms, age_ms, spark_ms) VALUES (:s, :b, :n, :refresh, :prepare, :compile, "
+            ":write, :report, :age, CAST(:spark AS jsonb)) ON CONFLICT (source, batch_id) DO UPDATE SET at = now(), "
+            "rules = excluded.rules, refresh_ms = excluded.refresh_ms, prepare_ms = excluded.prepare_ms, "
+            "compile_ms = excluded.compile_ms, write_ms = excluded.write_ms, report_ms = excluded.report_ms, "
+            "age_ms = excluded.age_ms, spark_ms = excluded.spark_ms",  # a new checkpoint numbers batches from 0 again
+            s=self.hub_key(source), b=batch_id, n=rules, age=age_ms,
+            spark=json.dumps(spark_ms) if spark_ms else None, **ms,
         )  # fmt: skip
 
     @_locked
@@ -125,5 +167,5 @@ class Registry:
         self._db().run(
             "INSERT INTO subscription_registry.hub_heartbeat VALUES (:s, now(), :b, :n) ON CONFLICT (source) "
             "DO UPDATE SET last_batch_at = now(), batch_id = excluded.batch_id, rules = excluded.rules",
-            s=source, b=batch_id, n=rules,
+            s=self.hub_key(source), b=batch_id, n=rules,
         )  # fmt: skip

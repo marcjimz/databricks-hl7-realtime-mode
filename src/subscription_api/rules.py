@@ -16,7 +16,9 @@ from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 DIALECT = "databricks"
 # = hl7rt.subscriptions.SOURCES (tests/test_subscriptions.py keeps them in step)
-SOURCES = frozenset({"silver_encounters", "silver_observations", "silver_orders", "silver_diagnoses"})
+SOURCES = frozenset(
+    {"silver_encounters", "silver_observations", "silver_orders", "silver_diagnoses", "silver_documents"}
+)
 # Functions that reach outside the record. Unqualified names only: any qualified function (a UC UDF) is refused too.
 DENIED_FUNCTIONS = {
     "http_request", "secret", "try_secret", "reflect", "try_reflect", "java_method", "remote_query", "vector_search",
@@ -24,7 +26,7 @@ DENIED_FUNCTIONS = {
     "rand", "random", "randn", "uuid", "shuffle", "monotonically_increasing_id", "spark_partition_id",
 }  # fmt: skip
 DENIED_PREFIXES = ("ai_", "read_")
-MAX_SQL = 10_000  # characters: a rule is one filter, and parsing stays bounded
+MAX_SQL = 200_000  # characters: room for an IN list of ~10,000 patient IDs; parsing stays bounded
 NOT_ALLOWED = {
     exp.Join: "a join", exp.Subquery: "a subquery", exp.Exists: "a subquery", exp.With: "a CTE", exp.Union: "UNION",
     exp.Intersect: "INTERSECT", exp.Except: "EXCEPT", exp.Group: "GROUP BY", exp.Having: "HAVING",
@@ -148,6 +150,24 @@ def check_condition(condition: str | None, granted: set[str]) -> str | None:
     return node.sql(dialect=DIALECT, comments=False)
 
 
+def shape(query: str) -> str:
+    """The query with its literals blanked (a string is '', a number 0) and each IN list cut to one of each kind: what
+    Databricks' compile depends on. Two rules of one shape compile the same way (an edited patient list, say)."""
+
+    def blank(node):
+        if isinstance(node, exp.Literal):
+            return exp.Literal.string("") if node.is_string else exp.Literal.number(0)
+        if isinstance(node, exp.In) and not node.args.get("query"):
+            kinds = {}
+            for v in node.expressions:
+                kinds.setdefault(type(v).__name__ + str(getattr(v, "is_string", "")), v)
+            node.set("expressions", list(kinds.values()))
+        return node
+
+    tree = sqlglot.parse_one(query, read=DIALECT)
+    return tree.transform(blank).sql(dialect=DIALECT, comments=False)
+
+
 def literal(value: str) -> str:
     """`value` as a Databricks SQL string literal, escaped."""
     return exp.Literal.string(value).sql(dialect=DIALECT)
@@ -184,67 +204,97 @@ def _literal_of(node, kind: str):
     return None
 
 
-def clauses(condition: str | None, kinds: dict[str, str]) -> list[dict] | None:
-    """The condition as simple clauses [{col, op, str|num|strs|nums}], all of which must hold, or None if it isn't one.
+MAX_DISJUNCTS = 64  # branches of a rule's OR, flattened; past this the rule is evaluated as an expression
+
+
+class _NotSimple(Exception):
+    pass
+
+
+def disjuncts(condition: str | None, kinds: dict[str, str]) -> list[list[dict]] | None:
+    """The condition as an OR of AND groups of simple clauses, [[{col, op, str|num|strs|nums}, ...], ...], or None if
+    it isn't one (or has more than MAX_DISJUNCTS groups). A record matches when every clause of some group holds.
 
     kinds: column -> 'string' or 'number' (other types, e.g. timestamps, keep the expression path). A clause compares
-    one column with a literal of its own kind: =, <>, <, <=, >, >=, BETWEEN, [NOT] IN (literals), IS [NOT] NULL.
+    one column with a literal of its own kind: =, <>, <, <=, >, >=, BETWEEN, [NOT] IN (literals), IS [NOT] NULL. AND
+    and OR distribute in SQL's three-valued logic too, so the flattened form matches exactly the same records.
     """
     if not condition:
-        return []
-    node = sqlglot.parse_one(condition, read=DIALECT)
-    conjuncts, out = [], []
+        return [[]]
+    try:
+        return _dnf(sqlglot.parse_one(condition, read=DIALECT), kinds)
+    except _NotSimple:
+        return None
 
-    def flatten(n):
-        while isinstance(n, exp.Paren):
-            n = n.this
-        if isinstance(n, exp.And):
-            flatten(n.this)
-            flatten(n.expression)
-        else:
-            conjuncts.append(n)
 
-    flatten(node)
-    for c in conjuncts:
-        negate = isinstance(c, exp.Not)
-        inner = c.this if negate else c
-        while isinstance(inner, exp.Paren):
-            inner = inner.this
-        if isinstance(inner, exp.Is) and isinstance(inner.this, exp.Column) and isinstance(inner.expression, exp.Null):
-            if inner.this.name not in kinds:
-                return None
-            out.append({"col": inner.this.name, "op": "not_null" if negate else "null"})
-            continue
-        if isinstance(inner, exp.In) and isinstance(inner.this, exp.Column) and not inner.args.get("query"):
-            col = inner.this.name
-            kind = kinds.get(col)
-            values = [_literal_of(v, kind) for v in inner.expressions] if kind else [None]
-            if not values or any(v is None for v in values):
-                return None
-            key = "strs" if kind == "string" else "nums"
-            out.append({"col": col, "op": ("nin_" if negate else "in_") + kind[0], key: values})
-            continue
-        if negate:
-            return None  # NOT of anything else keeps the expression path
-        if isinstance(inner, exp.Between) and isinstance(inner.this, exp.Column):
-            col, kind = inner.this.name, kinds.get(inner.this.name)
-            low, high = _literal_of(inner.args["low"], kind or ""), _literal_of(inner.args["high"], kind or "")
-            if kind is None or low is None or high is None:
-                return None
-            key = "str" if kind == "string" else "num"
-            out += [{"col": col, "op": "ge_" + kind[0], key: low}, {"col": col, "op": "le_" + kind[0], key: high}]
-            continue
-        op = _COMPARE.get(type(inner))
-        if op is None:
-            return None
-        left, right = inner.this, inner.expression
-        if not isinstance(left, exp.Column):
-            left, right, op = right, left, _FLIP[op]
-        if not isinstance(left, exp.Column) or left.name not in kinds:
-            return None
-        kind = kinds[left.name]
-        value = _literal_of(right, kind)
-        if value is None:
-            return None
-        out.append({"col": left.name, "op": f"{op}_{kind[0]}", ("str" if kind == "string" else "num"): value})
+def _dnf(n, kinds: dict[str, str]) -> list[list[dict]]:
+    while isinstance(n, exp.Paren):
+        n = n.this
+    if isinstance(n, exp.And):
+        out = [a + b for a in _dnf(n.this, kinds) for b in _dnf(n.expression, kinds)]
+    elif isinstance(n, exp.Or):
+        out = _dnf(n.this, kinds) + _dnf(n.expression, kinds)
+    else:
+        out = [_clause(n, kinds)]
+    if len(out) > MAX_DISJUNCTS:
+        raise _NotSimple
     return out
+
+
+def _clause(c, kinds: dict[str, str]) -> list[dict]:
+    """One comparison as clauses (BETWEEN is two), or _NotSimple."""
+    negate = isinstance(c, exp.Not)
+    inner = c.this if negate else c
+    while isinstance(inner, exp.Paren):
+        inner = inner.this
+    if isinstance(inner, exp.Is) and isinstance(inner.this, exp.Column) and isinstance(inner.expression, exp.Null):
+        if inner.this.name not in kinds:
+            raise _NotSimple
+        return [{"col": inner.this.name, "op": "not_null" if negate else "null"}]
+    if isinstance(inner, exp.In) and isinstance(inner.this, exp.Column) and not inner.args.get("query"):
+        col = inner.this.name
+        kind = kinds.get(col)
+        values = [_literal_of(v, kind) for v in inner.expressions] if kind else [None]
+        if not values or any(v is None for v in values):
+            raise _NotSimple
+        key = "strs" if kind == "string" else "nums"
+        return [{"col": col, "op": ("nin_" if negate else "in_") + kind[0], key: values}]
+    if negate:
+        raise _NotSimple  # NOT of anything else keeps the expression path
+    if isinstance(inner, exp.Between) and isinstance(inner.this, exp.Column):
+        col, kind = inner.this.name, kinds.get(inner.this.name)
+        low, high = _literal_of(inner.args["low"], kind or ""), _literal_of(inner.args["high"], kind or "")
+        if kind is None or low is None or high is None:
+            raise _NotSimple
+        key = "str" if kind == "string" else "num"
+        return [{"col": col, "op": "ge_" + kind[0], key: low}, {"col": col, "op": "le_" + kind[0], key: high}]
+    op = _COMPARE.get(type(inner))
+    if op is None:
+        raise _NotSimple
+    left, right = inner.this, inner.expression
+    if not isinstance(left, exp.Column):
+        left, right, op = right, left, _FLIP[op]
+    if not isinstance(left, exp.Column) or left.name not in kinds:
+        raise _NotSimple
+    kind = kinds[left.name]
+    value = _literal_of(right, kind)
+    if value is None:
+        raise _NotSimple
+    return [{"col": left.name, "op": f"{op}_{kind[0]}", ("str" if kind == "string" else "num"): value}]
+
+
+# Index keys, most selective first: identifiers (one patient, visit, order), then codes, then locations, then any other
+# string (message types, code systems). Ties go to the clause with fewer values.
+_IDENTIFIERS = {"patient_id", "visit_id", "account_id", "msg_control_id", "order_id", "document_id"}
+
+
+def index_key(group: list[dict]) -> dict | None:
+    """The clause of an AND group to index it on: its most selective string = or IN, or None if it has none."""
+    keys = [c for c in group if c["op"] in ("eq_s", "in_s")]
+
+    def rank(c):
+        col = c["col"]
+        tier = 0 if col in _IDENTIFIERS else 1 if col.endswith("_cd") else 2 if "point_of_care" in col else 3
+        return tier, len(c.get("strs") or [c.get("str")])
+
+    return min(keys, key=rank, default=None)

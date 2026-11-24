@@ -131,5 +131,9 @@ a whole criteria tree becomes one rule on one source:
 - **Delivery isn't part of a rule.** Routing to REST hooks, email, and AMQP is the existing service's job. Here each
   app receives its matches on its own Event Hub (docs/integration.md), and anything that fans out from there is the
   app's.
-- **Their shape is ours, apart from OR.** Long `IN` lists, `=`, `<>`, ranges, and an OR of AND groups are all plain
-  Databricks SQL that the Subscription API accepts today.
+- **Their shape is ours.** Long `IN` lists, `=`, `<>`, ranges, and an OR of AND groups are all plain Databricks SQL that
+  the Subscription API accepts, and the hub runs them as indexed data: each AND group on its most selective list
+  (patients when there is one, else codes or points of care), never on the message type
+  (`tests/test_subscriptions.py` checks each rule above).
+- **Their patient-specific subscriptions are rule edits.** A workflow that adds a patient on registration and removes
+  them on discharge edits the rule's `patient_id IN (...)` list (docs/subscriptions.md, "Dynamic patient rules").

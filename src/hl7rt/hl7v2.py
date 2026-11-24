@@ -11,11 +11,14 @@ names are the Epic silver contract's):
     PID-3.1/.4  patient_id / _namespace      PID-4.1/.4  patient_alt_id / _namespace
     PID-7       date_of_birth_dt             PID-8 sex   PID-10.1 race   PID-22.1 ethnicity   PID-18.1 account_id
     PV1-2       patient_class                PV1-3.1 patient_point_of_care   PV1-3.4 patient_facility
-    PV1-19.1    visit_id                     PV1-44 admit_dt_tm
+    PV1-4       admission_type               PV1-6.1 prior_point_of_care (transfers)
+    PV1-19.1    visit_id                     PV1-44 admit_dt_tm   PV1-45 discharge_dt_tm   PV1-36 discharge_disposition
+    PV2-3.1/.2  chief_complaint_cd / chief_complaint
     MSH-4.1     msg_sending_facility         MSH-7 msg_dt_tm   MSH-9.1^9.2 msg_type   MSH-10 msg_control_id
     MSH-13      msg_seq
-    OBR-4 (first OBR)  order_cd/_desc/_system (.1-.3), alt_order_* (.4-.6)
-    TXA-17             document_completion_status
+    OBR-4 (first OBR)  order_cd/_desc/_system (.1-.3), alt_order_* (.4-.6)   OBR-2.1 order_id (placer)
+    OBR-24             diagnostic_service (e.g. RAD)                           ORC-1 order_control (NW, RE, CA, ...)
+    TXA-2.1 document_type   TXA-4 document_dt_tm   TXA-12.1 document_id   TXA-17 document_completion_status
     each OBX   set_id (1), value_type (2), observation_cd/_desc/_system (3.1-.3), alt_observation_* (3.4-.6),
                value (5), units (6.1), reference_range (7), abnormal_flag (8), result_status (11),
                observation_dt_tm (14)
@@ -145,14 +148,15 @@ def _diagnosis(dg1: Column) -> Column:
 # below is a cheap array lookup. (Inlining segments() per field produced a 379 KB plan with 290 split() calls
 # per record and starved the RTM driver in GC; see docs/latency.md's history link, Phase 2.)
 _SEGS = "_hl7_segs"
-_SEGMENT_COLS = {"MSH": "_hl7_msh", "PID": "_hl7_pid", "PV1": "_hl7_pv1", "OBR": "_hl7_obr", "TXA": "_hl7_txa"}
+_SEGMENT_COLS = {"MSH": "_hl7_msh", "PID": "_hl7_pid", "PV1": "_hl7_pv1", "PV2": "_hl7_pv2", "ORC": "_hl7_orc",
+                 "OBR": "_hl7_obr", "TXA": "_hl7_txa"}  # fmt: skip
 _REPEATING = {"OBX": "_hl7_obx", "DG1": "_hl7_dg1"}
 _WORK_COLS = [_SEGS, *_SEGMENT_COLS.values(), *_REPEATING.values()]
 
 
 def with_segments(df: DataFrame, msg: Column) -> DataFrame:
-    """Adds the working columns: all segments, the first MSH/PID/PV1/OBR/TXA, and every OBX and DG1 (as field
-    arrays)."""
+    """Adds the working columns: all segments, the first MSH/PID/PV1/PV2/ORC/OBR/TXA, and every OBX and DG1 (as
+    field arrays)."""
     df = df.withColumn(_SEGS, segments(msg))
     segs = F.col(_SEGS)
     return df.select(
@@ -170,8 +174,10 @@ def _seg(name: str) -> Column:
 MESSAGE_FIELDS: list[str] = [
     "patient_id", "patient_id_namespace", "patient_alt_id", "patient_alt_id_namespace", "date_of_birth_dt", "sex",
     "race", "ethnicity", "account_id", "visit_id", "patient_class", "patient_point_of_care", "patient_facility",
-    "admit_dt_tm", "msg_type", "msg_control_id", "msg_dt_tm", "msg_sending_facility", "msg_seq", "order_cd",
-    "order_cd_desc", "order_cd_system", "alt_order_cd", "alt_order_cd_desc", "alt_order_cd_system",
+    "admission_type", "prior_point_of_care", "admit_dt_tm", "discharge_dt_tm", "discharge_disposition",
+    "chief_complaint_cd", "chief_complaint", "msg_type", "msg_control_id", "msg_dt_tm", "msg_sending_facility",
+    "msg_seq", "order_id", "order_control", "order_cd", "order_cd_desc", "order_cd_system", "alt_order_cd",
+    "alt_order_cd_desc", "alt_order_cd_system", "diagnostic_service", "document_id", "document_type", "document_dt_tm",
     "document_completion_status",
 ]  # fmt: skip
 
@@ -179,7 +185,7 @@ MESSAGE_FIELDS: list[str] = [
 def message_struct() -> Column:
     """One message: MESSAGE_FIELDS, then `observations` (every OBX) and `diagnoses` (every DG1), read from
     with_segments() columns."""
-    msh, pid, pv1, obr, txa = _seg("MSH"), _seg("PID"), _seg("PV1"), _seg("OBR"), _seg("TXA")
+    msh, pid, pv1, pv2, orc, obr, txa = (_seg(n) for n in ("MSH", "PID", "PV1", "PV2", "ORC", "OBR", "TXA"))
     msg_type = F.concat_ws("^", field(msh, 9, 1), field(msh, 9, 2))
     return F.struct(
         # Patient / visit
@@ -196,21 +202,33 @@ def message_struct() -> Column:
         field(pv1, 2).alias("patient_class"),
         field(pv1, 3, 1).alias("patient_point_of_care"),
         field(pv1, 3, 4).alias("patient_facility"),
+        field(pv1, 4).alias("admission_type"),
+        field(pv1, 6, 1).alias("prior_point_of_care"),
         hl7_timestamp(field(pv1, 44)).alias("admit_dt_tm"),
+        hl7_timestamp(field(pv1, 45)).alias("discharge_dt_tm"),
+        field(pv1, 36).alias("discharge_disposition"),
+        field(pv2, 3, 1).alias("chief_complaint_cd"),
+        field(pv2, 3, 2).alias("chief_complaint"),
         # Message
         F.when(msg_type != "", msg_type).alias("msg_type"),
         field(msh, 10).alias("msg_control_id"),
         hl7_timestamp(field(msh, 7)).alias("msg_dt_tm"),
         field(msh, 4, 1).alias("msg_sending_facility"),
         field(msh, 13).alias("msg_seq"),
-        # Order (first OBR)
+        # Order (first ORC/OBR)
+        field(obr, 2, 1).alias("order_id"),
+        field(orc, 1).alias("order_control"),
         field(obr, 4, 1).alias("order_cd"),
         field(obr, 4, 2).alias("order_cd_desc"),
         field(obr, 4, 3).alias("order_cd_system"),
         field(obr, 4, 4).alias("alt_order_cd"),
         field(obr, 4, 5).alias("alt_order_cd_desc"),
         field(obr, 4, 6).alias("alt_order_cd_system"),
+        field(obr, 24).alias("diagnostic_service"),
         # Document
+        field(txa, 12, 1).alias("document_id"),
+        field(txa, 2, 1).alias("document_type"),
+        hl7_timestamp(field(txa, 4)).alias("document_dt_tm"),
         field(txa, 17).alias("document_completion_status"),
         F.transform(F.col(_REPEATING["OBX"]), _observation).alias("observations"),
         F.transform(F.col(_REPEATING["DG1"]), _diagnosis).alias("diagnoses"),

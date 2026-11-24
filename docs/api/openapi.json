@@ -449,6 +449,24 @@
             "title": "Destination",
             "description": "Your topic: where notifications arrive"
           },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template",
+            "description": "The data template the rule is held to, if any"
+          },
+          "tier": {
+            "type": "string",
+            "title": "Tier",
+            "description": "realtime or deferred",
+            "default": "realtime"
+          },
           "unchanged": {
             "anyOf": [
               {
@@ -678,6 +696,31 @@
             "examples": [
               "SELECT patient_id, value_num, units FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"
             ]
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template",
+            "description": "A data template granted to your app: the rule may read, filter on, and receive only the template's columns (TEMPLATE_DENIED otherwise). Omitted: your app's whole grant.",
+            "examples": [
+              "ed-respiratory-monitoring"
+            ]
+          },
+          "tier": {
+            "type": "string",
+            "enum": [
+              "realtime",
+              "deferred"
+            ],
+            "title": "Tier",
+            "description": "realtime: delivered within seconds (clinical). deferred: delivered by a separate hub on a longer trigger, for work that can wait (e.g. billing); it never shares a batch with realtime rules.",
+            "default": "realtime"
           }
         },
         "type": "object",
@@ -693,6 +736,31 @@
             "type": "string",
             "title": "Sql",
             "description": "SELECT <columns> FROM <silver source> WHERE <filter>, in Databricks SQL"
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template",
+            "description": "A data template granted to your app: the rule may read, filter on, and receive only the template's columns (TEMPLATE_DENIED otherwise). Omitted: your app's whole grant.",
+            "examples": [
+              "ed-respiratory-monitoring"
+            ]
+          },
+          "tier": {
+            "type": "string",
+            "enum": [
+              "realtime",
+              "deferred"
+            ],
+            "title": "Tier",
+            "description": "realtime: delivered within seconds (clinical). deferred: delivered by a separate hub on a longer trigger, for work that can wait (e.g. billing); it never shares a batch with realtime rules.",
+            "default": "realtime"
           }
         },
         "type": "object",
@@ -717,7 +785,7 @@
           "code": {
             "type": "string",
             "title": "Code",
-            "description": "Databricks' error class (UNRESOLVED_COLUMN, PARSE_SYNTAX_ERROR, ...) or ours (SQL_NOT_ALLOWED, INVALID_NAME, RULE_LIMIT_REACHED)"
+            "description": "Databricks' error class (UNRESOLVED_COLUMN, PARSE_SYNTAX_ERROR, ...) or ours (SQL_NOT_ALLOWED, INVALID_NAME, RULE_LIMIT_REACHED, TEMPLATE_DENIED)"
           },
           "message": {
             "type": "string",
@@ -790,7 +858,7 @@
             },
             "type": "object",
             "title": "Hub",
-            "description": "Source -> the hub's last batch time (ISO 8601)"
+            "description": "Source -> the hub's last batch time (ISO 8601); the deferred hub's sources are prefixed 'deferred:'"
           }
         },
         "type": "object",
@@ -835,6 +903,22 @@
             },
             "type": "array",
             "title": "Fields"
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template"
+          },
+          "tier": {
+            "type": "string",
+            "title": "Tier",
+            "default": "realtime"
           },
           "state": {
             "type": "string",

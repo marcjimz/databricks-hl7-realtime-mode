@@ -43,9 +43,11 @@ output "subscriber_apps" {
   description = "Per subscriber app: SP application ID, its hub, its connector (+ identity), and its grants. Read by make uc / registry."
   value = {
     for k, v in var.subscriber_apps : k => {
-      application_id         = v.application_id
-      sources                = v.sources
-      fields                 = v.fields
+      application_id = v.application_id
+      # its grant: its own sources and columns plus every template's
+      sources                = distinct(concat(v.sources, flatten([for t in v.templates : var.subscriber_templates[t].sources])))
+      fields                 = distinct(concat(v.fields, flatten([for t in v.templates : var.subscriber_templates[t].fields])))
+      templates              = { for t in v.templates : t => var.subscriber_templates[t] }
       hub                    = azurerm_eventhub.subscriber[k].name
       connector_id           = azurerm_databricks_access_connector.subscriber[k].id
       connector_principal_id = azurerm_databricks_access_connector.subscriber[k].identity[0].principal_id

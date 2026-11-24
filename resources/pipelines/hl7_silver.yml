@@ -1,4 +1,4 @@
-# Hot path, silver — Real-Time Mode (serverless, GA): bronze_hl7 -> silver_{messages,encounters,observations,orders,diagnoses}
+# Hot path, silver — Real-Time Mode (serverless, GA): bronze_hl7 -> silver_{messages,encounters,observations,orders,diagnoses,documents}
 # | quarantine_hl7 topics: one flow parses each message once and routes each entity row by its topic.
 resources:
   pipelines:
@@ -25,4 +25,5 @@ resources:
         hl7.topics.silver_observations: ${var.hl7_silver_observations_topic}
         hl7.topics.silver_orders: ${var.hl7_silver_orders_topic}
         hl7.topics.silver_diagnoses: ${var.hl7_silver_diagnoses_topic}
+        hl7.topics.silver_documents: ${var.hl7_silver_documents_topic}
         hl7.topics.quarantine: ${var.hl7_quarantine_topic}

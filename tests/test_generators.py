@@ -75,3 +75,66 @@ def test_generated_bad_hl7_messages_quarantine(spark):
     msgs = [hl7gen.build(n, rng, bad_ratio=1.0)[1] for n in range(20)]
     reasons = hl7v2.parse(spark.createDataFrame([(m,) for m in msgs], "hl7 string"), F.col("hl7")).select("reason")
     assert {r[0] for r in reasons.collect()} == {"not_hl7"}
+
+
+def _journey_messages(spark, seed=3, minutes=30):
+    """Every message a few ED journeys emit, parsed, in order: (journey MRN -> [message struct])."""
+    from pyspark.sql import functions as F
+
+    from hl7rt import hl7v2
+    from hl7rt.generators import hl7v2 as hl7gen
+
+    j = hl7gen.Journeys(random.Random(seed), per_minute=2, gap_s=(5, 20), patients=1_000)
+    out, n = [], 0
+    for second in range(minutes * 60):
+        while (m := j.due(n, float(second))) is not None:
+            out.append(m[1])
+            n += 1
+    df = hl7v2.parse(spark.createDataFrame([(i, x) for i, x in enumerate(out)], "i int, hl7 string"), F.col("hl7"))
+    assert df.where("reason IS NOT NULL").count() == 0
+    by_mrn = {}
+    for r in df.orderBy("i").select("message.*").collect():
+        by_mrn.setdefault(r.patient_id, []).append(r)
+    return by_mrn
+
+
+def test_an_ed_journey_is_one_patient_and_visit_from_registration_to_discharge_or_transfer(spark):
+    from hl7rt.generators import hl7v2 as hl7gen
+
+    journeys = _journey_messages(spark)
+    finished = {k: v for k, v in journeys.items() if v[-1].msg_type in ("ADT^A03", "ADT^A02")}
+    assert len(finished) >= 20
+    for mrn, msgs in finished.items():
+        assert int(mrn.removeprefix("MRN")) > 1_000, "journey patients are outside the background population"
+        first = msgs[0]
+        assert (first.msg_type, first.patient_class, first.admission_type) == ("ADT^A04", "E", "E")
+        assert first.patient_point_of_care in hl7gen.ED_POINTS_OF_CARE and first.chief_complaint
+        assert [d.diagnosis_type for d in first.diagnoses] == ["ADMITTING"]
+        assert len({m.visit_id for m in msgs}) == 1
+        assert msgs[1].msg_type == "ADT^A08"
+        if msgs[-1].msg_type == "ADT^A02":
+            assert msgs[-1].prior_point_of_care == first.patient_point_of_care
+        else:
+            assert msgs[-1].discharge_dt_tm is not None
+
+
+def test_respiratory_journeys_get_a_chest_xray_its_report_and_a_note(spark):
+    from hl7rt.generators import hl7v2 as hl7gen
+
+    respiratory = {c for c, _, r in hl7gen.CHIEF_COMPLAINTS if r}
+    journeys = _journey_messages(spark)
+    kinds = {"resp": set(), "other": set()}
+    for msgs in journeys.values():
+        if msgs[-1].msg_type not in ("ADT^A03", "ADT^A02"):
+            continue
+        resp = msgs[0].chief_complaint_cd in respiratory
+        assert (msgs[0].diagnoses[0].diagnosis_cd in {c for c, _ in hl7gen.RESPIRATORY_DIAGNOSES}) == resp
+        rad = [m for m in msgs if m.diagnostic_service == "RAD"]
+        if resp:
+            assert [m.msg_type for m in rad] == ["ORM^O01", "ORU^R01"]
+            assert rad[1].observations[0].value_type == "TX"
+            assert any(m.msg_type == "MDM^T02" and m.document_id for m in msgs)
+        else:
+            assert rad == []
+        kinds["resp" if resp else "other"].add(len(msgs))
+    assert kinds["resp"] and kinds["other"], "both kinds of journey occur"
