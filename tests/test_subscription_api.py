@@ -11,9 +11,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from subscription_api import app as api  # noqa: E402
 
-VIEW_COLUMNS = {"cat.sub_app_a.gold_observations": {"patient_id", "value_num", "observation_cd_desc"}}
+VIEW_COLUMNS = {"cat.sub_app_a.silver_observations": {"patient_id", "value_num", "observation_cd_desc"}}
 POTASSIUM = (
-    "SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Potassium' AND value_num > 6"
+    "SELECT patient_id, value_num FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num > 6"
 )
 
 
@@ -22,7 +22,7 @@ def fake_databricks(sql, schema):
     from subscription_api.rules import columns, parse
 
     try:
-        r = parse(sql, {"gold_observations", "gold_encounters", "gold_orders"}, schema)
+        r = parse(sql, {"silver_observations", "silver_encounters", "silver_orders"}, schema)
     except Exception:  # noqa: BLE001
         return {"code": "PARSE_SYNTAX_ERROR", "message": "[PARSE_SYNTAX_ERROR] Syntax error"}
     cols = VIEW_COLUMNS.get(f"{schema}.{r.source}")
@@ -69,9 +69,9 @@ def test_declaring_registers_the_canonical_sql_and_says_what_changed(client):
 
 def test_databricks_errors_pass_through_and_nothing_is_applied(client):
     r = declare(client, [("good", POTASSIUM.replace("> 6", "> 7")),
-                         ("typo", "SELECT patient_id FROM gold_observations WHERE value_numm > 6"),
-                         ("ungranted", "SELECT patient_id FROM gold_observations WHERE units = 'x'"),
-                         ("not-mine", "SELECT patient_id FROM gold_encounters")])  # fmt: skip
+                         ("typo", "SELECT patient_id FROM silver_observations WHERE value_numm > 6"),
+                         ("ungranted", "SELECT patient_id FROM silver_observations WHERE units = 'x'"),
+                         ("not-mine", "SELECT patient_id FROM silver_encounters")])  # fmt: skip
     assert r.status_code == 422 and r.json()["applied"] is False
     codes = {x["name"]: x["code"] for x in r.json()["refused"]}
     assert codes == {"typo": "UNRESOLVED_COLUMN.WITH_SUGGESTION", "ungranted": "UNRESOLVED_COLUMN.WITH_SUGGESTION",
@@ -86,10 +86,10 @@ def test_shapes_the_hub_wont_run_are_refused_before_databricks_sees_them(client)
         [
             (
                 "sub",
-                "SELECT patient_id FROM gold_observations WHERE value_num > "
-                "(SELECT max(value_num) FROM gold_observations)",
+                "SELECT patient_id FROM silver_observations WHERE value_num > "
+                "(SELECT max(value_num) FROM silver_observations)",
             ),
-            ("net", "SELECT patient_id FROM gold_observations WHERE http_request('GET', 'x') IS NULL"),
+            ("net", "SELECT patient_id FROM silver_observations WHERE http_request('GET', 'x') IS NULL"),
         ],
     )
     assert {x["code"] for x in r.json()["refused"]} == {"SQL_NOT_ALLOWED"}
@@ -174,7 +174,7 @@ def test_wait_reports_pending_then_ready_once_the_hub_runs_the_revision(client, 
         owner.run("INSERT INTO subscription_registry.status (subscription_id, revision, state) VALUES "
                   "(CAST(:s AS uuid), :r, 'ACTIVE') ON CONFLICT (subscription_id) DO UPDATE SET revision = :r, "
                   "state = 'ACTIVE'", s=sub[0], r=sub[1])  # fmt: skip
-    owner.run("INSERT INTO subscription_registry.hub_heartbeat VALUES ('gold_observations', now(), 1, 1) "
+    owner.run("INSERT INTO subscription_registry.hub_heartbeat VALUES ('silver_observations', now(), 1, 1) "
               "ON CONFLICT (source) DO UPDATE SET last_batch_at = now()")  # fmt: skip
     assert client.get("/api/v1/subscriptions?wait=5", headers=A).json()["state"] == "READY"
 
@@ -209,5 +209,5 @@ def test_declaring_nothing_cancels_everything(client):
 
 
 def test_a_case_insensitive_rule_is_stored_in_canonical_form(client):
-    r = declare(client, [("upper", "SELECT PATIENT_ID FROM GOLD_OBSERVATIONS WHERE VALUE_NUM > 6")])
-    assert r.json()["accepted"][0]["query"] == "SELECT patient_id FROM gold_observations WHERE value_num > 6"
+    r = declare(client, [("upper", "SELECT PATIENT_ID FROM SILVER_OBSERVATIONS WHERE VALUE_NUM > 6")])
+    assert r.json()["accepted"][0]["query"] == "SELECT patient_id FROM silver_observations WHERE value_num > 6"

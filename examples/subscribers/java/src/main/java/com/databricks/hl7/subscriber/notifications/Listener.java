@@ -53,11 +53,11 @@ public final class Listener {
         if (seen.size() > SEEN_LIMIT) seen.clear();
         if (!live && isBacklog(n, now, BACKLOG_AFTER)) {
             if (replayFrom == null) {
-                replayFrom = n.getGoldTs();
+                replayFrom = n.getSourceTs();
                 out.printf("catching up from %s, where consumer group %s last stopped%n", replayFrom, groupId);
             }
             replayed++;
-            replayAt = n.getGoldTs();
+            replayAt = n.getSourceTs();
             return;
         }
         if (!live && replayFrom != null) {
@@ -65,7 +65,7 @@ public final class Listener {
                     replayAt);
         }
         live = true;
-        out.printf("%s  %-22s rev %d  %s%n", n.getGoldTs(), n.getSubscription(), n.getRevision(), payloadJson(n));
+        out.printf("%s  %-22s rev %d  %s%n", n.getSourceTs(), n.getSubscription(), n.getRevision(), payloadJson(n));
     }
 
     /** Periodic progress: backlog catch-up and skipped counts, at most every {@link #REPORT_EVERY}. */
@@ -119,10 +119,10 @@ public final class Listener {
         return n.getRevision() != null && n.getRevision().equals(registered.get(n.getSubscriptionId()));
     }
 
-    /** True if its gold record is older than {@code after}: the group is catching up, not reading live data. */
+    /** True if its source record is older than {@code after}: the group is catching up, not reading live data. */
     public static boolean isBacklog(Notification n, Instant now, Duration after) {
         try {
-            return n.getGoldTs() != null && Instant.parse(n.getGoldTs()).isBefore(now.minus(after));
+            return n.getSourceTs() != null && Instant.parse(n.getSourceTs()).isBefore(now.minus(after));
         } catch (DateTimeParseException e) {
             return false;
         }

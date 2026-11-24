@@ -6,7 +6,7 @@ import json
 import pytest
 from pyspark.sql import functions as F
 
-from hl7rt import gold, subscriptions
+from hl7rt import silver, subscriptions
 from hl7rt.subscriptions import Rule
 from subscription_api.rules import parse
 
@@ -24,7 +24,7 @@ SID = "11111111-1111-4111-8111-111111111111"
 
 @pytest.fixture
 def observations(spark):
-    """gold_observations topic records (value = gold JSON), with Kafka coordinates and broker timestamp."""
+    """silver_observations topic records (value = silver JSON), with Kafka coordinates and broker timestamp."""
     rows = [(json.dumps(r), 0, i, "2026-11-03T12:00:00Z") for i, r in enumerate(OBS)]
     return spark.createDataFrame(rows, "value string, partition int, offset long, ts string").select(
         F.col("value").cast("binary").alias("value"), "partition", "offset",
@@ -40,7 +40,7 @@ def rule(sql, sid=SID, name="r", revision=1, topic="cat.subscribers.app-a", gran
 
 def delivered(observations, rules):
     out = subscriptions.notifications(
-        subscriptions.events(observations, "gold_observations"), "gold_observations", rules
+        subscriptions.events(observations, "silver_observations"), "silver_observations", rules
     )
     return [json.loads(x.value) | {"topic": x.topic, "key": x.key} for x in out.collect()]
 
@@ -65,10 +65,10 @@ CONDITIONS = [
 
 @pytest.mark.parametrize("condition", CONDITIONS)
 def test_the_hub_delivers_exactly_what_the_sql_editor_returns(spark, observations, condition):
-    sql = f"SELECT patient_id FROM gold_observations WHERE {condition}"
+    sql = f"SELECT patient_id FROM silver_observations WHERE {condition}"
     spark.createDataFrame(
-        OBS, gold.OBSERVATION_SCHEMA.__class__([f for f in gold.OBSERVATION_SCHEMA if f.name in OBS[0]])
-    ).createOrReplaceTempView("gold_observations")
+        OBS, silver.OBSERVATION_SCHEMA.__class__([f for f in silver.OBSERVATION_SCHEMA if f.name in OBS[0]])
+    ).createOrReplaceTempView("silver_observations")
     editor = sorted(r.patient_id for r in spark.sql(sql).collect())
 
     hub = sorted(n["payload"]["patient_id"] for n in delivered(observations, [rule(sql)]))
@@ -76,9 +76,9 @@ def test_the_hub_delivers_exactly_what_the_sql_editor_returns(spark, observation
 
 
 def test_all_rules_run_in_one_pass_and_route_to_their_own_topics(observations):
-    a = rule("SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Hemoglobin' "
+    a = rule("SELECT patient_id, value_num FROM silver_observations WHERE observation_cd_desc = 'Hemoglobin' "
              "AND value_num < 8", name="low-hgb")  # fmt: skip
-    b = rule("SELECT patient_id FROM gold_observations WHERE value_num > 6.5", sid="22222222-2222-4222-8222-2",
+    b = rule("SELECT patient_id FROM silver_observations WHERE value_num > 6.5", sid="22222222-2222-4222-8222-2",
              name="high", topic="cat.subscribers.app-b")  # fmt: skip
     out = delivered(observations, [a, b])
 
@@ -88,12 +88,12 @@ def test_all_rules_run_in_one_pass_and_route_to_their_own_topics(observations):
     ]  # fmt: skip
     hgb = next(n for n in out if n["subscription"] == "low-hgb")
     assert hgb["payload"] == {"patient_id": "P1", "value_num": 7.2}  # nothing beyond the selected fields
-    assert hgb["revision"] == 1 and hgb["source"] == "gold_observations"
+    assert hgb["revision"] == 1 and hgb["source"] == "silver_observations"
     assert (hgb["sourcePartition"], hgb["sourceOffset"]) == (0, 0)
 
 
 def test_many_rules_split_into_chunks_give_the_same_answer(observations, monkeypatch):
-    rules = [rule(f"SELECT patient_id FROM gold_observations WHERE value_num > {i}", sid=f"{i:08d}-0000-4000-8000-"
+    rules = [rule(f"SELECT patient_id FROM silver_observations WHERE value_num > {i}", sid=f"{i:08d}-0000-4000-8000-"
                   f"{i:012d}", name=f"r{i}") for i in range(15)]  # fmt: skip
     whole = sorted((n["subscription"], n["key"]) for n in delivered(observations, rules))
     monkeypatch.setattr(subscriptions, "CHUNK", 4)
@@ -102,7 +102,7 @@ def test_many_rules_split_into_chunks_give_the_same_answer(observations, monkeyp
 
 def test_nulls_are_kept_in_the_payload(observations):
     out = delivered(
-        observations, [rule("SELECT patient_id, abnormal_flag FROM gold_observations WHERE patient_id = 'P2'")]
+        observations, [rule("SELECT patient_id, abnormal_flag FROM silver_observations WHERE patient_id = 'P2'")]
     )
     assert out[0]["payload"] == {"patient_id": "P2", "abnormal_flag": None}
 
@@ -111,17 +111,17 @@ def test_notifications_follow_the_published_contract(spark, observations):
     """What the hub writes is the Notification schema in docs/api/openapi.json, field for field, on both paths."""
     from subscription_api.app import Notification
 
-    sql = "SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Potassium'"
-    records = subscriptions.events(observations, "gold_observations")
+    sql = "SELECT patient_id, value_num FROM silver_observations WHERE observation_cd_desc = 'Potassium'"
+    records = subscriptions.events(observations, "silver_observations")
     for compiled in (subscriptions.compile_rules([rule(sql)]), subscriptions.compile_rules([rule(sql)], spark=spark)):
-        for x in subscriptions.notifications(records, "gold_observations", compiled).collect():
+        for x in subscriptions.notifications(records, "silver_observations", compiled).collect():
             value = json.loads(x.value)
             assert set(value) == set(Notification.model_fields)
             Notification.model_validate(value)
 
 
 def test_notification_ids_are_stable_per_revision_and_source_record(observations):
-    sql = "SELECT patient_id FROM gold_observations WHERE value_num < 8"
+    sql = "SELECT patient_id FROM silver_observations WHERE value_num < 8"
 
     def ids(revision):
         return [n["notificationId"] for n in delivered(observations, [rule(sql, revision=revision)])]
@@ -131,14 +131,14 @@ def test_notification_ids_are_stable_per_revision_and_source_record(observations
 
 
 def test_the_hub_rechecks_each_rule_before_running_it():
-    ok = rule("SELECT patient_id FROM gold_observations WHERE value_num > 1")
+    ok = rule("SELECT patient_id FROM silver_observations WHERE value_num > 1")
     granted = frozenset({"patient_id", "value_num"})
-    ungranted = rule("SELECT patient_id FROM gold_observations WHERE units = 'x'", sid="u", granted=granted)
+    ungranted = rule("SELECT patient_id FROM silver_observations WHERE units = 'x'", sid="u", granted=granted)
     smuggled = Rule(
         subscription_id="s",
         name="s",
         revision=1,
-        source="gold_observations",
+        source="silver_observations",
         fields=["patient_id"],
         topic="t",
         granted=GRANTED,
@@ -152,11 +152,11 @@ def test_the_hub_rechecks_each_rule_before_running_it():
 
 def test_a_rule_that_fails_at_runtime_is_found_alone(spark, observations):
     spark.conf.set("spark.sql.ansi.enabled", "true")
-    good = rule("SELECT patient_id FROM gold_observations WHERE value_num > 1")
+    good = rule("SELECT patient_id FROM silver_observations WHERE value_num > 1")
     bad = rule(
-        "SELECT patient_id FROM gold_observations WHERE units > 1", sid="bad"
+        "SELECT patient_id FROM silver_observations WHERE units > 1", sid="bad"
     )  # 'g/dL' can't be cast to a number
-    records = subscriptions.events(observations, "gold_observations")
+    records = subscriptions.events(observations, "silver_observations")
 
     errors = subscriptions.failing(records, [good, bad])
     assert list(errors) == ["bad"] and "CAST" in errors["bad"].upper()
@@ -164,17 +164,17 @@ def test_a_rule_that_fails_at_runtime_is_found_alone(spark, observations):
 
 
 def test_no_rules_means_no_output(observations):
-    assert subscriptions.notifications(subscriptions.events(observations, "gold_observations"), "gold_observations",
+    assert subscriptions.notifications(subscriptions.events(observations, "silver_observations"), "silver_observations",
                                        []) is None  # fmt: skip
 
 
 def test_a_compiled_rule_set_is_reused_across_batches(spark, observations):
     """The hub compiles rules once per registry change (in the background) and applies them to every batch."""
-    compiled = subscriptions.compile_rules([rule("SELECT patient_id FROM gold_observations WHERE value_num < 8")], 7)
+    compiled = subscriptions.compile_rules([rule("SELECT patient_id FROM silver_observations WHERE value_num < 8")], 7)
     assert compiled.generation == 7 and len(compiled.chunks) == 1
     for batch in (observations, observations.where("offset >= 2")):
-        records = subscriptions.events(batch, "gold_observations")
-        keys = sorted(r.key for r in subscriptions.notifications(records, "gold_observations", compiled).collect())
+        records = subscriptions.events(batch, "silver_observations")
+        keys = sorted(r.key for r in subscriptions.notifications(records, "silver_observations", compiled).collect())
         assert keys == (["P1", "P3"] if batch is observations else ["P3"])
 
 
@@ -183,9 +183,9 @@ def test_a_recompile_rechecks_only_the_rules_that_changed(monkeypatch):
     real = subscriptions.check_condition
     monkeypatch.setattr(subscriptions, "check_condition", lambda w, g: calls.append(w) or real(w, g))
     subscriptions._CHECKED.clear()
-    rules = [rule(f"SELECT patient_id FROM gold_observations WHERE value_num > {i}", sid=f"s{i}") for i in range(5)]
+    rules = [rule(f"SELECT patient_id FROM silver_observations WHERE value_num > {i}", sid=f"s{i}") for i in range(5)]
     subscriptions.compile_rules(rules)
-    changed = rule("SELECT patient_id FROM gold_observations WHERE value_num > 99", sid="s0", revision=2)
+    changed = rule("SELECT patient_id FROM silver_observations WHERE value_num > 99", sid="s0", revision=2)
     subscriptions.compile_rules([changed] + rules[1:])
     assert calls[5:] == ["value_num > 99"], "only the changed rule is checked again"
 
@@ -193,21 +193,21 @@ def test_a_recompile_rechecks_only_the_rules_that_changed(monkeypatch):
 @pytest.mark.parametrize(
     "where",
     [
-        "true) THEN 1 END, secret('scope', 'key') AS s FROM gold_observations --",
+        "true) THEN 1 END, secret('scope', 'key') AS s FROM silver_observations --",
         "value_num > 1)) , (http_request('GET', 'x')",
-        "value_num > 1; DROP TABLE gold_observations",
+        "value_num > 1; DROP TABLE silver_observations",
     ],
 )
 def test_a_stored_condition_cant_break_out_of_its_expression(where):
     """Rules are built into SQL strings, so each WHERE must be one checked expression (written around the API)."""
-    smuggled = Rule(subscription_id="x", name="x", revision=1, source="gold_observations", fields=["patient_id"],
+    smuggled = Rule(subscription_id="x", name="x", revision=1, source="silver_observations", fields=["patient_id"],
                     topic="t", granted=GRANTED, where=where)  # fmt: skip
     good, failed = subscriptions.runnable([smuggled])
     assert good == [] and failed["x"].startswith("SQL_NOT_ALLOWED")
 
 
 def test_literals_in_the_built_sql_are_escaped(observations):
-    r = rule("SELECT patient_id FROM gold_observations WHERE value_num < 8", topic="cat.subscribers.o'brien\\x")
+    r = rule("SELECT patient_id FROM silver_observations WHERE value_num < 8", topic="cat.subscribers.o'brien\\x")
     assert {n["topic"] for n in delivered(observations, [r])} == {"cat.subscribers.o'brien\\x"}
 
 
@@ -238,26 +238,26 @@ def compiled_as_data(spark, sql, **kw):
 
 @pytest.mark.parametrize("condition", DATA_CONDITIONS)
 def test_data_rules_deliver_exactly_what_the_sql_editor_returns(spark, observations, condition):
-    sql = f"SELECT patient_id FROM gold_observations WHERE {condition}"
+    sql = f"SELECT patient_id FROM silver_observations WHERE {condition}"
     spark.createDataFrame(
-        OBS, gold.OBSERVATION_SCHEMA.__class__([f for f in gold.OBSERVATION_SCHEMA if f.name in OBS[0]])
-    ).createOrReplaceTempView("gold_observations")
+        OBS, silver.OBSERVATION_SCHEMA.__class__([f for f in silver.OBSERVATION_SCHEMA if f.name in OBS[0]])
+    ).createOrReplaceTempView("silver_observations")
     editor = sorted(r.patient_id for r in spark.sql(sql).collect())
 
-    records = subscriptions.events(observations, "gold_observations")
-    out = subscriptions.notifications(records, "gold_observations", compiled_as_data(spark, sql)).collect()
+    records = subscriptions.events(observations, "silver_observations")
+    out = subscriptions.notifications(records, "silver_observations", compiled_as_data(spark, sql)).collect()
     assert sorted(json.loads(x.value)["payload"]["patient_id"] for x in out) == editor
 
 
 @pytest.mark.parametrize("condition", DATA_CONDITIONS + ["lower(units) = 'g/dl'"])
 def test_both_paths_send_identical_notifications(spark, observations, condition):
     """Which path a rule takes is internal: the notification bytes are the same either way."""
-    sql = f"SELECT patient_id, value_num, abnormal_flag, units FROM gold_observations WHERE {condition}"
-    records = subscriptions.events(observations, "gold_observations")
+    sql = f"SELECT patient_id, value_num, abnormal_flag, units FROM silver_observations WHERE {condition}"
+    records = subscriptions.events(observations, "silver_observations")
     as_expression = subscriptions.compile_rules([rule(sql)])  # no SparkSession: every rule is an expression
     either = subscriptions.compile_rules([rule(sql)], spark=spark)
-    a = sorted(x.value for x in subscriptions.notifications(records, "gold_observations", as_expression).collect())
-    b = sorted(x.value for x in subscriptions.notifications(records, "gold_observations", either).collect())
+    a = sorted(x.value for x in subscriptions.notifications(records, "silver_observations", as_expression).collect())
+    b = sorted(x.value for x in subscriptions.notifications(records, "silver_observations", either).collect())
     assert a == b
 
 
@@ -267,32 +267,40 @@ def test_both_paths_send_identical_notifications(spark, observations, condition)
      "value_num > 'x'", "value_num = patient_id", "coalesce(abnormal_flag, 'none') = 'none'"],
 )  # fmt: skip
 def test_anything_else_keeps_the_expression_path(spark, condition):
-    c = subscriptions.compile_rules([rule(f"SELECT patient_id FROM gold_observations WHERE {condition}")], spark=spark)
+    sql = f"SELECT patient_id FROM silver_observations WHERE {condition}"
+    c = subscriptions.compile_rules([rule(sql)], spark=spark)
     assert c.data_rules == 0 and len(c.chunks) == 1
 
 
 def test_a_thousand_data_rules_are_one_fixed_plan(spark, observations):
-    rules = [rule(f"SELECT patient_id FROM gold_observations WHERE value_num > {i % 20}", sid=f"s{i}", name=f"r{i}")
+    rules = [rule(f"SELECT patient_id FROM silver_observations WHERE value_num > {i % 20}", sid=f"s{i}", name=f"r{i}")
              for i in range(1000)]  # fmt: skip
     c = subscriptions.compile_rules(rules, spark=spark)
     assert c.data_rules == 1000 and not c.chunks
-    records = subscriptions.events(observations, "gold_observations")
-    out = subscriptions.notifications(records, "gold_observations", c).collect()
+    records = subscriptions.events(observations, "silver_observations")
+    out = subscriptions.notifications(records, "silver_observations", c).collect()
     # value_num 7.2 matches thresholds 0..7 (8 of 20), 13.0 matches 0..12 (13), 6.9 matches 0..6 (7); 50 rules each.
     assert len(out) == (8 + 13 + 7) * 50
 
 
 def test_data_rules_are_indexed_by_a_string_equality_when_they_have_one(spark):
-    keyed = compiled_as_data(spark, "SELECT patient_id FROM gold_observations WHERE patient_id IN ('P1', 'P1', 'P4') "
+    keyed = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE patient_id IN ('P1', 'P1', 'P4') "
                                     "AND value_num > 1")  # fmt: skip
     assert sorted(r.key_val for r in keyed.table.collect()) == ["P1", "P4"] and keyed.scan is None, "one row per value"
-    numeric = compiled_as_data(spark, "SELECT patient_id FROM gold_observations WHERE value_num > 1")
+    numeric = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE value_num > 1")
     assert numeric.table is None and numeric.scan.count() == 1, "no string equality: compared with every record"
 
 
 def test_a_record_matches_an_indexed_rule_once_even_if_several_values_could_index_it(spark, observations):
-    sql = ("SELECT patient_id FROM gold_observations WHERE observation_cd_desc = 'Hemoglobin' "
+    sql = ("SELECT patient_id FROM silver_observations WHERE observation_cd_desc = 'Hemoglobin' "
            "AND patient_id IN ('P1', 'P2')")  # fmt: skip
-    out = subscriptions.notifications(subscriptions.events(observations, "gold_observations"), "gold_observations",
+    out = subscriptions.notifications(subscriptions.events(observations, "silver_observations"), "silver_observations",
                                       compiled_as_data(spark, sql)).collect()  # fmt: skip
     assert sorted(json.loads(x.value)["payload"]["patient_id"] for x in out) == ["P1", "P2"]
+
+
+def test_the_api_accepts_exactly_the_hubs_sources():
+    """The API checks rules without importing the hub (its own deploy), so its source list is kept in step here."""
+    from subscription_api import rules
+
+    assert set(subscriptions.SOURCES) == rules.SOURCES

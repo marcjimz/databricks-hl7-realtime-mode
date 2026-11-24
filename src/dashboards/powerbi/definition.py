@@ -12,15 +12,15 @@ TABLES = {
     "hop_latency": {"hop": "string", "messages": "bigint", "p50_ms": "double", "p95_ms": "double", "p99_ms": "double",
                     "max_ms": "double", "under_200ms": "decimal"},
     "hop_p99_by_minute": {"hop": "string", "minute": "timestamp", "p99_ms": "double", "messages": "bigint"},
-    "headline": {"msgs_per_sec": "decimal", "raw_to_gold_p99_ms": "double", "gold_observations": "bigint",
+    "headline": {"msgs_per_sec": "decimal", "raw_to_silver_p99_ms": "double", "observations": "bigint",
                  "quarantined": "bigint"},
     "last_update": {"updated_at": "timestamp"},
     "messages_by_minute": {"minute": "timestamp", "msg_type": "string", "messages": "bigint"},
     "critical_labs_by_facility": {"facility": "string", "observation": "string", "abnormal_flag": "string",
                                   "results": "bigint"},
-    "latest_critical_labs": {"gold_at": "timestamp", "patient_id": "string", "facility": "string",
+    "latest_critical_labs": {"silver_at": "timestamp", "patient_id": "string", "facility": "string",
                              "observation": "string", "value_num": "double", "units": "string",
-                             "abnormal_flag": "string", "raw_to_gold_ms": "double"},
+                             "abnormal_flag": "string", "raw_to_silver_ms": "double"},
     "quarantine_reasons": {"reason": "string", "messages": "bigint"},
     "subscriptions": {"app_name": "string", "subscription": "string", "revision": "int", "source": "string",
                       "state": "string", "rule": "string", "registered_at": "timestamp", "confirmed_at": "timestamp",
@@ -33,8 +33,8 @@ TABLES = {
 MEASURES = {
     "headline": {
         "Messages per second": ("MAX(headline[msgs_per_sec])", "0.0"),
-        "Raw to gold p99 ms": ("MAX(headline[raw_to_gold_p99_ms])", "0"),
-        "Gold observations 15 min": ("MAX(headline[gold_observations])", "#,0"),
+        "Raw to silver p99 ms": ("MAX(headline[raw_to_silver_p99_ms])", "0"),
+        "Observations 15 min": ("MAX(headline[observations])", "#,0"),
         "Quarantined 15 min": ("MAX(headline[quarantined])", "#,0"),
     },
     "last_update": {"Last update": ("MAX(last_update[updated_at])", "hh:mm:ss")},
@@ -48,7 +48,7 @@ MEASURES = {
 
 # Every page re-queries on this fixed interval while it's open (automatic page refresh). The capacity admin's minimum
 # interval caps it (Admin portal -> Capacity settings -> Power BI workloads; a new capacity starts at 5 minutes). Change
-# detection would fire just as often (gold changes every second), and it can't be set up outside Power BI Desktop.
+# detection would fire just as often (silver changes every second), and it can't be set up outside Power BI Desktop.
 REFRESH_SECONDS = 5
 
 # page -> visuals: (type, title, (x, y, width, height), {role: [(table, field)]}). A field is a measure if it's in
@@ -56,11 +56,11 @@ REFRESH_SECONDS = 5
 # Series.
 PAGES = {
     "Latency": [
-        ("card", "Newest gold record (UTC)", (10, 10, 242, 110), {"Values": [("last_update", "Last update")]}),
+        ("card", "Newest silver record (UTC)", (10, 10, 242, 110), {"Values": [("last_update", "Last update")]}),
         ("card", "Messages per second", (262, 10, 242, 110), {"Values": [("headline", "Messages per second")]}),
-        ("card", "Raw to gold p99 (ms)", (514, 10, 242, 110), {"Values": [("headline", "Raw to gold p99 ms")]}),
-        ("card", "Gold observations, 15 min", (766, 10, 242, 110),
-         {"Values": [("headline", "Gold observations 15 min")]}),
+        ("card", "Raw to silver p99 (ms)", (514, 10, 242, 110), {"Values": [("headline", "Raw to silver p99 ms")]}),
+        ("card", "Observations, 15 min", (766, 10, 242, 110),
+         {"Values": [("headline", "Observations 15 min")]}),
         ("card", "Quarantined, 15 min", (1018, 10, 252, 110), {"Values": [("headline", "Quarantined 15 min")]}),
         ("tableEx", "Per-hop latency, last 15 minutes (target: p99 under 200 ms)", (10, 130, 1260, 170),
          {"Values": [("hop_latency", c) for c in TABLES["hop_latency"]]}),

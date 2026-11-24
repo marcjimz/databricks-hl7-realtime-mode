@@ -12,7 +12,7 @@ from datetime import datetime
 from confluent_kafka import KafkaError, KafkaException
 from hl7_subscriptions_client.models import Notification
 
-BACKLOG_AFTER = 120  # seconds: a gold record older than this means the group is catching up
+BACKLOG_AFTER = 120  # seconds: a source record older than this means the group is catching up
 REPORT_EVERY = 10  # seconds
 SEEN_LIMIT = 100_000
 
@@ -36,9 +36,9 @@ def is_current(n: Notification, registered: dict[str, int]) -> bool:
 
 
 def is_backlog(n: Notification, now: float, after: float) -> bool:
-    """True if its gold record is older than `after` seconds: the group is catching up, not reading live data."""
+    """True if its source record is older than `after` seconds: the group is catching up, not reading live data."""
     try:
-        return datetime.fromisoformat(n.gold_ts).timestamp() < now - after
+        return datetime.fromisoformat(n.source_ts).timestamp() < now - after
     except (TypeError, ValueError):
         return False
 
@@ -73,16 +73,16 @@ class Listener:
             self.seen.clear()
         if not self.live and is_backlog(n, now, BACKLOG_AFTER):
             if self.replay_from is None:
-                self.replay_from = n.gold_ts
+                self.replay_from = n.source_ts
                 self._print(f"catching up from {self.replay_from}, where consumer group {self.group} last stopped")
             self.replayed += 1
-            self.replay_at = n.gold_ts
+            self.replay_at = n.source_ts
             return
         if not self.live and self.replay_from is not None:
             self._print(f"caught up   {self.replayed} backlog notifications ({self.replay_from} to {self.replay_at}); "
                         "live from here")  # fmt: skip
         self.live = True
-        self._print(f"{n.gold_ts}  {n.subscription:<22} rev {n.revision}  {payload_json(n)}")
+        self._print(f"{n.source_ts}  {n.subscription:<22} rev {n.revision}  {payload_json(n)}")
 
     def on_tick(self, now: float):
         """Periodic progress: backlog catch-up and skipped counts, at most every REPORT_EVERY seconds."""

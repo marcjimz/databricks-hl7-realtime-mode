@@ -1,4 +1,4 @@
-"""A subscription rule is Databricks SQL in one shape: SELECT <columns> FROM <one gold source> [WHERE <condition>].
+"""A subscription rule is Databricks SQL in one shape: SELECT <columns> FROM <one silver source> [WHERE <condition>].
 
 Databricks compiles the SQL against the app's own views (the API runs DESCRIBE QUERY), so a misspelled or ungranted
 column, a wrong source, or a syntax error comes back as Databricks' own error. This module is the only rule logic of our
@@ -15,7 +15,8 @@ from sqlglot import exp
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 DIALECT = "databricks"
-SOURCES = frozenset({"gold_encounters", "gold_observations", "gold_orders"})  # = hl7rt.subscriptions.SOURCES
+# = hl7rt.subscriptions.SOURCES (tests/test_subscriptions.py keeps them in step)
+SOURCES = frozenset({"silver_encounters", "silver_observations", "silver_orders", "silver_diagnoses"})
 # Functions that reach outside the record. Unqualified names only: any qualified function (a UC UDF) is refused too.
 DENIED_FUNCTIONS = {
     "http_request", "secret", "try_secret", "reflect", "try_reflect", "java_method", "remote_query", "vector_search",

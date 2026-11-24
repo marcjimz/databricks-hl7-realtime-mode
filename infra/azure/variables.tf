@@ -79,16 +79,17 @@ variable "tables" {
     "epic_near_realtime_json_from_eventhub",
     "raw_hl7",
     "bronze_hl7",
-    "silver_hl7",
+    "silver_messages",
+    "silver_encounters",
+    "silver_observations",
+    "silver_orders",
+    "silver_diagnoses",
     "quarantine_hl7",
-    "gold_encounters",
-    "gold_observations",
-    "gold_orders",
   ]
 }
 
 variable "subscriber_apps" {
-  description = "Subscriber apps: name -> its Databricks service principal's application ID and what it may read (gold sources and columns). Each gets its own hub and a hub-scoped identity (subscribers.tf)."
+  description = "Subscriber apps: name -> its Databricks service principal's application ID and what it may read (silver sources and columns). Each gets its own hub and a hub-scoped identity (subscribers.tf)."
   type = map(object({
     application_id = string
     sources        = list(string)

@@ -1,4 +1,5 @@
-"""Specs for native-Spark HL7 v2 parsing (bronze envelope, silver message, quarantine routing)."""
+"""Specs for native-Spark HL7 v2 parsing (bronze envelope, the parsed message, quarantine reasons). The entity rows
+built from it are specified in test_silver.py."""
 
 import json
 from datetime import datetime
@@ -9,17 +10,6 @@ from pyspark.sql import functions as F
 import hl7_samples as s
 from hl7rt import hl7v2
 from hl7rt.generators.hl7v2 import segment
-
-# The customer's silver field contract (the first 34 columns of the Epic silver table).
-CONTRACT = [
-    "account_id", "admit_dt_tm", "date_of_birth_dt", "ethnicity", "patient_alt_id", "patient_alt_id_namespace",
-    "patient_class", "patient_facility", "patient_fhir_resource_id", "patient_id", "patient_id_namespace",
-    "patient_point_of_care", "race", "sex", "visit_id", "msg_control_id", "msg_dt_tm", "msg_id",
-    "msg_sending_facility", "msg_seq", "msg_type", "alt_observation_cd_system", "alt_observation_cd",
-    "alt_observation_cd_desc", "observation_cd_system", "observation_cd", "observation_cd_desc", "order_cd_system",
-    "order_cd", "order_cd_desc", "alt_order_cd", "alt_order_cd_desc", "alt_order_cd_system",
-    "document_completion_status",
-]  # fmt: skip
 
 
 def parse(spark, *messages):
@@ -45,13 +35,12 @@ def test_builder_matches_golden_message():
     assert "\r".join([msh, pid]) == s.GOLDEN_ADT_A04
 
 
-# --- contract -----------------------------------------------------------------
+# --- the parsed message -------------------------------------------------------
 
 
-def test_silver_has_customer_contract_then_observations(spark):
+def test_message_has_its_fields_then_every_obx_and_dg1(spark):
     m, _ = one(spark, s.adt_a04())
-    assert list(m)[: len(CONTRACT)] == CONTRACT
-    assert "observations" in m
+    assert list(m) == [*hl7v2.MESSAGE_FIELDS, "observations", "diagnoses"]
 
 
 def test_adt_patient_visit_and_message_fields(spark):
@@ -73,17 +62,27 @@ def test_adt_patient_visit_and_message_fields(spark):
     assert m["observations"] == []
 
 
-def test_oru_first_observation_flattened_and_all_observations_listed(spark):
+def test_adt_lists_every_diagnosis(spark):
+    m, _ = one(spark, s.adt_a04())
+    d1, d2 = m["diagnoses"]
+    assert (d1["set_id"], d1["diagnosis_cd"], d1["diagnosis_cd_desc"], d1["diagnosis_cd_system"]) == (
+        "1", "J18.9", "Pneumonia", "ICD-10-CM",
+    )  # fmt: skip
+    assert (d1["diagnosis_type"], d1["diagnosis_dt_tm"]) == ("ADMITTING", datetime(2026, 10, 23, 8, 5, 0))
+    assert (d2["diagnosis_cd"], d2["diagnosis_type"], d2["diagnosis_dt_tm"]) == ("B05.9", "WORKING", None)
+
+
+def test_oru_lists_every_observation_with_its_alternate_code(spark):
     m, reason = one(spark, s.oru_r01())
     assert reason is None
-    assert (m["observation_cd"], m["observation_cd_desc"], m["observation_cd_system"]) == ("2823-3", "Potassium", "LN")
-    assert (m["alt_observation_cd"], m["alt_observation_cd_desc"], m["alt_observation_cd_system"]) == (
-        "K", "Potassium", "L",
-    )  # fmt: skip
     assert (m["order_cd"], m["order_cd_desc"], m["order_cd_system"]) == ("80048", "Basic Metabolic Panel", "CPT")
     obs = m["observations"]
     assert [o["set_id"] for o in obs] == ["1", "2"]
     k = obs[0]
+    assert (k["observation_cd"], k["observation_cd_desc"], k["observation_cd_system"]) == ("2823-3", "Potassium", "LN")
+    assert (k["alt_observation_cd"], k["alt_observation_cd_desc"], k["alt_observation_cd_system"]) == (
+        "K", "Potassium", "L",
+    )  # fmt: skip
     assert (k["value_type"], k["value"], k["units"], k["reference_range"]) == ("NM", "6.8", "mmol/L", "3.5-5.1")
     assert (k["abnormal_flag"], k["result_status"]) == ("HH", "F")
     assert k["observation_dt_tm"] == datetime(2026, 10, 23, 8, 20, 0)
@@ -99,11 +98,6 @@ def test_orm_order_fields(spark):
 def test_mdm_document_status(spark):
     m, _ = one(spark, s.mdm_t02())
     assert m["document_completion_status"] == "AU"
-
-
-def test_unmapped_fields_are_null(spark):
-    m, _ = one(spark, s.adt_a04())
-    assert m["patient_fhir_resource_id"] is None  # not carried by HL7 v2
 
 
 # --- wire format robustness ---------------------------------------------------
@@ -158,7 +152,7 @@ def test_quarantine_reasons(spark, msg, reason):
     assert parse(spark, msg).first().r == reason
 
 
-# --- bronze envelope + silver records (what the RTM flows write) -------------------
+# --- bronze envelope (what the bronze RTM flow writes) ---------------------------
 
 
 def _kafka(spark, *values):
@@ -187,62 +181,3 @@ def test_bronze_envelope(spark):
     assert (env["msg_type"], env["msg_control_id"], env["msg_sending_facility"]) == ("ADT^A04", "CTRL0001", "FAC01")
     assert (env["raw_partition"], env["raw_offset"]) == (0, 0)
     assert env["raw_ts"].startswith("2026-10-23T12:00:00")
-
-
-def test_silver_records_route_by_topic(spark):
-    bronze = hl7v2.to_bronze_records(_kafka(spark, s.oru_r01(), "garbage"))
-    bronze_kafka = bronze.withColumn("timestamp", F.lit(datetime(2026, 10, 23, 12, 0, 1)))
-    out = hl7v2.to_silver_records(
-        bronze_kafka,
-        silver_topic="real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
-        quarantine_topic="real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
-    )
-    assert out.columns == ["key", "value", "topic"]
-    rows = {r.topic: json.loads(r.value) for r in out.collect()}
-    assert set(rows) == {
-        "real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
-        "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
-    }
-    silver, quarantine = (
-        rows["real_time_mode_demo_catalog.hl7_realtime.silver_hl7"],
-        rows["real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7"],
-    )
-    assert silver["msg_control_id"] == "CTRL0002" and len(silver["observations"]) == 2
-    assert silver["raw_ts"].startswith("2026-10-23T12:00:00") and silver["bronze_ts"].startswith("2026-10-23T12:00:01")
-    assert silver["payload"] == s.oru_r01()
-    assert quarantine["reason"] == "not_hl7" and quarantine["hl7"] == "garbage"
-
-
-def test_silver_json_roundtrips_through_schema(spark):
-    bronze = hl7v2.to_bronze_records(_kafka(spark, s.oru_r01())).withColumn("timestamp", F.current_timestamp())
-    value = (
-        hl7v2.to_silver_records(
-            bronze,
-            "real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
-            "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
-        )
-        .first()
-        .value
-    )
-    back = spark.createDataFrame([(value,)], "v string").select(F.from_json("v", hl7v2.SILVER_SCHEMA).alias("x"))
-    assert back.first().x.observations[0].abnormal_flag == "HH"
-
-
-# --- plan size guard -------------------------------------------------------------------------------------------
-
-
-def test_silver_plan_splits_each_segment_once(spark):
-    """Regression guard: inlining the parse per field once produced 290 split() calls per record and a
-    379 KB plan that starved the RTM driver in GC. Staged projections keep it to a handful."""
-    # Materialize bronze first: in production bronze and silver are separate pipelines.
-    bronze_value = hl7v2.to_bronze_records(_kafka(spark, s.oru_r01())).first().value
-    bronze = _kafka(spark, bronze_value)
-    qe = hl7v2.to_silver_records(
-        bronze,
-        "real_time_mode_demo_catalog.hl7_realtime.silver_hl7",
-        "real_time_mode_demo_catalog.hl7_realtime.quarantine_hl7",
-    )._jdf.queryExecution()
-    optimized, analyzed = qe.optimizedPlan().toString(), qe.analyzed().toString()
-    whole_message_splits = optimized.count("split(regexp_replace(")  # segments(): split of the full message
-    assert whole_message_splits == 1, f"the full message is split {whole_message_splits}x per record"
-    assert len(analyzed) < 60_000, f"analyzed plan is {len(analyzed):,} chars"

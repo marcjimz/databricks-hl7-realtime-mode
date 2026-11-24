@@ -4,5 +4,6 @@ subscription_id = "<subscription in the Fabric tenant>"
 tenant_id       = "<Fabric tenant ID>"
 admins          = ["you@example.com"]
 owner           = "you@example.com"
+remove_after    = "YYYY-MM-DD" # the subscription may delete the capacity after this date
 # location = "eastus2"
 # sku      = "F2"

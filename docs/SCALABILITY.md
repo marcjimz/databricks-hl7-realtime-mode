@@ -17,7 +17,7 @@ Each section names the test that will prove it, and the pass bar.
 |---|---|---|
 | Subscriber apps (unique service principals) | hubs, consumer groups, access connectors, UC credentials, Postgres roles | 1 |
 | Subscriptions per app and in total | hub batch time, registry reload size | ≤ 3 |
-| Gold event rate | hub input per batch | ~200 msg/s HL7 (plus Epic JSON) |
+| Silver event rate | hub input per batch | ~200 msg/s HL7 (plus Epic JSON) |
 | Match fan-out (matches per event) | hub output, Event Hubs ingress | low |
 | Rule churn (changes per minute) | registry writes, reloads, activation time | manual |
 | Consumers per app | partitions per app hub | 1 |
@@ -86,10 +86,10 @@ Sharding (below) is the lever past 1,000 rules, or for isolating a heavy tenant.
 
 **Past the cap: shard the hub.**
 - **How:** the API assigns each rule a `shard` when it's registered, by hash of its subscription ID or by app for tenant
-  isolation. N hub pipelines each read the whole gold topic and evaluate only their shard's rules, with their own
+  isolation. N hub pipelines each read the whole silver topic and evaluate only their shard's rules, with their own
   checkpoint and heartbeat, and the cap applies per shard.
 - **Gains:** capacity grows with N, and a bad batch on one shard doesn't stall the others.
-- **Costs:** each shard reads the full gold stream (N× Event Hubs read) and has its own compute.
+- **Costs:** each shard reads the full silver stream (N× Event Hubs read) and has its own compute.
 
 The Subscription API scales separately. It's stateless, with 2 fixed instances; Databricks Apps allows up to 5, and
 load-based autoscaling is a future private preview. Its load is registration calls and waits, not the data path. Test:
@@ -114,9 +114,9 @@ runs for every ordered pair (X attacks Y):
 | S5 | Same subscription name as Y | separate subscriptions; no conflict (unique per owner) | Postgres test |
 | S6 | Change `apps` (its own grants) or write `status` | permission denied | Postgres test |
 | S7 | Mint a token from Y's UC credential | PERMISSION_DENIED | live, against the hub credential |
-| S8 | Read Y's hub with X's token | TopicAuthorizationException | live, against a gold topic |
+| S8 | Read Y's hub with X's token | TopicAuthorizationException | live, against a silver topic |
 | S9 | **Write** to its own hub, or Y's (forge notifications) | denied: app connectors have Receiver only | live (own hub) |
-| S10 | Read any gold or hot-path topic | TopicAuthorizationException | live |
+| S10 | Read any silver or hot-path topic | TopicAuthorizationException | live |
 | S11 | Filter on a column it isn't granted (oracle) | UNRESOLVED_COLUMN (its view has no such column) | live |
 | S12 | Revocation: remove X from `subscriber_apps`, `make up` | subscribe → APP_NOT_ONBOARDED; hub stops X's rules within 1 batch; token mint denied; record time to effect | not yet |
 | S13 | Expired or other-workspace token on the Subscription API | 401 | not yet (anonymous → 401 verified) |
@@ -148,15 +148,15 @@ can't reach. Real service principals are only needed for the paths that authenti
 
 | # | Test | Vary | Measure | Pass bar (proposed) |
 |---|---|---|---|---|
-| P1 | Hub rule scaling | rules per source 10 → 10,000; match ratio 0.1% / 1% / 10% | batch duration, gold → app latency (`gold_ts` vs the app hub's broker time) | p99 delivery < 5 s at 1,000 rules |
-| P2 | Event rate | gold 200 → 1,000 → 5,000 msg/s at 1,000 rules | same, plus hub input rows per batch | keeps up (no growing lag) |
+| P1 | Hub rule scaling | rules per source 10 → 10,000; match ratio 0.1% / 1% / 10% | batch duration, silver → app latency (`source_ts` vs the app hub's broker time) | p99 delivery < 5 s at 1,000 rules |
+| P2 | Event rate | silver 200 → 1,000 → 5,000 msg/s at 1,000 rules | same, plus hub input rows per batch | keeps up (no growing lag) |
 | P3 | Many real apps | 1 → 10 → 50 SPs running the Java app at once | Subscription API p99, UC token calls, activation time (subscribe → ACTIVE), Event Hubs connections | activation p99 < 15 s; no 429s |
 | P4 | Rule churn | 1 → 100 changes per minute across apps | reload time, activation p99, hub batch time | activation p99 < 15 s |
 | P5 | Fan-out | one event matching 1 → 500 apps | hub output rate, Event Hubs ingress, namespace CPU | namespace CPU < 70% |
 | P6 | Registry | 10,000 → 1,000,000 subscription rows | `max(generation)` and reload time; Lakebase CPU | poll < 50 ms p99 |
 | P7 | Soak | P1 at 1,000 rules for 12 hours | the above, plus memory and duplicate counts | no drift, no growth |
 
-**Correctness at scale:** for every test, recompute the expected matches from the gold Delta tables using each
+**Correctness at scale:** for every test, recompute the expected matches from the silver Delta tables using each
 rule's `predicate_sql` rendering, and compare with the delivered notifications after dedup by `notificationId`. The
 sets must be equal: no missing match, no extra one, nothing for a cancelled or superseded revision.
 
@@ -167,7 +167,7 @@ sets must be equal: no missing match, no extra one, nothing for a cancelled or s
 
 | # | Scenario | Expected |
 |---|---|---|
-| E1 | Load step ×5 on gold | serverless hub scales up; delivery p99 recovers within 5 min |
+| E1 | Load step ×5 on silver | serverless hub scales up; delivery p99 recovers within 5 min |
 | E2 | Lakebase scaled to zero, then the first subscribe | succeeds; cold-start latency recorded |
 | E3 | Lakebase min/max CU change under load | no failed calls |
 | E4 | Event Hubs PU change under load | no data loss; record the latency blip |
@@ -233,12 +233,12 @@ results → Delta <catalog>.<schema>.scale_results (run_id, scenario, metric, p5
      | P6 | p6-rows-1m |
 
    - **Correctness oracle:**
-     1. A batch read of the gold topic over the window applies each ACTIVE revision, independent of streaming,
+     1. A batch read of the silver topic over the window applies each ACTIVE revision, independent of streaming,
         batching, routing, and redelivery.
      2. It compares the set {(subscriptionId, revision, sourcePartition, sourceOffset)} with the delivered
         notifications, deduplicated by `notificationId`.
      3. A run passes only with 0 missing and 0 extra. It also reports the duplicate rate.
-   - **Delivery latency:** the app hub's broker time minus `gold_ts`.
+   - **Delivery latency:** the app hub's broker time minus `source_ts`.
    - **Activation time:** `status.observed_at` minus `subscriptions.updated_at`.
 5. **Job `resources/jobs/subscription_scale.yml`:** `databricks bundle run subscription_scale --params scenario=p1-1000`.
 6. **Semantics tests in CI** (local PostgreSQL + Spark):

@@ -36,6 +36,15 @@ variable "owner" {
   type        = string
 }
 
+variable "remove_after" {
+  description = "RemoveAfter tag (YYYY-MM-DD): the subscription's policy may delete the resources after this date. Extend it to keep them."
+  type        = string
+  validation {
+    condition     = can(regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}$", var.remove_after))
+    error_message = "remove_after must be a date in YYYY-MM-DD format."
+  }
+}
+
 variable "tags" {
   description = "Extra tags."
   type        = map(string)

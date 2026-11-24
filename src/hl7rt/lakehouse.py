@@ -12,18 +12,19 @@ Resolution is about +/-16 ms (Event Hubs timestamp tick). See docs/latency.md.
 from pyspark.sql import Column, DataFrame
 from pyspark.sql import functions as F
 
-from hl7rt import hl7v2
+from hl7rt import hl7v2, silver
 
 # Upsert keys. Spark's Kafka sink is at-least-once: after a restart a hop can re-send records. Every table is an
 # AUTO CDC (SCD type 1) target keyed by the record's raw-topic coordinates, so a replay updates its row, not adds one.
 KEYS = {
     "raw_hl7": ["partition", "offset"],
     "bronze_hl7": ["raw_partition", "raw_offset"],
-    "silver_hl7": ["raw_partition", "raw_offset"],
+    "silver_messages": ["raw_partition", "raw_offset"],
+    "silver_encounters": ["raw_partition", "raw_offset"],
+    "silver_observations": ["raw_partition", "raw_offset", "position"],
+    "silver_orders": ["raw_partition", "raw_offset"],
+    "silver_diagnoses": ["raw_partition", "raw_offset", "position"],
     "quarantine_hl7": ["raw_partition", "raw_offset"],
-    "gold_encounters": ["raw_partition", "raw_offset"],
-    "gold_observations": ["raw_partition", "raw_offset", "set_id"],
-    "gold_orders": ["raw_partition", "raw_offset"],
 }
 
 
@@ -62,24 +63,6 @@ def bronze_rows(bronze: DataFrame) -> DataFrame:
     )
 
 
-def silver_rows(silver: DataFrame) -> DataFrame:
-    """Customer silver contract first (34 fields, payload, kafka_timestamp, _ingested_at), then extras."""
-    s = silver.select(_value(hl7v2.SILVER_SCHEMA).alias("s"), F.col("timestamp").alias("kafka_timestamp"))
-    return s.select(
-        *[F.col(f"s.{n}") for n in hl7v2.SILVER_FIELDS],
-        F.col("s.payload"),
-        "kafka_timestamp",
-        F.current_timestamp().alias("_ingested_at"),
-        F.col("s.observations"),
-        F.col("s.raw_ts"),
-        F.col("s.bronze_ts"),
-        F.col("s.raw_partition"),
-        F.col("s.raw_offset"),
-        _ms(F.col("kafka_timestamp"), F.col("s.bronze_ts")).alias("hop_ms"),
-        _ms(F.col("kafka_timestamp"), F.col("s.raw_ts")).alias("e2e_ms"),
-    )
-
-
 def quarantine_rows(quarantine: DataFrame) -> DataFrame:
     q = quarantine.select(_value(hl7v2.QUARANTINE_SCHEMA).alias("q"), F.col("timestamp").alias("kafka_timestamp"))
     return q.select(
@@ -90,22 +73,21 @@ def quarantine_rows(quarantine: DataFrame) -> DataFrame:
     )
 
 
-def gold_rows(gold_topic: DataFrame, schema) -> DataFrame:
-    """gold_* topics: the entity's fields (gold.*_SCHEMA order), then hop (silver -> gold) and end-to-end latency,
+def silver_rows(topic: DataFrame, table: str) -> DataFrame:
+    """silver_* topics: the entity's fields (silver.SCHEMAS order), then hop (bronze -> silver) and end-to-end latency,
     and `_meta` (record id + timestamps), a stable record identity for downstream consumers."""
-    g = gold_topic.select(_value(schema).alias("g"), F.col("timestamp").alias("kafka_timestamp"))
-    ids = [F.col("g.raw_partition"), F.col("g.raw_offset")]
-    ids += [F.col("g.set_id")] if "set_id" in schema.fieldNames() else []
+    schema = silver.SCHEMAS[table]
+    r = topic.select(_value(schema).alias("r"), F.col("timestamp").alias("kafka_timestamp"))
     meta = F.struct(
-        F.concat_ws("-", *ids).alias("record_id"),
-        F.col("kafka_timestamp").alias("gold_ts"),
-        F.col("g.raw_ts").alias("raw_ts"),
+        F.concat_ws("-", *[F.col(f"r.{k}") for k in KEYS[table]]).alias("record_id"),
+        F.col("kafka_timestamp").alias("source_ts"),
+        F.col("r.raw_ts").alias("raw_ts"),
     )
-    return g.select(
-        "g.*",
+    return r.select(
+        "r.*",
         "kafka_timestamp",
-        _ms(F.col("kafka_timestamp"), F.col("g.silver_ts")).alias("hop_ms"),
-        _ms(F.col("kafka_timestamp"), F.col("g.raw_ts")).alias("e2e_ms"),
+        _ms(F.col("kafka_timestamp"), F.col("r.bronze_ts")).alias("hop_ms"),
+        _ms(F.col("kafka_timestamp"), F.col("r.raw_ts")).alias("e2e_ms"),
         F.current_timestamp().alias("_ingested_at"),
         meta.alias("_meta"),
     )

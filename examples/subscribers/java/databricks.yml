@@ -27,11 +27,11 @@ variables:
   forbidden_credential:
     description: A credential the app must not use (the hub's).
   forbidden_topic:
-    description: A topic the app must not read (a gold topic).
+    description: A topic the app must not read (a silver entity topic).
   own_topic:
     description: The app's own hub, which it must not write to.
   base_schema:
-    description: The platform's gold schema; rules must use the app's own views instead.
+    description: The platform's silver schema; rules must use the app's own views instead.
   data_api_url:
     description: The Lakebase Data API URL apps used before the Subscription API; it must be gone.
 

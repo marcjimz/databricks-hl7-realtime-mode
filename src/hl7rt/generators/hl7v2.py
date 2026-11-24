@@ -1,6 +1,9 @@
-"""Synthetic raw HL7 v2.5.1 messages (ADT^A01/A03/A04/A08, ORU^R01, ORM^O01, MDM^T02) at a steady rate.
+"""Synthetic raw HL7 v2.5.1 messages (ADT^A01/A02/A03/A04/A08, ORU^R01, ORM^O01, MDM^T02) at a steady rate.
 
-Messages are built by field number (`segment("PID", {3: ..., 7: ...})`) so positions can't drift.
+Messages are built by field number (`segment("PID", {3: ..., 7: ...})`) so positions can't drift. They carry the shapes
+real subscription rules filter on (docs/examples/criteria.md): labs with LOINC as the alternate code
+(`alt_observation_cd_system = 'LN'`), flowsheet vitals (`observation_cd_system = 'FLOWSHEET'`), ICD-10-CM diagnoses with
+a type on admits, registrations, and updates, and patients spread over several points of care. All values are synthetic.
 Each record carries a `sent_ms` header so the producer -> Event Hubs hop can be measured too.
 A small share of messages are deliberately invalid so the quarantine topic has something to show.
 """
@@ -14,12 +17,22 @@ from hl7rt import eventhubs
 
 ENCODING = "^~\\&"
 FACILITIES = ["FAC01", "FAC02", "FAC03"]
-MESSAGE_MIX = [("ADT^A04", 3), ("ADT^A01", 1), ("ADT^A08", 1), ("ADT^A03", 1), ("ORU^R01", 5), ("ORM^O01", 2),
-               ("MDM^T02", 1)]  # fmt: skip
+MESSAGE_MIX = [("ADT^A04", 3), ("ADT^A01", 1), ("ADT^A08", 1), ("ADT^A02", 1), ("ADT^A03", 1), ("ORU^R01", 5),
+               ("ORM^O01", 2), ("MDM^T02", 1)]  # fmt: skip
 STRUCTURE = {"ADT": "ADT_A01", "ORU": "ORU_R01", "ORM": "ORM_O01", "MDM": "MDM_T02"}
-# (LOINC, name, units, low, high)
-LABS = [("2823-3", "Potassium", "mmol/L", 3.5, 5.1), ("2345-7", "Glucose", "mg/dL", 70, 99),
-        ("718-7", "Hemoglobin", "g/dL", 12.0, 17.5), ("2160-0", "Creatinine", "mg/dL", 0.6, 1.3)]  # fmt: skip
+# (LOINC, name, units, low, high, local code): OBX-3 = local^name^LAB^LOINC^name^LN, as the feed rules expect
+LABS = [("2823-3", "Potassium", "mmol/L", 3.5, 5.1, "K"), ("2345-7", "Glucose", "mg/dL", 70, 99, "GLU"),
+        ("718-7", "Hemoglobin", "g/dL", 12.0, 17.5, "HGB"), ("2160-0", "Creatinine", "mg/dL", 0.6, 1.3, "CREAT"),
+        ("1920-8", "AST", "U/L", 10, 40, "AST"), ("1751-7", "Albumin", "g/dL", 3.5, 5.0, "ALB")]  # fmt: skip
+# (flowsheet row, name, units, low, high): OBX-3 = row^name^FLOWSHEET
+VITALS = [("572 PULSE", "Pulse", "/min", 60, 100), ("573 RESP", "Respirations", "/min", 12, 20),
+          ("569 SPO2", "SpO2", "%", 95, 100), ("574 TEMP", "Temperature", "degF", 97.0, 99.5)]  # fmt: skip
+VITALS_SHARE = 0.3  # of ORU^R01 messages
+DIAGNOSES = [("J18.9", "Pneumonia, unspecified organism"), ("B05.9", "Measles without complication"),
+             ("I21.9", "Acute myocardial infarction, unspecified"), ("E11.9", "Type 2 diabetes mellitus"),
+             ("R50.9", "Fever, unspecified"), ("U07.1", "COVID-19")]  # fmt: skip
+DIAGNOSIS_TYPES = ["ADMITTING", "WORKING", "FINAL"]
+POINTS_OF_CARE = [f"ED{i:02d}" for i in range(1, 9)] + ["ICU1", "MED4", "SURG2"]
 
 
 def segment(name: str, fields: dict[int, str]) -> str:
@@ -83,14 +96,28 @@ def build(n: int, rng: random.Random, bad_ratio: float = 0.01, patients: int = 5
         ),  # fmt: skip
         segment(
             "PV1",
-            {1: "1", 2: "E" if kind in ("ADT^A04", "ADT^A01") else "I", 3: f"ED^01^A^{fac}", 19: f"V{n:09d}", 44: now},
-        ),
+            {
+                1: "1",
+                2: "E" if kind in ("ADT^A04", "ADT^A01") else "I",
+                3: f"{rng.choice(POINTS_OF_CARE)}^01^A^{fac}",
+                19: f"V{n:09d}",
+                44: now,
+            },
+        ),  # fmt: skip
     ]
     if family == "ADT":
         segs.insert(1, segment("EVN", {1: kind.split("^")[1], 2: now}))
+        if kind in ("ADT^A01", "ADT^A04", "ADT^A08"):
+            for i, (code, name) in enumerate(rng.sample(DIAGNOSES, rng.randint(1, 2)), 1):
+                segs.append(segment("DG1", {1: str(i), 3: f"{code}^{name}^ICD-10-CM", 5: now,
+                                            6: rng.choice(DIAGNOSIS_TYPES)}))  # fmt: skip
     elif kind == "ORU^R01":
-        segs.append(segment("OBR", {1: "1", 2: f"ORD{n}", 4: "80048^Basic Metabolic Panel^CPT", 7: now}))
-        for i, (code, name, units, lo, hi) in enumerate(LABS, 1):
+        vitals = rng.random() < VITALS_SHARE
+        panel = "VITALS^Vital Signs^FLOWSHEET" if vitals else "80048^Basic Metabolic Panel^CPT"
+        segs.append(segment("OBR", {1: "1", 2: f"ORD{n}", 4: panel, 7: now}))
+        rows = [(f"{c}^{nm}^FLOWSHEET", u, lo, hi) for c, nm, u, lo, hi in VITALS] if vitals else [
+            (f"{local}^{nm}^LAB^{c}^{nm}^LN", u, lo, hi) for c, nm, u, lo, hi, local in LABS]  # fmt: skip
+        for i, (code, units, lo, hi) in enumerate(rows, 1):
             v = round(rng.uniform(lo * 0.6, hi * 1.4), 1)
             segs.append(
                 segment(
@@ -98,7 +125,7 @@ def build(n: int, rng: random.Random, bad_ratio: float = 0.01, patients: int = 5
                     {
                         1: str(i),
                         2: "NM",
-                        3: f"{code}^{name}^LN",
+                        3: code,
                         5: str(v),
                         6: units,
                         7: f"{lo}-{hi}",

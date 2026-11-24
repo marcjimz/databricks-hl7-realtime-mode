@@ -1,6 +1,6 @@
 # Subscriptions
 
-Apps subscribe at runtime to the gold records they need, with a rule written in **Databricks SQL**. Each app's matches
+Apps subscribe at runtime to the silver records they need, with a rule written in **Databricks SQL**. Each app's matches
 arrive on its own Event Hub. Adding, changing, or cancelling a subscription is a single API call: no pipeline, hub, or
 deployment per subscription.
 
@@ -11,7 +11,7 @@ Java app (as its own SP) ──PUT [{name, sql}]──► Subscription API (Data
         │                                          against the app's own views: its errors pass through unchanged
         │                                          store it as the app's own registry role (Lakebase)
         │                                                       │ rules
-        │      gold_* topics ──► subscription hub (micro-batch, all rules in one pass) ──► <catalog>.subscribers.<app>
+        │    silver_* topics ──► subscription hub (micro-batch, all rules in one pass) ──► <catalog>.subscribers.<app>
         └──────────────────────── consume with a UC-minted Event Hubs token ◄────────────────────────────┘
 ```
 
@@ -25,7 +25,7 @@ Java app (as its own SP) ──PUT [{name, sql}]──► Subscription API (Data
 - **Registry** (`src/registry/registry.sql`, Lakebase Postgres): the apps' subscriptions and the platform's grants. Only
   the API writes to it, and always as the calling app's own role.
 - **Hub** (`resources/pipelines/subscription_hub.yml`, `src/pipelines/subscription_hub`, `src/hl7rt/subscriptions.py`):
-  one serverless pipeline with one flow per gold source.
+  one serverless pipeline with one flow per silver source.
   - Each micro-batch it reloads the rules if they changed (one indexed query), re-checks them, and evaluates all of a
     source's rules in one projection.
   - It writes the matches to each app's hub.
@@ -48,7 +48,7 @@ the PREVIEW channel. The RTM hot path is unchanged.
   notifications.
 
 **Measured** (2026-11-05, demo load, rules matching 0.1% of patients each). Delivery is the app-hub broker time minus
-the gold record's broker time:
+the source record's broker time:
 
 | Rules on one source | Hub batch interval | Delivery p50 | p99 | One rule change → ACTIVE |
 |---|---|---|---|---|
@@ -124,13 +124,13 @@ and it adds instances in 2–3 minutes. When it is enabled, set `app_min_instanc
 ## Rules
 
 ```sql
-SELECT patient_id, value_num FROM gold_observations
+SELECT patient_id, value_num FROM silver_observations
 WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8
 ```
 
 - **Allowed:**
   - `SELECT` lists the fields to deliver: columns only.
-  - `FROM` names one gold source: `gold_encounters`, `gold_observations`, or `gold_orders`. Unqualified, or the app's own
+  - `FROM` names one silver source: `silver_encounters`, `silver_observations`, `silver_orders`, or `silver_diagnoses`. Unqualified, or the app's own
     view in full, as tested in the editor.
   - `WHERE` is any Databricks SQL filter over that record: comparisons, `IN`, `BETWEEN`, `LIKE`, `IS NULL`, `AND`/`OR`/
     `NOT`, and built-ins such as `lower`, `startswith`, `contains`, `abs`, `coalesce`.
@@ -148,11 +148,11 @@ WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8
   keep running.
 
 **Anything that needs a join, subquery, aggregate, or memory across events is out of scope for an app's rule.** The
-platform builds it once, as a new governed source (a gold topic/table), and grants it to the apps that need it:
+platform builds it once, as a new governed source (a topic/table), and grants it to the apps that need it:
 
 | Need | Pattern |
 |---|---|
-| Labs for patients currently in the ICU | A platform source that adds the patient's location to each lab (stream-static or stateful join at gold) |
+| Labs for patients currently in the ICU | A platform source that adds the patient's location to each lab (stream-static or stateful join) |
 | A large cohort list | A platform-registered lookup source; a small list fits in `IN (...)` |
 | "Second abnormal result within 24 h" | Temporal correlation: a separate, stateful capability |
 | Current census by unit changed | Query-result changes: a materialized view plus a diff, platform-built |
@@ -170,7 +170,7 @@ Sunday wipe.
    subscriber_apps = {
      "my-app" = {
        application_id = "<the SP's application ID>"
-       sources        = ["gold_observations"]
+       sources        = ["silver_observations"]
        fields         = ["patient_id", "observation_cd_desc", "value_num", "units", "abnormal_flag"]
      }
    }
@@ -213,17 +213,17 @@ Sunday wipe.
 | 2 | Connection from the API | `GET /api/v1/connection` | this app's own topic and credential |
 | 3 | Own Event Hubs credential | `sub_<app>_eventhubs` | token issued |
 | 4 | Another credential | `<catalog>_eventhubs` (the hub's) | denied (no ACCESS) |
-| 5 | Read a hub that isn't this app's | a gold topic | not authorized |
+| 5 | Read a hub that isn't this app's | a silver topic | not authorized |
 | 6 | Write to its own hub (forge a notification) | `<catalog>.subscribers.<app>` | not authorized (Receiver only) |
 | 7 | Skip the API | the registry's old Data API URL | not available |
 | 8 | Column not granted | `WHERE msg_sending_facility = 'NORTH'` | `UNRESOLVED_COLUMN` (Databricks) |
-| 9 | Source not granted | `FROM gold_encounters` | `TABLE_OR_VIEW_NOT_FOUND` (Databricks) |
+| 9 | Source not granted | `FROM silver_encounters` | `TABLE_OR_VIEW_NOT_FOUND` (Databricks) |
 | 10 | Misspelled column | `WHERE value_numm > 6` | `UNRESOLVED_COLUMN` (Databricks) |
 | 11 | Syntax error | `WHER value_num > 6` | `PARSE_SYNTAX_ERROR` (Databricks) |
 | 12 | Subquery | `WHERE value_num > (SELECT max(...) ...)` | `SQL_NOT_ALLOWED` |
-| 13 | Join | `... JOIN gold_encounters ...` | `SQL_NOT_ALLOWED` |
+| 13 | Join | `... JOIN silver_encounters ...` | `SQL_NOT_ALLOWED` |
 | 14 | Function that reaches outside the record | `http_request(...)` | `SQL_NOT_ALLOWED` |
-| 15 | Table outside this app's views | `FROM <catalog>.<schema>.gold_observations` | `SQL_NOT_ALLOWED` |
+| 15 | Table outside this app's views | `FROM <catalog>.<schema>.silver_observations` | `SQL_NOT_ALLOWED` |
 | 16 | One refusal applies nothing | a valid and a misspelled rule together | 422, the valid one not registered |
 | 17 | Validate applies nothing | `POST /validate` | valid, not registered |
 | 18 | Register | potassium ≥ 6.5, fields `patient_id, value_num` | ACCEPTED, with the canonical SQL |
@@ -233,7 +233,7 @@ Sunday wipe.
 | 22 | Change the rule | ≥ 7.0, add `units` | next revision, then ACTIVE |
 | 23 | Notification reflects the change | | new revision, new fields, value ≥ 7.0 |
 | 24 | Cancel | `DELETE` | CANCELLED by the hub |
-| 25 | Hub heartbeat | `gold_observations` | a batch within 2 minutes |
+| 25 | Hub heartbeat | `silver_observations` | a batch within 2 minutes |
 
 Cross-app cases need a second service principal live:
 - **Today:** they run against a real PostgreSQL in `tests/test_registry.py` (an app can't read, cancel, or claim another
@@ -244,7 +244,7 @@ Cross-app cases need a second service principal live:
 
 The **HL7 subscriptions** dashboard (`make demo dev` prints its URL) reads the registry live. Refresh it to update.
 - **Counts:** active subscriptions, failed ones, and apps subscribed.
-- **Hub heartbeat:** per gold source, seconds since the last batch and the rules running. A source is STALE after 2
+- **Hub heartbeat:** per silver source, seconds since the last batch and the rules running. A source is STALE after 2
   minutes.
 - **Current subscriptions:** per app and service principal, the registered revision, its SQL, fields, the hub's state
   (PENDING, ACTIVE, FAILED with the error, or CANCELLING), and how long the hub took to confirm it.

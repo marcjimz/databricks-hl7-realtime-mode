@@ -13,11 +13,11 @@ pg8000 = pytest.importorskip("pg8000.native")
 
 ROOT = Path(__file__).resolve().parents[1]
 SQL = (ROOT / "src/registry/registry.sql").read_text()
-Q = "SELECT patient_id, value_num FROM gold_observations WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8"
+Q = "SELECT patient_id, value_num FROM silver_observations WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8"
 WHERE = "observation_cd_desc = 'Hemoglobin' AND value_num < 8"
 
 
-def subscribe(conn, name, query=Q, where=WHERE, fields=("patient_id", "value_num"), source="gold_observations"):
+def subscribe(conn, name, query=Q, where=WHERE, fields=("patient_id", "value_num"), source="silver_observations"):
     return conn.run(
         "SELECT subscription_api.subscribe(:n, :s, :q, :w, CAST(:f AS text[]))",
         n=name, s=source, q=query, w=where, f=list(fields),
@@ -46,17 +46,17 @@ def test_a_rule_is_stored_with_its_canonical_query(pg):
 
 def test_resubscribing_the_same_rule_keeps_the_revision_and_a_change_adds_one(pg):
     a = pg("app_a")
-    first = subscribe(a, "rev-test", query="SELECT patient_id FROM gold_observations WHERE value_num > 6",
+    first = subscribe(a, "rev-test", query="SELECT patient_id FROM silver_observations WHERE value_num > 6",
                       where="value_num > 6", fields=["patient_id"])  # fmt: skip
-    same = subscribe(a, "rev-test", query="SELECT patient_id FROM gold_observations WHERE value_num > 6",
+    same = subscribe(a, "rev-test", query="SELECT patient_id FROM silver_observations WHERE value_num > 6",
                      where="value_num > 6", fields=["patient_id"])  # fmt: skip
-    changed = subscribe(a, "rev-test", query="SELECT patient_id FROM gold_observations WHERE value_num > 7",
+    changed = subscribe(a, "rev-test", query="SELECT patient_id FROM silver_observations WHERE value_num > 7",
                         where="value_num > 7", fields=["patient_id"])  # fmt: skip
     assert same["revision"] == first["revision"] and changed["revision"] == first["revision"] + 1
 
 
 def test_grants_bound_sources_and_output_fields(pg):
-    assert error(pg("app_a"), "x", source="gold_encounters") == "SOURCE_DENIED"
+    assert error(pg("app_a"), "x", source="silver_encounters") == "SOURCE_DENIED"
     assert error(pg("app_a"), "x", fields=["patient_id", "units"]) == "FIELDS_DENIED"
     assert error(pg("stranger"), "x") == "APP_NOT_ONBOARDED"
 
@@ -78,7 +78,7 @@ def test_the_service_acts_only_as_the_calling_app(pg):
 
 def test_the_service_maps_a_verified_caller_to_its_app_but_sees_no_subscriptions_as_itself(pg):
     subscribe(
-        pg("app_b"), "b-rule", query="SELECT patient_id FROM gold_observations", where=None, fields=["patient_id"]
+        pg("app_b"), "b-rule", query="SELECT patient_id FROM silver_observations", where=None, fields=["patient_id"]
     )
     api = pg("api")
     assert api.run("SELECT app_role FROM subscription_registry.apps WHERE service_principal = 'sp-b'")[0][0] == "app_b"
@@ -87,21 +87,21 @@ def test_the_service_maps_a_verified_caller_to_its_app_but_sees_no_subscriptions
 
 def test_apps_cannot_see_or_take_over_each_others_subscriptions(pg):
     a, b = pg("app_a"), pg("app_b")
-    subscribe(b, "b-only", query="SELECT patient_id FROM gold_observations", where=None, fields=["patient_id"])
+    subscribe(b, "b-only", query="SELECT patient_id FROM silver_observations", where=None, fields=["patient_id"])
     names = [s["name"] for s in a.run("SELECT subscription_api.list_subscriptions()")[0][0]["subscriptions"]]
     assert "b-only" not in names
     assert a.run("SELECT count(*) FROM subscription_registry.subscriptions WHERE name = 'b-only'")[0][0] == 0
     # Writing directly (skipping the API) still can't claim another owner: the trigger stamps the caller.
     a.run(
         "INSERT INTO subscription_registry.subscriptions (owner, name, source, query, fields) "
-        "VALUES ('app_b', 'spoof', 'gold_observations', 'SELECT patient_id FROM gold_observations', '{patient_id}')"
+        "VALUES ('app_b', 'spoof', 'silver_observations', 'SELECT patient_id FROM silver_observations', '{patient_id}')"
     )
     assert pg().run("SELECT owner FROM subscription_registry.subscriptions WHERE name = 'spoof'")[0][0] == "app_a"
 
 
 def test_the_same_name_in_two_apps_is_two_subscriptions(pg):
     a = subscribe(pg("app_a"), "shared-name")
-    b = subscribe(pg("app_b"), "shared-name", query="SELECT patient_id FROM gold_observations", where=None,
+    b = subscribe(pg("app_b"), "shared-name", query="SELECT patient_id FROM silver_observations", where=None,
                   fields=["patient_id"])  # fmt: skip
     assert a["subscriptionId"] != b["subscriptionId"]
 
@@ -127,11 +127,11 @@ def test_list_reports_the_hub_verdict_and_heartbeat(pg):
     assert listed["hb"]["state"] == "PENDING" and listed["hb"]["query"] == Q
     owner.run("INSERT INTO subscription_registry.status (subscription_id, revision, state) "
               "VALUES (CAST(:s AS uuid), 1, 'ACTIVE')", s=sid)  # fmt: skip
-    owner.run("INSERT INTO subscription_registry.hub_heartbeat VALUES ('gold_observations', now(), 7, 3) "
+    owner.run("INSERT INTO subscription_registry.hub_heartbeat VALUES ('silver_observations', now(), 7, 3) "
               "ON CONFLICT (source) DO UPDATE SET last_batch_at = now()")  # fmt: skip
     out = a.run("SELECT subscription_api.list_subscriptions()")[0][0]
     assert {s["name"]: s for s in out["subscriptions"]}["hb"]["state"] == "ACTIVE"
-    assert "gold_observations" in out["hub"]
+    assert "silver_observations" in out["hub"]
 
 
 def test_unsubscribe_cancels_only_your_own(pg):
@@ -146,7 +146,7 @@ def test_unsubscribe_cancels_only_your_own(pg):
 def test_the_monitor_shows_every_apps_rules_and_the_hubs_verdict(pg):
     a, b, owner = pg("app_a"), pg("app_b"), pg()
     sid = subscribe(a, "mon-a")["subscriptionId"]
-    subscribe(b, "mon-b", query="SELECT patient_id FROM gold_observations", where=None, fields=["patient_id"])
+    subscribe(b, "mon-b", query="SELECT patient_id FROM silver_observations", where=None, fields=["patient_id"])
     subscribe(a, "mon-gone")
     a.run("SELECT subscription_api.unsubscribe('mon-gone')")
     owner.run("INSERT INTO subscription_registry.status (subscription_id, revision, state) "
@@ -173,7 +173,7 @@ def test_the_hub_runs_at_most_a_capped_number_of_rules_across_all_apps(pg):
     owner.run("UPDATE subscription_registry.limits SET value = :v WHERE name = 'max_enabled_rules'", v=enabled + 2)
     try:
         subscribe(a, "cap-1")
-        subscribe(b, "cap-2", query="SELECT patient_id FROM gold_observations", where=None, fields=["patient_id"])
+        subscribe(b, "cap-2", query="SELECT patient_id FROM silver_observations", where=None, fields=["patient_id"])
         assert error(a, "cap-3") == "RULE_LIMIT_REACHED", "the cap counts every app's rules, not just the caller's"
         assert (
             subscribe(a, "cap-1", query=Q.replace("< 8", "< 9"), where=WHERE.replace("< 8", "< 9"))["revision"] == 2

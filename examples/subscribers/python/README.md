@@ -2,7 +2,7 @@
 
 The same app as the [Java example](../java/README.md), run from the repo root with the repo's `uv` environment and a
 Databricks CLI profile. It isn't part of the platform: any language can do the same through the contract
-([docs/integration.md](../../../docs/integration.md)). It subscribes to gold records at runtime with Databricks SQL,
+([docs/integration.md](../../../docs/integration.md)). It subscribes to silver records at runtime with Databricks SQL,
 then consumes its own Event Hub, signing in only as its Databricks service principal.
 
 **The API client is generated from the contract.** `build.py` runs openapi-python-client on

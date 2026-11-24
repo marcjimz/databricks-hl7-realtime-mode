@@ -38,9 +38,9 @@ from test_subscription_api import POTASSIUM, fake_databricks  # noqa: E402
 NOW = 1_793_880_000.0  # 2026-11-05T12:00:00Z
 
 
-def record(nid, sid, revision, gold_ts="2026-11-05T11:59:57Z", **payload):
+def record(nid, sid, revision, source_ts="2026-11-05T11:59:57Z", **payload):
     return json.dumps({"notificationId": nid, "subscriptionId": sid, "subscription": "critical-k", "revision": revision,
-                       "source": "gold_observations", "sourcePartition": 0, "sourceOffset": 1, "gold_ts": gold_ts,
+                       "source": "silver_observations", "sourcePartition": 0, "sourceOffset": 1, "source_ts": source_ts,
                        "payload": payload or {"value_num": 7.1}})  # fmt: skip
 
 
@@ -105,8 +105,8 @@ def test_refusals_carry_databricks_errors_and_apply_nothing(client):
     with pytest.raises(api.ApiError) as e:
         rules = {
             "ok": POTASSIUM,
-            "typo": "SELECT patient_id FROM gold_observations WHERE value_numm > 6",
-            "join": "SELECT o.patient_id FROM gold_observations o JOIN gold_encounters e "
+            "typo": "SELECT patient_id FROM silver_observations WHERE value_numm > 6",
+            "join": "SELECT o.patient_id FROM silver_observations o JOIN silver_encounters e "
             "ON o.patient_id = e.patient_id",
         }
         api.call(declare, c, body=api.declared(rules))

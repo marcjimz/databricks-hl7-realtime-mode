@@ -50,10 +50,10 @@ capacity (Terraform asks first; a new one needs step 5 again).
 - **Automatic page refresh, fixed 5 s interval** (`definition.REFRESH_SECONDS`). Each page re-runs its visuals' queries
   while it's open. PBIR stores it as `refreshType 'APR'` and `duration 'PT5S'`, which we learned from a report Power BI
   saved itself: a hand-written change-detection setting passed the schema but was ignored.
-- **Change detection isn't used.** The service can't set it up (Power BI Desktop only), and with live data the gold
+- **Change detection isn't used.** The service can't set it up (Power BI Desktop only), and with live data the silver
   timestamp changes every second, so it would fire at every check anyway.
 - **Freshness:** the views read the lakehouse mirror's streaming tables, a few seconds behind the hot path (the newest
-  gold record was 13 s old when checked). The **Newest gold record** card shows it on the Latency page.
+  record was 13 s old when checked). The **Newest silver record** card shows it on the Latency page.
 - **Proof it refreshes:** query history (`client_application = 'PowerBI'`) shows a round of 6 queries every 5 s on the
   Latency page, each 0.5–2 s.
 
