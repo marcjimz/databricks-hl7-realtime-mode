@@ -10,7 +10,7 @@ A Databricks-native framework for **dynamic runtime filtering** of clinical stre
 they want in Databricks SQL while everything runs, and receive matches on their own topic within seconds. No pipeline
 redeploy, and no code of theirs runs on the platform.
 
-Underneath, raw HL7 v2 is parsed and split into clinical entities in tens of milliseconds per layer, and every layer
+Underneath, raw HL7 v2 is parsed and split into clinical entities in under 100 ms at p99 per layer, and every layer
 also lands in Delta. Built on
 [Real-Time Mode](https://www.databricks.com/blog/introducing-real-time-mode-apache-sparktm-structured-streaming),
 serverless Lakeflow Spark Declarative Pipelines, and Azure Event Hubs, connected through a Unity Catalog service credential, with
@@ -31,8 +31,12 @@ SUBSCRIPTIONS (seconds)
   per OBX), orders, diagnoses (one per DG1), and documents (MDM). Bad messages go to quarantine. Column names follow
   the Epic silver contract.
 - **Epic JSON** is a drop-in pipeline for the existing pre-parsed Epic feed ([docs/epic-json.md](docs/epic-json.md)).
-- **Subscriptions** let apps choose silver records at runtime, each delivered to the app's own hub
+- **Subscriptions** let apps choose silver records at runtime. A **subscription hub**, the pipeline that matches silver
+  records to each app's rules, writes each app's matches to the app's own topic
   ([docs/subscriptions.md](docs/subscriptions.md)).
+
+**Deploy:** `make up` (Azure and Unity Catalog), then `make demo dev` (pipelines, feeds, the API, and the shared hub).
+Details below in "Set up" and "Run the demo".
 
 ## Subscribe from any application
 
@@ -42,13 +46,14 @@ its own Databricks service principal and the API's Databricks App name (it looks
 needs no change); the API tells it everything else:
 
 ```
-0. GET  <api>/api/v1/connection           → its topic, Kafka bootstrap servers, Unity Catalog credential, token scope
-1. PUT  <api>/api/v1/subscriptions        {"subscriptions": [{"name": "critical-potassium",
+1. GET  <api>/api/v1/connection           → its topic, Kafka bootstrap servers, Unity Catalog credential, token scope,
+                                            and the hub that runs its rules
+2. PUT  <api>/api/v1/subscriptions        {"subscriptions": [{"name": "critical-potassium",
                                             "sql": "SELECT patient_id, value_num FROM silver_observations
                                                     WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"}]}
         → ACCEPTED (revision, destination topic), or Databricks' own error and nothing applied
-2. GET  <api>/api/v1/subscriptions?wait=25  → repeat until READY (the hub runs exactly these revisions, ~5 s)
-3. Read the topic with any Kafka client (OAUTHBEARER, token from Unity Catalog for that credential);
+3. GET  <api>/api/v1/subscriptions?wait=25  → repeat until READY (the hub runs exactly these revisions, a few seconds)
+4. Read the topic with any Kafka client (OAUTHBEARER, token from Unity Catalog for that credential);
    deduplicate on notificationId
 ```
 
@@ -56,18 +61,27 @@ Change the SQL and declare again: the new filter is live within seconds. The ful
 errors: [docs/integration.md](docs/integration.md). The example clients in `examples/subscribers/` (Python and Java, both
 generated from the contract) aren't part of the platform.
 
+**Two ways to run an app's rules, with the same rules, API, and app code:** the platform's shared hub (`edp_shared`,
+the default: nothing for your team to deploy), or a team's own hub, which the team deploys from the
+[`hub/`](hub/README.md) bundle before its apps. The platform decides which hub runs an app:
+[docs/subscriptions.md](docs/subscriptions.md#two-ways-to-subscribe).
+
 ## Results
 
-Measured at 200 msg/s at full demo load on serverless Real-Time Mode (GA), with workspace and Event Hubs in one region:
+Measured at full demo load (200 msg/s HL7 plus 200 msg/s Epic JSON), workspace and Event Hubs in one region:
 
 | Hop | p50 | p99 |
 |---|---|---|
-| raw → bronze | 7 ms | **86 ms** |
-| bronze → silver (full HL7 parse) | 0 ms | **78 ms** |
+| raw → bronze (Real-Time Mode, GA) | 7 ms | **86 ms** |
+| bronze → silver, full HL7 parse (Real-Time Mode, GA) | 0 ms | **78 ms** |
+| silver → an app's topic, through the subscription hub (micro-batch) | 1.3 s | **2.5 s** |
 
-Every hop is under 200 ms at p99. (Measured with a third hop, silver → gold, p99 78 ms, which the two-layer design
-removes: silver now writes the entity rows itself.) The max is a few seconds, from checkpoints and occasional Event Hubs connection
-hangs. See [docs/latency.md](docs/latency.md).
+- **The hot path** is under 100 ms at p99 per hop. The max is a few seconds, from checkpoints and occasional Event Hubs
+  connection hangs ([docs/latency.md](docs/latency.md), measured in westus2).
+- **Subscriptions** are seconds, not milliseconds: the hub runs micro-batches, on `foreach_batch_sink`, a Public
+  Preview feature (Real-Time Mode can't apply rules that change at runtime). Measured on dev in eastus2 with 7 rules on
+  each of two hubs ([docs/subscriptions.md](docs/subscriptions.md)); at 50 apps and 2,000 rules, p99 2.9 s
+  ([docs/SCALABILITY.md](docs/SCALABILITY.md)).
 
 ## Set up, and rebuild after a sandbox wipe
 
@@ -86,7 +100,7 @@ make up                                                            # plan -> con
   - Event Hubs Premium, with one hub per table.
   - A Unity Catalog catalog plus the storage and Event Hubs service credentials.
   - The Lakebase subscription registry, and each subscriber app's hub, identity, and credential.
-- **It's safe to rerun.** If the resource group was deleted (the FE sandbox is wiped every Sunday), run `make up` again.
+- **It's safe to rerun.** If the resource group was deleted (a sandbox that's wiped, for example), run `make up` again.
   Terraform recreates what's missing, and the catalog is recreated for the new workspace.
 - **Your values stay local:** `terraform.tfvars` holds your subscription, tenant, metastore, and name prefix. It's
   gitignored. For another environment, such as a customer's, use a fresh copy of the example.
@@ -123,10 +137,10 @@ returns the records the hub delivers.
 This walkthrough uses the **Java example** (`examples/subscribers/java`, prerequisites in its
 [README](examples/subscribers/java/README.md#prerequisites)) to drive that contract. The **Python example** does the same
 from the repo root with no Java or Maven ([README](examples/subscribers/python/README.md)): same output and exit codes,
-and the same 25 checks.
+and the same 26 checks.
 
 ```bash
-uv run python examples/subscribers/python/subscriber.py --e2e     # the 25 checks
+uv run python examples/subscribers/python/subscriber.py --e2e     # the 26 checks
 uv run python examples/subscribers/python/subscriber.py           # declare my_subscriptions.py, then listen
 ```
 
@@ -146,28 +160,29 @@ Run every command below from the repo root.
 ### 0. Check everything end to end
 
 ```
-$ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e
+$ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar examples/subscribers/apps/<app>.properties --e2e
 …
-| 1 | Sign in | profile sp-hl7-realtime-demo | a service principal | 38fafc55-… | PASS |
-| 2 | Connection from the API | GET /api/v1/connection | this app's own topic and credential | hl7_rtm_demo.subscribers.sp-hl7-realtime-demo via sub_sp_hl7_realtime_demo_eventhubs @ hl7rtmaz-ehns.servicebus.windows.net:9093 | PASS |
-| 7 | Skip the API (the registry's Data API) | list_subscriptions via https://… | not available | refused 503 | PASS |
-| 8 | Column not granted | SELECT patient_id FROM silver_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
-| 12 | Subquery | SELECT patient_id FROM silver_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
+| 1 | Sign in | profile <app> | a service principal | <application id> | PASS |
+| 2 | Connection from the API | GET /api/v1/connection | this app's own topic and credential | <catalog>.subscribers.<app> via sub_<app>_eventhubs @ <namespace>.servicebus.windows.net:9093 | PASS |
+| 3 | This app's hub | GET /api/v1/connection | the hub that runs its realtime rules | edp_shared | PASS |
+| 8 | Skip the API (the registry's Data API) | list_subscriptions via https://… | not available | refused 503 | PASS |
+| 9 | Column not granted | SELECT patient_id FROM silver_observations WHERE msg_sending_facility = 'NORTH' | UNRESOLVED_COLUMN | UNRESOLVED_COLUMN.WITH_SUGGESTION: … | PASS |
+| 13 | Subquery | SELECT patient_id FROM silver_observations WHERE value_num > (SELECT max(…) …) | SQL_NOT_ALLOWED | SQL_NOT_ALLOWED: a subquery isn't allowed … | PASS |
 …
-| 24 | Cancel | DELETE e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
-| 25 | Hub heartbeat | silver_observations | a batch within 2 minutes | 2026-11-06T01:36:22… | PASS |
+| 25 | Cancel | DELETE e2e-potassium | CANCELLED by the hub | CANCELLED | PASS |
+| 26 | Hub heartbeat | edp_shared: silver_observations | a batch within 2 minutes | 2026-11-24T02:49:25… | PASS |
 
-25 checks, 0 failed
+26 checks, 0 failed, 1 skipped
 ```
 
-The 25 checks cover:
-- sign-in, and credential and topic isolation;
+The 26 checks cover:
+- sign-in, the app's hub, and credential and topic isolation;
 - no way around the API;
 - Databricks' own compile errors, and the shapes the hub won't run;
 - one refusal applying nothing;
 - register → active → notified → changed → cancelled.
 
-[The list](docs/subscriptions.md#end-to-end-checks). The run takes about 2 minutes and exits 1 if any check fails. Run
+[The list](docs/subscriptions.md#end-to-end-checks). The run takes about 2 minutes and exits 1 if any check fails. A check that doesn't apply to the app's grant is SKIP: check 10 needs a source the app isn't granted. Run
 it first: if it passes, the steps below will work.
 
 ### 1. Run the app
@@ -183,7 +198,7 @@ rules.put("critical-potassium", """
 
 ```
 $ java -jar examples/subscribers/java/target/hl7-subscriber.jar
-signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
+signed in   as sp-hl7-realtime-demo (<application id>)
 subscribed  critical-potassium     revision 1 ACCEPTED
             SELECT patient_id, value_num, units FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5
 hub         critical-potassium     revision 1 ACTIVE
@@ -203,7 +218,7 @@ listening   on hl7_rtm_demo.subscribers.sp-hl7-realtime-demo as consumer group s
   says `(unchanged)`.
 - **After time away, the app catches up first.** Its consumer group resumes where it last stopped and never skips, so
   the backlog is reported as a count (`catching up` … `caught up`). Matches for other subscriptions or earlier revisions
-  are counted as `skipped`.
+  are counted as `skipped` (not printed); nothing you registered is dropped.
 
 ### 2. Add a subscription (and change one)
 
@@ -221,7 +236,7 @@ rules.put("low-hemoglobin", """
 
 ```
 $ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar
-signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
+signed in   as sp-hl7-realtime-demo (<application id>)
 subscribed  critical-potassium     revision 2 ACCEPTED
             SELECT patient_id, value_num FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0
 subscribed  low-hemoglobin         revision 1 ACCEPTED
@@ -243,7 +258,7 @@ rebuild and run. The code is the source of truth, so the API cancels what it no 
 
 ```
 $ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar
-signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
+signed in   as sp-hl7-realtime-demo (<application id>)
 subscribed  critical-potassium     revision 3 ACCEPTED
             SELECT patient_id, value_num, units FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5
 cancelled   low-hemoglobin         (no longer in MySubscriptions)
@@ -268,7 +283,7 @@ rules.put("with-labs", "SELECT patient_id FROM silver_observations WHERE patient
 
 ```
 $ mvn -q -f examples/subscribers/java package && java -jar examples/subscribers/java/target/hl7-subscriber.jar
-signed in   as sp-hl7-realtime-demo (38fafc55-d28b-4f48-8d17-299f8d2698ee)
+signed in   as sp-hl7-realtime-demo (<application id>)
 refused     typo                   UNRESOLVED_COLUMN.WITH_SUGGESTION: [UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `value_numm` cannot be resolved. Did you mean one of the following? [`value_num`, `value`, `units`, `visit_id`, `patient_id`]. …
 refused     by-facility            UNRESOLVED_COLUMN.WITH_SUGGESTION: … with name `msg_sending_facility` cannot be resolved. …
 refused     with-labs              SQL_NOT_ALLOWED: a subquery isn't allowed: a rule is SELECT <columns> FROM <source> WHERE <filter>
@@ -280,16 +295,16 @@ ERROR       3 subscription(s) refused; fix MySubscriptions.java
 - **Why a subquery is refused:** the hub runs the rule with its own permissions, so a rule is one filter over one
   record. Joins, subqueries, and functions that reach outside the record are refused. Remove the three lines before the
   next step.
-- **The hub's rule cap:** the hub runs at most 1,000 rules across all apps (`RULE_LIMIT_REACHED` past that; cancel one
-  first). It's a platform limit, in `subscription_registry.limits`.
+- **The hub's rule cap:** a hub runs at most 2,000 enabled rules per tier (`RULE_LIMIT_REACHED` past that; cancel one
+  first). It's a platform limit per hub, in `subscription_registry.hubs`.
 
 ### 5. Stop the hub
 
-The app doesn't listen silently to a stopped hub. Stop the observations hub (each silver source has its own):
+The app doesn't listen silently to a stopped hub. Stop `edp_shared`'s realtime pipeline (it runs every app on it):
 
 ```bash
 (export DATABRICKS_HOST=$(terraform -chdir=infra/azure output -raw workspace_url) DATABRICKS_AUTH_TYPE=azure-cli
- databricks pipelines stop $(databricks pipelines list-pipelines --filter "name LIKE 'hl7rt-dev-subscription-hub-observations'" \
+ databricks pipelines stop $(databricks pipelines list-pipelines --filter "name LIKE 'hl7rt-dev-hub-edp_shared'" \
    -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["pipeline_id"])') >/dev/null)
 ```
 
@@ -352,7 +367,8 @@ interval (5 minutes on a new capacity). Setup, cost, and what's verified: [docs/
 |---|---|
 | Subscription, tenant, region, metastore, name prefix, catalog, Event Hubs capacity | `infra/azure/terraform.tfvars` |
 | Topic names, cluster size, feed rate, checkpoint interval, warehouse, registry project | `databricks.yml` |
-| Subscriber apps (service principal, sources, columns) | `subscriber_apps` in `infra/azure/terraform.tfvars` |
+| Subscriber apps (service principal, sources, columns, hub) | `subscriber_apps` in `infra/azure/terraform.tfvars` |
+| Team hubs (name, service principal, rule cap) | `subscriber_hubs` in `infra/azure/terraform.tfvars`; deploy with `make hub dev HUB=<name>` |
 | Fabric tenant, subscription, capacity size and admins (Power BI dashboard) | `infra/fabric/terraform.tfvars` |
 
 ## Repo
@@ -364,6 +380,7 @@ infra/registry.py  Lakebase subscription registry bootstrap (make registry)
 infra/fabric/    Terraform: the Fabric capacity for the live Power BI dashboard
 infra/powerbi.py  Power BI dashboard deploy: views, grants, model, report (make powerbi)
 databricks.yml   bundle variables and targets; resources/ has the pipelines, jobs, and dashboards
+hub/             the subscription hub's pipeline definition, and the bundle a team deploys to run its own hub
 src/dashboards/  the AI/BI dashboards, and powerbi/ (views + the Power BI model and report as data)
 src/hl7rt/       the logic: HL7 parsing, silver entities, Event Hubs wiring, generators
 src/pipelines/   thin pipeline definitions (including the subscription hub)
@@ -371,9 +388,9 @@ src/registry/    the subscription registry's schema, owner trigger, RLS, and API
 src/subscription_api/  the Subscription API (Databricks App): the integration contract; Swagger at <api>/docs
 tests/           unit tests (local Spark)
 docs/            integration guide + api/openapi.json (the contract), latency, subscriptions, Power BI, scalability plan,
-                 Epic JSON notes, story.html (deck), SPIKE docs; diagrams/ (draw.io + slides)
-examples/        clients and parked designs: subscribers/java/ (an example subscriber; its API client is generated
-                 from the contract) and the earlier SQL-file subscriptions
+                 Epic JSON notes, story.html (deck); diagrams/ (draw.io + PNG)
+examples/        clients, not part of the platform: subscribers/python/ and subscribers/java/ (the same example
+                 subscriber twice; API clients generated from the contract), and benchmarks/
 ```
 
 Contributors and coding agents: see [AGENTS.md](AGENTS.md).

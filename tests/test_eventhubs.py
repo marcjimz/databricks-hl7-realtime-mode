@@ -66,12 +66,18 @@ def test_librdkafka_producer_follows_event_hubs_guidance():
     assert int(cfg["request.timeout.ms"]) >= 60_000
 
 
-def test_the_hub_gives_up_on_a_hung_send_quickly():
+def test_the_hub_gives_up_on_a_hung_read_or_send_quickly():
     """Seen live: a hung Event Hubs connection held the hub's write for 2 minutes (delivery timeout) and failed the
-    flow; retried three times, that failed the whole update. Like the RTM sinks, the hub retries a hung request on a new
-    connection after 5 s, inside the same delivery timeout."""
+    flow; retried three times, that failed the whole update. Benchmarks' slow batches read silver 10-70 s. Like
+    the RTM hops, the hub's reads and its per-app producers give up on a hung request after 5 s and retry on a new
+    connection."""
     from pathlib import Path
 
+    from hl7rt import delivery
+
+    opts = eventhubs.hub_read_options("ehns-demo", "cred", "t", 100)
+    assert opts["kafka.request.timeout.ms"] == eventhubs.HUNG_REQUEST_GUARD["kafka.request.timeout.ms"]
+    assert opts["databricks.serviceCredential"] == "cred" and int(opts["kafka.metadata.max.age.ms"]) < AZURE_IDLE_MS
+    assert delivery.producer_config("ehns-demo", _Credential())["request.timeout.ms"] == 5000
     hub = (Path(__file__).parents[1] / "src/pipelines/subscription_hub/hub.py").read_text()
-    write = hub[hub.index("def _write") : hub.index("def _hub")]
-    assert "eventhubs.HUNG_REQUEST_GUARD" in write
+    assert "eventhubs.hub_read_options(" in hub and "delivery.producer_config(" in hub

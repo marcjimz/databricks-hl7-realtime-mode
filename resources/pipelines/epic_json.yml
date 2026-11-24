@@ -1,5 +1,5 @@
 # The existing Epic JSON feed (pre-parsed by an outside system), improved: bronze + silver + quarantine.
-# Micro-batch (not Real-Time Mode); kept as the drop-in replacement for the customer's current pipeline.
+# Micro-batch (not Real-Time Mode); kept as the drop-in replacement for an existing Epic JSON pipeline.
 resources:
   pipelines:
     epic_json:

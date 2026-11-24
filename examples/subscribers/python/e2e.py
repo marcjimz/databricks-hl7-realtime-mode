@@ -1,12 +1,13 @@
 """End-to-end checks against the live Subscription API, hub, and Event Hubs, as this app's service principal: the same
-25 checks as the Java example's e2e/E2E. Every check has an input, an expected result, and the actual result; the run
-prints them as a table and exits 1 if any fails.
+26 checks as the Java example's e2e/E2E. Every check has an input, an expected result, and the actual result; the run
+prints them as a table and exits 1 if any fails (a skipped check doesn't fail it).
 
     uv run python examples/subscribers/python/subscriber.py --e2e
 
-It only uses subscriptions named e2e-* (one at a time, cancelled at the end) and its own consumer group, so it leaves
-the app's own subscriptions alone. Settings (written by `make registry`): e2e.forbidden_credential, e2e.forbidden_topic,
-e2e.own_topic, e2e.base_schema, e2e.data_api_url.
+It only uses subscriptions named e2e-* (one at a time; every one still enabled is cancelled at the end) and its own
+consumer group, so it leaves the app's own subscriptions alone. It runs the same whichever hub serves the app
+(edp_shared, or a team's own): the API names it, and the heartbeat check reads that hub's. Settings (written by
+`make registry`): e2e.forbidden_credential, e2e.forbidden_topic, e2e.own_topic, e2e.base_schema, e2e.data_api_url.
 """
 
 import contextlib
@@ -24,24 +25,62 @@ from hl7_subscriptions_client.models import One
 from subscriber import bearer, first_line, is_service_principal
 
 WAIT = 180  # seconds
-GOOD = ("SELECT patient_id, value_num FROM silver_observations "
-        "WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5")  # fmt: skip
-CHANGED = ("SELECT patient_id, value_num, units FROM silver_observations "
-           "WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0")  # fmt: skip
+SOURCES = ("silver_encounters", "silver_observations", "silver_orders", "silver_diagnoses", "silver_documents")
+NAMES = ("e2e-potassium", "e2e-ok", "e2e-refused")  # every subscription name the checks register
+
+
+def potassium(fields) -> tuple[str, str]:
+    """The rule the checks register, and its change: potassium by the test's name if the app may read that column, else
+    by its LOINC code (e.g. under the ed-respiratory-monitoring template)."""
+    test = ("observation_cd_desc = 'Potassium'" if not fields or "observation_cd_desc" in fields
+            else "alt_observation_cd = '2823-3'")  # fmt: skip
+    return (
+        f"SELECT patient_id, value_num FROM silver_observations WHERE {test} AND value_num >= 6.5",
+        f"SELECT patient_id, value_num, units FROM silver_observations WHERE {test} AND value_num >= 7.0",
+    )
+
+
+def ungranted_source(sources) -> str | None:
+    """A silver source this app isn't granted (the first), or None if it's granted all of them."""
+    granted = set(sources or ())
+    return next((s for s in SOURCES if s not in granted), None)
+
+
+def leftovers(subscriptions) -> list[str]:
+    """The e2e-* subscriptions still enabled."""
+    return sorted(s.name for s in subscriptions if s.enabled and s.name.startswith("e2e-"))
+
+
+def heartbeat(heartbeats, hub: str, source: str) -> str | None:
+    """When `hub` (this app's) last ran a realtime batch of `source`, or None."""
+    for h in heartbeats or ():
+        if (h.hub, h.tier, h.source) == (hub, "realtime", source):
+            return str(h.last_batch_at)
+    return None
 
 
 class E2E:
     def __init__(self, workspace, client, connection, cfg):
         self.workspace, self.client, self.connection, self.cfg = workspace, client, connection, cfg
-        self.checks: list[tuple[str, str, str, str, bool]] = []
+        self.checks: list[tuple[str, str, str, str, str]] = []  # name, input, expected, actual, PASS/FAIL/SKIP
 
     def setting(self, key):
         return (self.cfg.get(key) or "").strip() or None
 
     def record(self, name, input_, expected, actual, passed):
         passed = passed(actual) if callable(passed) else bool(passed)
-        self.checks.append((name, input_, expected, actual, passed))
-        print(f"{'PASS' if passed else 'FAIL'}  {name}", flush=True)
+        self._add(name, input_, expected, actual, "PASS" if passed else "FAIL")
+
+    def skip(self, name, input_, expected, reason):
+        """A check that doesn't apply to this app (e.g. it's granted every source): shown, never a failure."""
+        self._add(name, input_, expected, reason, "SKIP")
+
+    def _add(self, name, input_, expected, actual, result):
+        self.checks.append((name, input_, expected, actual, result))
+        print(f"{result}  {name}", flush=True)
+
+    def ok(self) -> bool:
+        return all(c[4] != "FAIL" for c in self.checks)
 
     def all(self):
         c, conn = self.client, self.connection
@@ -54,6 +93,8 @@ class E2E:
         self.record("Connection from the API", "GET /api/v1/connection", "this app's own topic and credential",
                     f"{conn.topic} via {conn.credential} @ {conn.bootstrap_servers}",
                     (own is None or own == conn.topic) and bool(conn.credential))  # fmt: skip
+        self.record("This app's hub", "GET /api/v1/connection", "the hub that runs its realtime rules",
+                    conn.hub or "none", bool(conn.hub))  # fmt: skip
         scope = conn.token_scope
         self.record("Own Event Hubs credential", conn.credential, "token issued",
                     attempt(lambda: "token, expires " + iso(eventhubs.mint(self.workspace, conn.credential, scope)[1])),
@@ -84,7 +125,12 @@ class E2E:
         # Refused in the declare call itself: Databricks' own errors, or a shape the hub won't run.
         self.refused("Column not granted", "SELECT patient_id FROM silver_observations WHERE msg_sending_facility = "
                      "'NORTH'", "UNRESOLVED_COLUMN")  # fmt: skip
-        self.refused("Source not granted", "SELECT patient_id FROM silver_encounters", "TABLE_OR_VIEW_NOT_FOUND")
+        source = ungranted_source(conn.sources)
+        if source:
+            self.refused("Source not granted", f"SELECT patient_id FROM {source}", "TABLE_OR_VIEW_NOT_FOUND")
+        else:
+            self.skip("Source not granted", "a source this app isn't granted", "TABLE_OR_VIEW_NOT_FOUND",
+                      "this app is granted every source")  # fmt: skip
         self.refused("Misspelled column", "SELECT patient_id FROM silver_observations WHERE value_numm > 6",
                      "UNRESOLVED_COLUMN")  # fmt: skip
         self.refused(
@@ -100,8 +146,9 @@ class E2E:
         if base:
             self.refused("Table outside this app's views", f"SELECT patient_id FROM {base}.silver_observations",
                          "SQL_NOT_ALLOWED")  # fmt: skip
+        good, changed = potassium(conn.fields)
         try:
-            api.call(declare, c, body=api.declared({"e2e-ok": GOOD, "e2e-bad": "SELECT patient_id FROM "
+            api.call(declare, c, body=api.declared({"e2e-ok": good, "e2e-bad": "SELECT patient_id FROM "
                                                     "silver_observations WHERE value_numm > 6"}))  # fmt: skip
             atomic = 200
         except api.ApiError as e:
@@ -110,7 +157,7 @@ class E2E:
         self.record("One refusal applies nothing", "declare e2e-ok (valid) + e2e-bad",
                     "422, e2e-ok not registered", f"{atomic}, e2e-ok {'registered' if ok else 'not registered'}",
                     atomic == 422 and not ok)  # fmt: skip
-        valid = api.call(validate, c, body=api.declared({"e2e-ok": GOOD})).valid is True
+        valid = api.call(validate, c, body=api.declared({"e2e-ok": good})).valid is True
         ok = self.registered("e2e-ok")
         self.record(
             "Validate applies nothing",
@@ -124,8 +171,8 @@ class E2E:
         group = f"{self.cfg.get('databricks.profile', 'subscriber')}-e2e-{uuid.uuid4()}"
         consumer = Consumer(eventhubs.consumer_config(conn.bootstrap_servers, group, self.tokens))
         try:
-            r1 = api.call(put_subscription, c, name="e2e-potassium", body=One(sql=GOOD))
-            self.record("Register", GOOD, "ACCEPTED, canonical SQL", f"{r1.state} revision {r1.revision}: {r1.query}",
+            r1 = api.call(put_subscription, c, name="e2e-potassium", body=One(sql=good))
+            self.record("Register", good, "ACCEPTED, canonical SQL", f"{r1.state} revision {r1.revision}: {r1.query}",
                         r1.state == "ACCEPTED")  # fmt: skip
             self.record(
                 "Hub runs it",
@@ -144,14 +191,14 @@ class E2E:
                 n1 is not None and keys(n1) == {"patient_id", "value_num"} and number(n1, "value_num") >= 6.5,
             )
 
-            again = api.call(put_subscription, c, name="e2e-potassium", body=One(sql=GOOD))
-            self.record("Same SQL again", GOOD, "same revision, unchanged",
+            again = api.call(put_subscription, c, name="e2e-potassium", body=One(sql=good))
+            self.record("Same SQL again", good, "same revision, unchanged",
                         f"revision {again.revision}, {'unchanged' if again.unchanged else 'changed'}",
                         again.revision == r1.revision and again.unchanged is True)  # fmt: skip
 
-            r2 = api.call(put_subscription, c, name="e2e-potassium", body=One(sql=CHANGED))
+            r2 = api.call(put_subscription, c, name="e2e-potassium", body=One(sql=changed))
             state = self.await_state(r2.subscription_id, r2.revision, "ACTIVE")
-            self.record("Change the rule", CHANGED, "next revision, then ACTIVE",
+            self.record("Change the rule", changed, "next revision, then ACTIVE",
                         f"revision {r2.revision}, then {state}", r2.revision == r1.revision + 1)  # fmt: skip
             n2 = self.await_notification(consumer, r2)
             self.record("Notification reflects the change", r2.destination,
@@ -165,9 +212,8 @@ class E2E:
                         lambda s: s == "CANCELLED")  # fmt: skip
         finally:
             consumer.close()
-        hub = api.call(get_status, c, wait=0).hub.additional_properties
-        last = hub.get("silver_observations", "never")
-        self.record("Hub heartbeat", "silver_observations", "a batch within 2 minutes", last,
+        last = heartbeat(api.call(get_status, c, wait=0).heartbeats, conn.hub, "silver_observations") or "never"
+        self.record("Hub heartbeat", f"{conn.hub}: silver_observations", "a batch within 2 minutes", last,
                     lambda s: s != "never" and datetime.fromisoformat(s) > datetime.now(UTC)
                     - timedelta(seconds=120))  # fmt: skip
 
@@ -254,10 +300,12 @@ class E2E:
 
     def print(self):
         print("\n| # | Check | Input | Expected | Actual | Result |\n|---|---|---|---|---|---|")
-        for i, (name, input_, expected, actual, passed) in enumerate(self.checks, 1):
+        for i, (name, input_, expected, actual, result) in enumerate(self.checks, 1):
             print(f"| {i} | {name} | {cell(input_)} | {cell(expected)} | {cell(actual)} | "
-                  f"{'PASS' if passed else '**FAIL**'} |")  # fmt: skip
-        print(f"\n{len(self.checks)} checks, {sum(not c[4] for c in self.checks)} failed")
+                  f"{'**FAIL**' if result == 'FAIL' else result} |")  # fmt: skip
+        results = [c[4] for c in self.checks]
+        print(f"\n{len(results)} checks, {results.count('FAIL')} failed"
+              + (f", {results.count('SKIP')} skipped" if "SKIP" in results else ""))  # fmt: skip
 
 
 def run(workspace, client, connection, cfg) -> int:
@@ -267,11 +315,21 @@ def run(workspace, client, connection, cfg) -> int:
     except Exception as e:  # noqa: BLE001
         e2e.record("run", "-", "completes", f"aborted: {e!r}", False)
     finally:
-        for name in ("e2e-potassium", "e2e-ok"):
-            with contextlib.suppress(api.ApiError):  # 404: nothing to clean up
-                api.call(cancel, client, name=name)
+        cleanup(client)
     e2e.print()
-    return 0 if all(c[4] for c in e2e.checks) else 1
+    return 0 if e2e.ok() else 1
+
+
+def cleanup(client):
+    """Cancel every e2e-* subscription still enabled (an accepted refusal check leaves e2e-refused); if the API can't
+    list them, every name the checks use."""
+    try:
+        names = leftovers(api.call(get_status, client, wait=0).subscriptions)
+    except Exception:  # noqa: BLE001
+        names = list(NAMES)
+    for name in names:
+        with contextlib.suppress(api.ApiError):  # 404: nothing to clean up
+            api.call(cancel, client, name=name)
 
 
 def attempt(fn) -> str:

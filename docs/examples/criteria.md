@@ -1,8 +1,8 @@
 # Example: an existing subscription system's criteria, as Databricks SQL rules
 
-A customer's current subscription service defines each subscription's matching criteria in Java with a `CriteriaBuilder`,
-which serializes them to XML of XPath tests over a flattened record set. Around 200 applications use it, each with rules
-like the ones below. This page keeps their shape, maps them to this repo's rules (`SELECT ... FROM <silver source>
+A typical existing subscription service defines each subscription's matching criteria in Java with a
+`CriteriaBuilder`, which serializes them to XML of XPath tests over a flattened record set. Many applications use such a
+service, each with rules like the ones below. This page keeps their shape, maps them to this repo's rules (`SELECT ... FROM <silver source>
 WHERE ...`), and lists what to watch when converting. Hostnames, credentials, people, and patient IDs are replaced with
 placeholders. Codes are public (ICD-10-CM, LOINC) or synthetic.
 

@@ -1,5 +1,6 @@
-"""Hub matching: every app's SQL rule over a micro-batch, in one pass, with the semantics of the SQL editor; matches
-become notifications routed to each app's own topic."""
+"""Hub matching: every app's SQL rule over a micro-batch, with the semantics of the SQL editor; matches become
+notifications routed to each app's own topic. The hub (hl7rt.engine) matches simple rules on the driver and the rest as
+Spark expressions; the expression path whole (subscriptions.notifications) is the reference both are held to."""
 
 import json
 import re
@@ -7,7 +8,7 @@ import re
 import pytest
 from pyspark.sql import functions as F
 
-from hl7rt import silver, subscriptions
+from hl7rt import engine, matching, silver, subscriptions
 from hl7rt.subscriptions import Rule
 from subscription_api.rules import parse
 
@@ -40,10 +41,29 @@ def rule(sql, sid=SID, name="r", revision=1, topic="cat.subscribers.app-a", gran
 
 
 def delivered(observations, rules):
-    out = subscriptions.notifications(
-        subscriptions.events(observations, "silver_observations"), "silver_observations", rules
-    )
-    return [json.loads(x.value) | {"topic": x.topic, "key": x.key} for x in out.collect()]
+    """What the hub delivers for `rules` (hl7rt.engine), as JSON with its topic and key."""
+    out = engine.notifications(observations, "silver_observations", rules)
+    return [json.loads(v) | {"topic": t, "key": k} for t, k, v in out]
+
+
+def reference(observations, rules):
+    """(topic, key, value) from the reference path: every rule a Spark expression."""
+    out = subscriptions.notifications(subscriptions.events(observations, "silver_observations"), "silver_observations",
+                                      subscriptions.compile_rules(rules))  # fmt: skip
+    return sorted((x.topic, x.key, x.value) for x in out.collect()) if out is not None else []
+
+
+def editor(spark, sql):
+    spark.createDataFrame(
+        OBS, silver.OBSERVATION_SCHEMA.__class__([f for f in silver.OBSERVATION_SCHEMA if f.name in OBS[0]])
+    ).createOrReplaceTempView("silver_observations")
+    return sorted(r.patient_id for r in spark.sql(sql).collect())
+
+
+def simple(sql, **kw) -> matching.Matcher:
+    m = matching.Matcher()
+    m.place(subscriptions.runnable([rule(sql, **kw)])[0][0], "app")  # raises RuleNotSimple: the expression path's
+    return m
 
 
 CONDITIONS = [
@@ -67,13 +87,8 @@ CONDITIONS = [
 @pytest.mark.parametrize("condition", CONDITIONS)
 def test_the_hub_delivers_exactly_what_the_sql_editor_returns(spark, observations, condition):
     sql = f"SELECT patient_id FROM silver_observations WHERE {condition}"
-    spark.createDataFrame(
-        OBS, silver.OBSERVATION_SCHEMA.__class__([f for f in silver.OBSERVATION_SCHEMA if f.name in OBS[0]])
-    ).createOrReplaceTempView("silver_observations")
-    editor = sorted(r.patient_id for r in spark.sql(sql).collect())
-
     hub = sorted(n["payload"]["patient_id"] for n in delivered(observations, [rule(sql)]))
-    assert hub == editor
+    assert hub == editor(spark, sql)
 
 
 def test_all_rules_run_in_one_pass_and_route_to_their_own_topics(observations):
@@ -81,11 +96,14 @@ def test_all_rules_run_in_one_pass_and_route_to_their_own_topics(observations):
              "AND value_num < 8", name="low-hgb")  # fmt: skip
     b = rule("SELECT patient_id FROM silver_observations WHERE value_num > 6.5", sid="22222222-2222-4222-8222-2",
              name="high", topic="cat.subscribers.app-b")  # fmt: skip
-    out = delivered(observations, [a, b])
+    c = rule("SELECT patient_id FROM silver_observations WHERE lower(units) = 'mmol/l'",
+             sid="33333333-3333-4333-8333-3", name="mmol", topic="cat.subscribers.app-c")  # fmt: skip
+    out = delivered(observations, [a, b, c])
 
     assert sorted((n["topic"], n["key"]) for n in out) == [
         ("cat.subscribers.app-a", "P1"),
         ("cat.subscribers.app-b", "P1"), ("cat.subscribers.app-b", "P2"), ("cat.subscribers.app-b", "P3"),
+        ("cat.subscribers.app-c", "P3"),
     ]  # fmt: skip
     hgb = next(n for n in out if n["subscription"] == "low-hgb")
     assert hgb["payload"] == {"patient_id": "P1", "value_num": 7.2}  # nothing beyond the selected fields
@@ -93,12 +111,13 @@ def test_all_rules_run_in_one_pass_and_route_to_their_own_topics(observations):
     assert (hgb["sourcePartition"], hgb["sourceOffset"]) == (0, 0)
 
 
-def test_many_rules_split_into_chunks_give_the_same_answer(observations, monkeypatch):
-    rules = [rule(f"SELECT patient_id FROM silver_observations WHERE value_num > {i}", sid=f"{i:08d}-0000-4000-8000-"
-                  f"{i:012d}", name=f"r{i}") for i in range(15)]  # fmt: skip
+def test_many_expression_rules_split_into_chunks_give_the_same_answer(observations, monkeypatch):
+    rules = [rule(f"SELECT patient_id FROM silver_observations WHERE coalesce(value_num, 0) > {i}",
+                  sid=f"{i:08d}-0000-4000-8000-{i:012d}", name=f"r{i}") for i in range(15)]  # fmt: skip
     whole = sorted((n["subscription"], n["key"]) for n in delivered(observations, rules))
     monkeypatch.setattr(subscriptions, "CHUNK", 4)
     assert sorted((n["subscription"], n["key"]) for n in delivered(observations, rules)) == whole
+    assert sorted((json.loads(v)["subscription"], k) for _, k, v in reference(observations, rules)) == whole
 
 
 def test_nulls_are_kept_in_the_payload(observations):
@@ -108,17 +127,18 @@ def test_nulls_are_kept_in_the_payload(observations):
     assert out[0]["payload"] == {"patient_id": "P2", "abnormal_flag": None}
 
 
-def test_notifications_follow_the_published_contract(spark, observations):
-    """What the hub writes is the Notification schema in docs/api/openapi.json, field for field, on both paths."""
+def test_notifications_follow_the_published_contract(observations):
+    """What the hub writes is the Notification schema in docs/api/openapi.json, field for field, on every path."""
     from subscription_api.app import Notification
 
-    sql = "SELECT patient_id, value_num FROM silver_observations WHERE observation_cd_desc = 'Potassium'"
-    records = subscriptions.events(observations, "silver_observations")
-    for compiled in (subscriptions.compile_rules([rule(sql)]), subscriptions.compile_rules([rule(sql)], spark=spark)):
-        for x in subscriptions.notifications(records, "silver_observations", compiled).collect():
-            value = json.loads(x.value)
-            assert set(value) == set(Notification.model_fields)
-            Notification.model_validate(value)
+    rules = [rule("SELECT patient_id, value_num FROM silver_observations WHERE observation_cd_desc = 'Potassium'"),
+             rule("SELECT patient_id FROM silver_observations WHERE lower(units) = 'g/dl'", sid="e")]  # fmt: skip
+    values = [v for _, _, v in engine.notifications(observations, "silver_observations", rules)]
+    values += [v for _, _, v in reference(observations, rules)]
+    assert len(values) == 8
+    for v in values:
+        assert set(json.loads(v)) == set(Notification.model_fields)
+        Notification.model_validate(json.loads(v))
 
 
 def test_notification_ids_are_stable_per_revision_and_source_record(observations):
@@ -131,7 +151,7 @@ def test_notification_ids_are_stable_per_revision_and_source_record(observations
     assert ids(2) != ids(1)
 
 
-def test_the_hub_rechecks_each_rule_before_running_it():
+def test_the_hub_rechecks_each_rule_before_running_it(observations):
     ok = rule("SELECT patient_id FROM silver_observations WHERE value_num > 1")
     granted = frozenset({"patient_id", "value_num"})
     ungranted = rule("SELECT patient_id FROM silver_observations WHERE units = 'x'", sid="u", granted=granted)
@@ -149,6 +169,7 @@ def test_the_hub_rechecks_each_rule_before_running_it():
 
     assert good == [ok]
     assert failed["u"].startswith("FIELD_DENIED") and failed["s"].startswith("SQL_NOT_ALLOWED")
+    assert {n["subscriptionId"] for n in delivered(observations, [ok, ungranted, smuggled])} == {SID}
 
 
 def test_a_rule_that_fails_at_runtime_is_found_alone(spark, observations):
@@ -167,10 +188,11 @@ def test_a_rule_that_fails_at_runtime_is_found_alone(spark, observations):
 def test_no_rules_means_no_output(observations):
     assert subscriptions.notifications(subscriptions.events(observations, "silver_observations"), "silver_observations",
                                        []) is None  # fmt: skip
+    assert engine.notifications(observations, "silver_observations", []) == []
 
 
 def test_a_compiled_rule_set_is_reused_across_batches(spark, observations):
-    """The hub compiles rules once per registry change (in the background) and applies them to every batch."""
+    """The reference path compiles rules once and applies them to every batch."""
     compiled = subscriptions.compile_rules([rule("SELECT patient_id FROM silver_observations WHERE value_num < 8")], 7)
     assert compiled.generation == 7 and len(compiled.chunks) == 1
     for batch in (observations, observations.where("offset >= 2")):
@@ -208,11 +230,14 @@ def test_a_stored_condition_cant_break_out_of_its_expression(where):
 
 
 def test_literals_in_the_built_sql_are_escaped(observations):
-    r = rule("SELECT patient_id FROM silver_observations WHERE value_num < 8", topic="cat.subscribers.o'brien\\x")
-    assert {n["topic"] for n in delivered(observations, [r])} == {"cat.subscribers.o'brien\\x"}
+    for sql in ("SELECT patient_id FROM silver_observations WHERE value_num < 8",
+                "SELECT patient_id FROM silver_observations WHERE coalesce(value_num, 0) < 8"):  # fmt: skip
+        r = rule(sql, topic="cat.subscribers.o'brien\\x")
+        assert {n["topic"] for n in delivered(observations, [r])} == {"cat.subscribers.o'brien\\x"}
+        assert {t for t, _, _ in reference(observations, [r])} == {"cat.subscribers.o'brien\\x"}
 
 
-DATA_CONDITIONS = [
+SIMPLE_CONDITIONS = [
     "value_num < 8",
     "8 > value_num",  # literal on the left
     "value_num >= 6.9 AND observation_cd_desc = 'Potassium'",
@@ -228,7 +253,7 @@ DATA_CONDITIONS = [
     "value_num IN (7.2, 13)",
     "value_num NOT IN (7.2)",
     "(abnormal_flag = 'LL') AND (value_num < 8)",
-    # OR of AND groups (the shape real criteria take) stays on the data path, flattened to its disjuncts
+    # OR of AND groups (the shape real criteria take) stays on the driver, flattened to its disjuncts
     "value_num > 1 OR abnormal_flag = 'HH'",
     "value_num > 7 OR abnormal_flag = 'LL'",  # P1 matches both branches: delivered once
     "patient_id IN ('P1', 'P3') AND (observation_cd_desc = 'Hemoglobin' OR value_num > 6)",
@@ -238,35 +263,20 @@ DATA_CONDITIONS = [
 ]
 
 
-def compiled_as_data(spark, sql, **kw):
-    c = subscriptions.compile_rules([rule(sql, **kw)], spark=spark)
-    assert c.data_rules == 1 and not c.chunks, f"expected the data path for: {sql}"
-    return c
-
-
-@pytest.mark.parametrize("condition", DATA_CONDITIONS)
-def test_data_rules_deliver_exactly_what_the_sql_editor_returns(spark, observations, condition):
+@pytest.mark.parametrize("condition", SIMPLE_CONDITIONS)
+def test_simple_rules_matched_on_the_driver_deliver_exactly_what_the_sql_editor_returns(spark, observations,
+                                                                                        condition):  # fmt: skip
     sql = f"SELECT patient_id FROM silver_observations WHERE {condition}"
-    spark.createDataFrame(
-        OBS, silver.OBSERVATION_SCHEMA.__class__([f for f in silver.OBSERVATION_SCHEMA if f.name in OBS[0]])
-    ).createOrReplaceTempView("silver_observations")
-    editor = sorted(r.patient_id for r in spark.sql(sql).collect())
-
-    records = subscriptions.events(observations, "silver_observations")
-    out = subscriptions.notifications(records, "silver_observations", compiled_as_data(spark, sql)).collect()
-    assert sorted(json.loads(x.value)["payload"]["patient_id"] for x in out) == editor
+    assert simple(sql).entries, f"expected the driver for: {sql}"
+    assert sorted(n["payload"]["patient_id"] for n in delivered(observations, [rule(sql)])) == editor(spark, sql)
 
 
-@pytest.mark.parametrize("condition", DATA_CONDITIONS + ["lower(units) = 'g/dl'"])
-def test_both_paths_send_identical_notifications(spark, observations, condition):
+@pytest.mark.parametrize("condition", SIMPLE_CONDITIONS + ["lower(units) = 'g/dl'"])
+def test_the_driver_and_the_expression_path_send_identical_notifications(observations, condition):
     """Which path a rule takes is internal: the notification bytes are the same either way."""
     sql = f"SELECT patient_id, value_num, abnormal_flag, units FROM silver_observations WHERE {condition}"
-    records = subscriptions.events(observations, "silver_observations")
-    as_expression = subscriptions.compile_rules([rule(sql)])  # no SparkSession: every rule is an expression
-    either = subscriptions.compile_rules([rule(sql)], spark=spark)
-    a = sorted(x.value for x in subscriptions.notifications(records, "silver_observations", as_expression).collect())
-    b = sorted(x.value for x in subscriptions.notifications(records, "silver_observations", either).collect())
-    assert a == b
+    hub = sorted(engine.notifications(observations, "silver_observations", [rule(sql)]))
+    assert hub == reference(observations, [rule(sql)])
 
 
 @pytest.mark.parametrize(
@@ -274,37 +284,34 @@ def test_both_paths_send_identical_notifications(spark, observations, condition)
     ["lower(units) = 'g/dl'", "value_num > 1 OR lower(units) = 'x'", "NOT (value_num > 7 OR units = 'x')",
      "units LIKE '%/L'", "value_num > 'x'", "value_num = patient_id", "coalesce(abnormal_flag, 'none') = 'none'"],
 )  # fmt: skip
-def test_anything_else_keeps_the_expression_path(spark, condition):
+def test_anything_else_keeps_the_expression_path(condition):
     sql = f"SELECT patient_id FROM silver_observations WHERE {condition}"
-    c = subscriptions.compile_rules([rule(sql)], spark=spark)
-    assert c.data_rules == 0 and len(c.chunks) == 1
+    with pytest.raises(matching.RuleNotSimple):
+        simple(sql)
+    rs = engine.RuleSet("silver_observations")
+    assert rs.place(subscriptions.runnable([rule(sql)])[0][0], "app") is False and len(rs.expressions) == 1
 
 
-def test_a_thousand_data_rules_are_one_fixed_plan(spark, observations):
+def test_a_thousand_simple_rules_are_matched_on_the_driver(observations):
     rules = [rule(f"SELECT patient_id FROM silver_observations WHERE value_num > {i % 20}", sid=f"s{i}", name=f"r{i}")
              for i in range(1000)]  # fmt: skip
-    c = subscriptions.compile_rules(rules, spark=spark)
-    assert c.data_rules == 1000 and not c.chunks
-    records = subscriptions.events(observations, "silver_observations")
-    out = subscriptions.notifications(records, "silver_observations", c).collect()
+    out = delivered(observations, rules)
     # value_num 7.2 matches thresholds 0..7 (8 of 20), 13.0 matches 0..12 (13), 6.9 matches 0..6 (7); 50 rules each.
     assert len(out) == (8 + 13 + 7) * 50
 
 
-def test_data_rules_are_indexed_by_a_string_equality_when_they_have_one(spark):
-    keyed = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE patient_id IN ('P1', 'P1', 'P4') "
-                                    "AND value_num > 1")  # fmt: skip
-    assert sorted(v for *_, v in keyed.index.rows()) == ["P1", "P4"] and keyed.scan is None, "one row per value"
-    numeric = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE value_num > 1")
-    assert numeric.index is None and numeric.scan.count() == 1, "no string equality: compared with every record"
+def test_simple_rules_are_indexed_by_a_string_equality_when_they_have_one():
+    keyed = simple("SELECT patient_id FROM silver_observations WHERE patient_id IN ('P1', 'P1', 'P4') "
+                   "AND value_num > 1")  # fmt: skip
+    assert sorted(v for _, v in keyed._index) == ["P1", "P4"] and not keyed._scan, "one entry per value"
+    numeric = simple("SELECT patient_id FROM silver_observations WHERE value_num > 1")
+    assert numeric.index_size() == 0 and len(numeric._scan) == 1, "no string equality: compared with every record"
 
 
-def test_a_record_matches_an_indexed_rule_once_even_if_several_values_could_index_it(spark, observations):
+def test_a_record_matches_an_indexed_rule_once_even_if_several_values_could_index_it(observations):
     sql = ("SELECT patient_id FROM silver_observations WHERE observation_cd_desc = 'Hemoglobin' "
            "AND patient_id IN ('P1', 'P2')")  # fmt: skip
-    out = subscriptions.notifications(subscriptions.events(observations, "silver_observations"), "silver_observations",
-                                      compiled_as_data(spark, sql)).collect()  # fmt: skip
-    assert sorted(json.loads(x.value)["payload"]["patient_id"] for x in out) == ["P1", "P2"]
+    assert sorted(n["payload"]["patient_id"] for n in delivered(observations, [rule(sql)])) == ["P1", "P2"]
 
 
 def test_the_api_accepts_exactly_the_hubs_sources():
@@ -314,98 +321,75 @@ def test_the_api_accepts_exactly_the_hubs_sources():
     assert set(subscriptions.SOURCES) == rules.SOURCES
 
 
-def test_the_index_key_is_the_most_selective_equality_not_the_first(spark):
+def test_the_index_key_is_the_most_selective_equality_not_the_first():
     """A dynamic patient rule names its message types and codes first; it is indexed on the patient list."""
-    c = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE units IN ('g/dL', 'mmol/L') "
-                                "AND observation_cd_desc = 'Hemoglobin' AND patient_id IN ('P1', 'P2')")  # fmt: skip
-    assert c.index.columns == {"patient_id"}
-    c = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE units = 'g/dL' "
-                                "AND observation_cd = '718-7'", granted=GRANTED | {"observation_cd"})  # fmt: skip
-    assert c.index.columns == {"observation_cd"}, "codes before other strings"
+    m = simple("SELECT patient_id FROM silver_observations WHERE units IN ('g/dL', 'mmol/L') "
+               "AND observation_cd_desc = 'Hemoglobin' AND patient_id IN ('P1', 'P2')")  # fmt: skip
+    assert set(m._columns) == {"patient_id"}
+    m = simple("SELECT patient_id FROM silver_observations WHERE units = 'g/dL' AND observation_cd = '718-7'",
+               granted=GRANTED | {"observation_cd"})  # fmt: skip
+    assert set(m._columns) == {"observation_cd"}, "codes before other strings"
 
 
-def test_each_branch_of_an_or_is_indexed_on_its_own_key(spark):
-    c = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE patient_id = 'P1' "
-                                "OR (observation_cd = '718-7' AND units = 'g/dL')",
-                         granted=GRANTED | {"observation_cd"})  # fmt: skip
-    assert sorted((d, col, v) for _, d, col, v in c.index.rows()) == [
-        (0, "patient_id", "P1"),
-        (1, "observation_cd", "718-7"),
-    ]
+def test_each_branch_of_an_or_is_indexed_on_its_own_key():
+    m = simple("SELECT patient_id FROM silver_observations WHERE patient_id = 'P1' "
+               "OR (observation_cd = '718-7' AND units = 'g/dL')", granted=GRANTED | {"observation_cd"})  # fmt: skip
+    assert sorted(m._index) == [("observation_cd", "718-7"), ("patient_id", "P1")]
 
 
-def test_a_long_patient_list_is_one_index_row_per_patient_and_its_clauses_are_stored_once(spark, observations):
+def test_a_long_patient_list_is_one_index_entry_per_patient_per_branch(observations):
     patients = [f"MRN{i:06d}" for i in range(2_000)] + ["P1", "P3"]
     sql = (f"SELECT patient_id FROM silver_observations WHERE patient_id IN ({', '.join(repr(p) for p in patients)}) "
            "AND (observation_cd_desc = 'Hemoglobin' OR abnormal_flag = 'HH')")  # fmt: skip
-    c = compiled_as_data(spark, sql)
-    assert len(c.index) == 2 * len(patients), "one row per patient, per branch"
-    assert c.index.columns == {"patient_id"} and c.rules_table.count() == 2, (
-        "clauses live once per branch, not per patient"
-    )
-    out = subscriptions.notifications(subscriptions.events(observations, "silver_observations"),
-                                      "silver_observations", c).collect()  # fmt: skip
-    assert sorted(json.loads(x.value)["payload"]["patient_id"] for x in out) == ["P1", "P3"]
+    m = simple(sql)
+    assert m.index_size() == 2 * len(patients) and set(m._columns) == {"patient_id"}
+    assert sorted(n["payload"]["patient_id"] for n in delivered(observations, [rule(sql)])) == ["P1", "P3"]
 
 
-def test_a_record_that_matches_several_branches_is_delivered_once_with_one_notification_id(spark, observations):
+def test_a_record_that_matches_several_branches_is_delivered_once_with_one_notification_id(observations):
     sql = "SELECT patient_id FROM silver_observations WHERE patient_id = 'P1' OR value_num < 8 OR abnormal_flag = 'LL'"
-    out = subscriptions.notifications(subscriptions.events(observations, "silver_observations"),
-                                      "silver_observations", compiled_as_data(spark, sql)).collect()  # fmt: skip
-    ids = [json.loads(x.value)["notificationId"] for x in out]
+    ids = [n["notificationId"] for n in delivered(observations, [rule(sql)])]
     assert len(ids) == len(set(ids)) == 2  # P1 (all three branches) and P3 (value_num 6.9)
 
 
-def test_too_many_branches_keep_the_expression_path(spark):
+def test_too_many_branches_keep_the_expression_path():
     from subscription_api.rules import MAX_DISJUNCTS
 
     groups = " AND ".join(f"(value_num > {i} OR units = 'u{i}')" for i in range(7))  # 2**7 = 128 branches
     assert MAX_DISJUNCTS < 2**7
-    c = subscriptions.compile_rules([rule(f"SELECT patient_id FROM silver_observations WHERE {groups}")], spark=spark)
-    assert c.data_rules == 0 and len(c.chunks) == 1
+    with pytest.raises(matching.RuleNotSimple):
+        simple(f"SELECT patient_id FROM silver_observations WHERE {groups}")
 
 
-def test_the_converted_customer_criteria_run_indexed_on_the_data_path(spark):
-    """docs/examples/criteria.md's rules (OR of AND groups, long IN lists) are data rules, each group indexed on its
-    most selective list: patients when there is one, else codes or points of care, never the message type."""
-    import re
+def test_the_converted_customer_criteria_are_simple_and_indexed():
+    """docs/examples/criteria.md's rules (OR of AND groups, long IN lists) are matched on the driver, each group indexed
+    on its most selective list: patients when there is one, else codes or points of care, never the message type."""
     from pathlib import Path
 
     doc = (Path(__file__).resolve().parents[1] / "docs/examples/criteria.md").read_text()
     for sql in re.findall(r"`(SELECT [^`]+ FROM silver_[^`]+)`", doc):
         r = parse(sql.replace(", ...", ""), set(subscriptions.SOURCES), "cat.sub_app_a")
         everything = frozenset(f.name for f in subscriptions.SOURCES[r.source])
-        c = subscriptions.compile_rules([Rule(SID, "c", 1, r.source, r.where, list(r.fields), "t", everything)],
-                                        spark=spark)  # fmt: skip
-        assert c.data_rules == 1 and c.scan is None, sql
-        key_cols = c.index.columns
-        assert "msg_type" not in key_cols, (sql, key_cols)
+        m = matching.Matcher()
+        m.place(subscriptions.runnable([Rule(SID, "c", 1, r.source, r.where, list(r.fields), "t", everything)])[0][0],
+                "app")  # fmt: skip
+        assert not m._scan, sql
+        assert "msg_type" not in m._columns, (sql, set(m._columns))
         if "patient_id IN" in sql:
-            assert key_cols == {"patient_id"}
+            assert set(m._columns) == {"patient_id"}
 
 
-def test_the_plan_does_not_grow_with_a_patient_list(spark, observations):
-    """The index is a lookup in the hub's memory: a batch's plan carries its candidates, not a row per listed patient
-    (a 1.2 M-row broadcast index made every batch re-ship it; docs/SCALABILITY.md)."""
+def test_the_read_plan_does_not_grow_with_a_patient_list(observations):
+    """Simple rules aren't in the batch's plan at all: the driver matches them (a 1.2 M-row broadcast index once made
+    every batch re-ship it; docs/SCALABILITY.md). The read renders the fields they select, whatever their lists."""
 
     def plan(n):
         patients = ["P1"] + [f"MRN{i:06d}" for i in range(n)]
-        c = compiled_as_data(spark, f"SELECT patient_id FROM silver_observations WHERE patient_id IN "
-                                    f"({', '.join(repr(p) for p in patients)})")  # fmt: skip
-        out = subscriptions.notifications(subscriptions.events(observations, "silver_observations"),
-                                          "silver_observations", c)  # fmt: skip
-        return re.sub(r"#\d+L?", "#", out._jdf.queryExecution().optimizedPlan().toString())  # expression IDs vary
+        listed = ", ".join(repr(p) for p in patients)
+        r = rule(f"SELECT patient_id FROM silver_observations WHERE patient_id IN ({listed})")
+        df = engine.frame(observations, "silver_observations", set(r.fields), [], subscriptions.CHUNK)
+        return re.sub(r"#\d+L?", "#", df._jdf.queryExecution().optimizedPlan().toString())  # expression IDs vary
 
     small, large = plan(10), plan(5_000)
     assert "MRN004999" not in large
     assert large == small
-
-
-def test_the_hubs_collected_rows_give_the_same_notifications(spark, observations):
-    c = compiled_as_data(spark, "SELECT patient_id FROM silver_observations WHERE patient_id IN ('P1', 'P3') "
-                                "AND value_num > 1")  # fmt: skip
-    records = subscriptions.events(observations, "silver_observations")
-    rows = records.collect()
-    looked_up = subscriptions.notifications(records, "silver_observations", c, rows).collect()
-    assert sorted(looked_up) == sorted(subscriptions.notifications(records, "silver_observations", c).collect())
-    assert sorted(json.loads(x.value)["payload"]["patient_id"] for x in looked_up) == ["P1", "P3"]

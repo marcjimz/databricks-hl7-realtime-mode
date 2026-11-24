@@ -10,6 +10,8 @@
 #   service credential <catalog>_eventhubs -> the same connector (Event Hubs Data Sender + Receiver)
 #   service credential sub_<app>_eventhubs -> each subscriber app's own connector (Data Receiver on its hub only),
 #                                             ACCESS granted to that app's service principal only
+#   service credential hub_<hub>_eventhubs -> each team subscription hub's connector (Receiver on silver, Sender on
+#                                             its apps' hubs), ACCESS granted to the hub's service principal only
 # A catalog built for an earlier workspace (property hl7.workspace_id) is dropped and recreated: its tables belonged
 # to that workspace's pipelines and their storage is gone.
 set -euo pipefail
@@ -102,4 +104,17 @@ while read -r app sp connector principal; do
   credential "$name" SERVICE "$connector" "$principal"
   $DBX grants update credential "$name" --json "{\"changes\":[{\"principal\":\"$sp\",\"add\":[\"ACCESS\"]}]}" >/dev/null
   echo "ok       ACCESS on $name for $app ($sp)"
+done
+
+# Team subscription hubs (terraform var subscriber_hubs): one credential per hub (read silver, write only its apps'
+# hubs), usable only by the service principal the hub's pipeline runs as.
+terraform -chdir=infra/azure output -json subscriber_hubs | python3 -c '
+import sys, json
+for hub, a in json.load(sys.stdin).items():
+    print(hub, a["application_id"], a["connector_id"], a["connector_principal_id"])' |
+while read -r hub sp connector principal; do
+  name="hub_${hub}_eventhubs"
+  credential "$name" SERVICE "$connector" "$principal"
+  $DBX grants update credential "$name" --json "{\"changes\":[{\"principal\":\"$sp\",\"add\":[\"ACCESS\"]}]}" >/dev/null
+  echo "ok       ACCESS on $name for hub $hub ($sp)"
 done

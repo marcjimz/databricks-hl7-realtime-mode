@@ -11,7 +11,10 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from subscription_api import app as api  # noqa: E402
 
-VIEW_COLUMNS = {"cat.sub_app_a.silver_observations": {"patient_id", "value_num", "observation_cd_desc"}}
+VIEW_COLUMNS = {
+    "cat.sub_app_a.silver_observations": {"patient_id", "value_num", "observation_cd_desc"},
+    "cat.sub_app_c.silver_observations": {"patient_id", "value_num", "observation_cd_desc"},
+}
 POTASSIUM = (
     "SELECT patient_id, value_num FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num > 6"
 )
@@ -49,11 +52,32 @@ def client(pg, monkeypatch):
 
 A = {"X-Forwarded-Email": "sp-a"}
 B = {"X-Forwarded-Email": "sp-b"}
+C = {"X-Forwarded-Email": "sp-c"}  # app-c: on a team's own hub (bu_demo)
 
 
 def declare(client, items, who=A):
     return client.put("/api/v1/subscriptions", json={"subscriptions": [{"name": n, "sql": s} for n, s in items]},
                       headers=who)  # fmt: skip
+
+
+def verdicts(owner, app_role, state="ACTIVE"):
+    """The hub that runs each of the app's enabled rules records `state` for its current revision."""
+    owner.run("INSERT INTO subscription_registry.status (subscription_id, hub, revision, state) "
+              "SELECT subscription_id, subscription_registry.executing_hub(owner, tier), revision, :st "
+              "FROM subscription_registry.subscriptions WHERE owner = :o AND enabled "
+              "ON CONFLICT (subscription_id, hub) DO UPDATE SET revision = excluded.revision, state = excluded.state",
+              o=app_role, st=state)  # fmt: skip
+
+
+def beat(owner, hub="edp_shared", tier="realtime", source="silver_observations"):
+    owner.run("INSERT INTO subscription_registry.hub_heartbeat (hub, tier, source, last_batch_at, batch_id, rules) "
+              "VALUES (:h, :t, :s, now(), 1, 1) ON CONFLICT (hub, tier, source) DO UPDATE SET last_batch_at = now()",
+              h=hub, t=tier, s=source)  # fmt: skip
+
+
+def stop(owner, hub, tier="realtime", source="silver_observations"):
+    owner.run("DELETE FROM subscription_registry.hub_heartbeat WHERE hub = :h AND tier = :t AND source = :s",
+              h=hub, t=tier, s=source)  # fmt: skip
 
 
 def test_declaring_registers_the_canonical_sql_and_says_what_changed(client):
@@ -137,11 +161,17 @@ def test_the_connection_is_everything_an_app_needs_to_read_its_own_topic(client,
         "bootstrapServers": "ns1.servicebus.windows.net:9093",
         "credential": "sub_app_a_eventhubs",
         "tokenScope": "https://ns1.servicebus.windows.net/.default",
+        "hub": "edp_shared",
+        "sources": ["silver_observations"],
+        "fields": ["observation_cd_desc", "patient_id", "value_num"],
     }
     b = client.get("/api/v1/connection", headers=B).json()
     assert (b["topic"], b["credential"]) == ("cat.subscribers.app-b", "sub_app_b_eventhubs"), (
         "each app gets only its own"
     )
+    assert (b["sources"], b["fields"]) == (["silver_encounters", "silver_observations"], ["patient_id"])
+    c = client.get("/api/v1/connection", headers=C).json()
+    assert (c["hub"], c["topic"]) == ("bu_demo", "cat.subscribers.app-c"), "an app on a team's hub: same contract"
     assert declare(client, [("k", POTASSIUM)]).json()["accepted"][0]["destination"] == a["topic"], "= declare's topic"
     assert client.get("/api/v1/connection").status_code == 401
     r = client.get("/api/v1/connection", headers={"X-Forwarded-Email": "not-onboarded"})
@@ -165,33 +195,82 @@ def test_wait_reports_pending_then_ready_once_the_hub_runs_the_revision(client, 
     sid = declare(client, [("wait-me", POTASSIUM)]).json()["accepted"][0]["subscriptionId"]
     assert client.get("/api/v1/subscriptions", headers=A).json()["state"] == "PENDING"
     owner = pg()
-    rev = owner.run("SELECT revision FROM subscription_registry.subscriptions WHERE subscription_id = CAST(:s AS uuid)",
-                    s=sid)[0][0]  # fmt: skip
-    owner.run("INSERT INTO subscription_registry.status (subscription_id, revision, state) VALUES "
-              "(CAST(:s AS uuid), :r, 'ACTIVE') ON CONFLICT (subscription_id) DO UPDATE SET revision = :r, "
-              "state = 'ACTIVE'", s=sid, r=rev)  # fmt: skip
-    for sub in owner.run("SELECT subscription_id::text, revision FROM subscription_registry.subscriptions "
-                         "WHERE owner = 'app_a' AND enabled"):  # fmt: skip
-        owner.run("INSERT INTO subscription_registry.status (subscription_id, revision, state) VALUES "
-                  "(CAST(:s AS uuid), :r, 'ACTIVE') ON CONFLICT (subscription_id) DO UPDATE SET revision = :r, "
-                  "state = 'ACTIVE'", s=sub[0], r=sub[1])  # fmt: skip
-    owner.run("INSERT INTO subscription_registry.hub_heartbeat VALUES ('silver_observations', now(), 1, 1) "
-              "ON CONFLICT (source) DO UPDATE SET last_batch_at = now()")  # fmt: skip
-    assert client.get("/api/v1/subscriptions?wait=5", headers=A).json()["state"] == "READY"
+    assert sid
+    verdicts(owner, "app_a")
+    beat(owner)
+    beat(owner, tier="deferred")
+    ready = client.get("/api/v1/subscriptions?wait=5", headers=A).json()
+    assert ready["state"] == "READY" and ready["hubName"] == "edp_shared"
+    assert {(h["hub"], h["tier"], h["source"]) for h in ready["heartbeats"]} >= {
+        ("edp_shared", "realtime", "silver_observations")}  # fmt: skip
+    assert {s["hub"] for s in ready["subscriptions"] if s["enabled"] and s["tier"] == "realtime"} == {"edp_shared"}
+
+
+def test_a_placed_revision_is_ready(client, pg):
+    """PLACED: the hub has the revision in its matcher, so it decides every record from now on (ACTIVE comes with the
+    first batch it decides)."""
+    declare(client, [("placed-k", POTASSIUM)], who=C)
+    owner = pg()
+    verdicts(owner, "app_c", "PLACED")
+    beat(owner, hub="bu_demo")
+    got = client.get("/api/v1/subscriptions?wait=2", headers=C).json()
+    assert got["state"] == "READY"
+    assert {s["name"]: s for s in got["subscriptions"]}["placed-k"]["state"] == "PLACED"
+
+
+def test_a_team_hub_app_is_stale_when_its_own_hub_stops_whoever_else_runs(client, pg):
+    declare(client, [("team-k", POTASSIUM)], who=C)
+    owner = pg()
+    verdicts(owner, "app_c")
+    beat(owner, hub="edp_shared")  # the shared hub is fine: that's not where app-c's rules run
+    stop(owner, "bu_demo")
+    stale = client.get("/api/v1/subscriptions", headers=C).json()
+    assert stale["state"] == "HUB_STALE" and "silver_observations" in stale["problems"][0]
+    assert stale["hubName"] == "bu_demo" and "silver_observations" not in stale["hub"]
+    beat(owner, hub="bu_demo")
+    assert client.get("/api/v1/subscriptions", headers=C).json()["state"] == "READY"
+
+
+def test_a_verdict_from_another_hub_doesnt_count(client, pg):
+    declare(client, [("elsewhere-k", POTASSIUM.replace("> 6", "> 5"))], who=C)
+    owner = pg()
+    owner.run(
+        "INSERT INTO subscription_registry.status (subscription_id, hub, revision, state) "
+        "SELECT subscription_id, 'edp_shared', revision, 'ACTIVE' FROM subscription_registry.subscriptions "
+        "WHERE owner = 'app_c' AND name = 'elsewhere-k' ON CONFLICT (subscription_id, hub) DO NOTHING"
+    )
+    beat(owner, hub="bu_demo")
+    got = {s["name"]: s for s in client.get("/api/v1/subscriptions", headers=C).json()["subscriptions"]}
+    assert got["elsewhere-k"]["state"] == "PENDING"
+
+
+def test_a_team_hub_apps_deferred_rule_waits_for_the_shared_deferred_hub(client, pg):
+    r = client.put("/api/v1/subscriptions/team-billing", headers=C, json={"sql": POTASSIUM, "tier": "deferred"})
+    assert r.status_code == 200 and r.json()["hub"] == "edp_shared"
+    owner = pg()
+    verdicts(owner, "app_c")
+    beat(owner, hub="bu_demo")
+    stop(owner, "edp_shared", tier="deferred")
+    stale = client.get("/api/v1/subscriptions", headers=C).json()
+    assert stale["state"] == "HUB_STALE" and "deferred:silver_observations" in stale["problems"][0]
+    beat(owner, hub="edp_shared", tier="deferred")
+    assert client.get("/api/v1/subscriptions", headers=C).json()["state"] == "READY"
+    client.delete("/api/v1/subscriptions/team-billing", headers=C)
 
 
 def test_the_rule_cap_is_a_refusal_and_applies_nothing(client, pg):
     owner = pg()
-    enabled = owner.run("SELECT count(*) FROM subscription_registry.subscriptions WHERE enabled")[0][0]
-    owner.run("UPDATE subscription_registry.limits SET value = :v WHERE name = 'max_enabled_rules'", v=enabled + 1)
+    enabled = owner.run("SELECT subscription_registry.enabled_rules('edp_shared', 'realtime')")[0][0]
+    owner.run("UPDATE subscription_registry.hubs SET max_enabled_rules = :v WHERE name = 'edp_shared'", v=enabled + 1)
     try:
         r = declare(client, [("cap-a", POTASSIUM), ("cap-b", POTASSIUM.replace("> 6", "> 9"))])
         assert r.status_code == 422 and r.json()["applied"] is False
-        assert r.json()["refused"][0]["code"] == "RULE_LIMIT_REACHED"
+        assert r.json()["refused"][0]["code"] == "RULE_LIMIT_REACHED" and "edp_shared" in r.json()["refused"][0][
+            "message"]  # fmt: skip
         names = [s["name"] for s in client.get("/api/v1/subscriptions", headers=A).json()["subscriptions"]]
         assert "cap-a" not in names, "atomic: the first rule fit, but nothing was applied"
     finally:
-        owner.run("UPDATE subscription_registry.limits SET value = 1000 WHERE name = 'max_enabled_rules'")
+        owner.run("UPDATE subscription_registry.hubs SET max_enabled_rules = 2000 WHERE name = 'edp_shared'")
 
 
 def test_names_are_checked_before_anything_else(client):
@@ -243,19 +322,12 @@ def test_a_deferred_subscription_waits_for_the_deferred_hub(client, pg):
     listed = {s["name"]: s for s in client.get("/api/v1/subscriptions", headers=A).json()["subscriptions"]}
     assert listed["billing-k"]["tier"] == "deferred"
     owner = pg()
-    owner.run(
-        "INSERT INTO subscription_registry.status (subscription_id, revision, state) "
-        "SELECT subscription_id, revision, 'ACTIVE' FROM subscription_registry.subscriptions "
-        "ON CONFLICT (subscription_id) DO UPDATE SET revision = excluded.revision, state = 'ACTIVE'"
-    )
-    owner.run(
-        "INSERT INTO subscription_registry.hub_heartbeat VALUES ('silver_observations', now(), 1, 1) "
-        "ON CONFLICT (source) DO UPDATE SET last_batch_at = now()"
-    )
-    owner.run("DELETE FROM subscription_registry.hub_heartbeat WHERE source = 'deferred:silver_observations'")
+    verdicts(owner, "app_a")
+    beat(owner)
+    stop(owner, "edp_shared", tier="deferred")
     stale = client.get("/api/v1/subscriptions", headers=A).json()
     assert stale["state"] == "HUB_STALE" and "deferred:silver_observations" in stale["problems"][0]
-    owner.run("INSERT INTO subscription_registry.hub_heartbeat VALUES ('deferred:silver_observations', now(), 1, 1)")
+    beat(owner, tier="deferred")
     assert client.get("/api/v1/subscriptions", headers=A).json()["state"] == "READY"
 
 

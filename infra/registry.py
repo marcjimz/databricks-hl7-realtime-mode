@@ -11,6 +11,12 @@
                       - UC views <catalog>.sub_<name>.<source> exposing only its granted fields: Databricks compiles
                         the app's SQL against them, and developers test rules there in the SQL editor
                       - CAN_USE on the Subscription API app
+  subscription hubs edp_shared (the platform's; the main bundle deploys it) and each team hub of terraform var
+                    subscriber_hubs (bring your own hub: the team deploys hub/ as its service principal), and which one
+                    serves each app (subscriber_apps.<app>.subscription_hub). A team hub's SP gets a login role in
+                    hub_<name> (in `hub`: it reads only its apps' rules and writes only its own rows), use of the
+                    Lakebase project, and a schema <catalog>.hub_<name> for its pipeline. Hubs gone from Terraform are
+                    deleted once their apps are back on edp_shared.
   Subscription API  its service principal joins `subscription_service` (so it can act as each app) and may read the
                     apps' views; the Lakebase Data API is turned off, so the API is the only way in
   app settings      examples/subscribers/apps/<app>.properties (gitignored) for the example apps, rewritten
@@ -31,6 +37,7 @@ from pathlib import Path
 import pg8000.native
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.apps import AppAccessControlRequest, AppPermissionLevel
+from databricks.sdk.service.iam import AccessControlRequest, PermissionLevel
 from databricks.sdk.service.postgres import Catalog, CatalogCatalogSpec
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +65,89 @@ def role(app: str) -> str:
 def credential(app: str) -> str:
     """The app's UC service credential for its hub (infra/uc.sh creates it with this name)."""
     return f"sub_{app.replace('-', '_')}_eventhubs"
+
+
+SHARED_HUB = "edp_shared"  # the platform's subscription hub (registry.sql seeds it; the main bundle deploys it)
+
+
+def hub_role(hub: str) -> str:
+    """A team hub's group role (and the name of its pipeline's schema, <catalog>.hub_<name>)."""
+    return f"hub_{hub}"
+
+
+def hub_credential(hub: str) -> str:
+    """A team hub's UC service credential (infra/uc.sh creates it with this name)."""
+    return f"hub_{hub}_eventhubs"
+
+
+def _login(db, principal: str):
+    """The principal's own login role: a Databricks identity on Lakebase, a plain login role on a local PostgreSQL."""
+    if db.run("SELECT 1 FROM pg_roles WHERE rolname = :r", r=principal):
+        return
+    if db.run("SELECT 1 FROM pg_proc WHERE proname = 'databricks_create_role'"):
+        db.run("SELECT databricks_create_role(:r, 'SERVICE_PRINCIPAL')", r=principal)
+    else:
+        db.run(f'CREATE ROLE "{principal}" LOGIN')
+
+
+def _hub_grants(db, hub: str, principal: str, me: str):
+    """A team hub's Postgres identity: hub_<name> in `hub` (whose grants and RLS let it read only its apps' rules and
+    write only its own rows), and the hub's service principal, the one member, so its pipeline connects as itself."""
+    r = hub_role(hub)  # created, in `hub`, by subscription_registry.onboard_hub
+    _login(db, principal)
+    members = (
+        "SELECT u.rolname FROM pg_auth_members m JOIN pg_roles u ON u.oid = m.member "
+        "JOIN pg_roles g ON g.oid = m.roleid WHERE g.rolname = :g AND u.rolname <> ALL (CAST(:keep AS text[]))"
+    )
+    for (old,) in db.run(members, g=r, keep=[principal, me]):  # the deployer keeps managing the role it created
+        db.run(f'REVOKE {r} FROM "{old}"')
+    db.run(f'GRANT {r} TO "{principal}"')
+
+
+def onboard_hubs(db, hubs: dict, apps: dict, me: str, catalog: str) -> list[str]:
+    """Register the subscription hubs and which one serves each app's realtime rules: edp_shared (the platform's, run
+    as the deployer `me`, which also runs every app's deferred rules) and each team hub of terraform var
+    subscriber_hubs. Apps move before a hub that's gone from Terraform is deleted. Returns what it did, a line each."""
+    done = []
+    db.run(
+        "INSERT INTO subscription_registry.hubs (name, principal, eventhubs_credential, runs_deferred) "
+        "VALUES (:n, :p, :c, true) ON CONFLICT (name) DO UPDATE SET principal = excluded.principal, "
+        "eventhubs_credential = excluded.eventhubs_credential",
+        n=SHARED_HUB, p=me, c=f"{catalog}_eventhubs",
+    )  # fmt: skip
+    for name, h in hubs.items():
+        db.run("SELECT subscription_registry.onboard_hub(:n, :p, :c, :m)", n=name, p=h["application_id"],
+               c=hub_credential(name), m=h.get("max_enabled_rules", 2000))  # fmt: skip
+        _hub_grants(db, name, h["application_id"], me)
+        done.append(f"ok       hub {name} runs as {h['application_id']} ({hub_role(name)}, {hub_credential(name)})")
+    for app, a in apps.items():
+        hub = a.get("subscription_hub") or SHARED_HUB
+        for (moved,) in db.run(
+            "UPDATE subscription_registry.apps SET hub = :h WHERE app_role = :r AND hub <> :h RETURNING app_name",
+            h=hub, r=role(app),
+        ):  # fmt: skip
+            done.append(f"moved    app {moved} to hub {hub}")
+    for (gone,) in db.run(
+        "DELETE FROM subscription_registry.hubs WHERE name <> ALL (CAST(:k AS text[])) RETURNING name",
+        k=[SHARED_HUB, *hubs],
+    ):
+        db.run(f"DROP ROLE IF EXISTS {hub_role(gone)}")
+        done.append(f"removed  hub {gone} (no longer in subscriber_hubs)")
+    return done
+
+
+def grant_hub_workspace(w, warehouse_id: str, catalog: str, hubs: dict):
+    """What a team hub's pipeline needs in the workspace, as its service principal: a schema of its own to target
+    (<catalog>.hub_<name>; it writes no tables there) and use of the registry's Lakebase project. Its Event Hubs
+    credential is infra/uc.sh's."""
+    for name, h in hubs.items():
+        sp, schema = h["application_id"], f"{catalog}.{hub_role(name)}"
+        sql(w, warehouse_id, f"CREATE SCHEMA IF NOT EXISTS {schema} COMMENT 'Subscription hub {name}: its pipeline'")
+        sql(w, warehouse_id, f"GRANT USE CATALOG ON CATALOG {catalog} TO `{sp}`")
+        sql(w, warehouse_id, f"GRANT USE SCHEMA, CREATE TABLE, CREATE MATERIALIZED VIEW ON SCHEMA {schema} TO `{sp}`")
+        w.permissions.update("database-projects", PROJECT, access_control_list=[AccessControlRequest(
+            service_principal_name=sp, permission_level=PermissionLevel.CAN_USE)])  # fmt: skip
+        print(f"ok       hub {name}: schema {schema} and Lakebase project {PROJECT} for {sp}")
 
 
 def sql(w, warehouse_id: str, statement: str):
@@ -125,7 +215,11 @@ def main():
     ):
         db.run(f'REVOKE "{old}" FROM authenticator')
         print(f"revoked  {old} from the Data API's authenticator")
+    hubs = tf_output("subscriber_hubs")
+    hub_principals = {h["application_id"] for h in hubs.values()}  # a team hub's SP logs in as itself (onboard_hubs)
     for app in tf_output("subscriber_apps").values():  # apps never log in to the registry: drop an old login role
+        if app["application_id"] in hub_principals:
+            continue
         if db.run("SELECT 1 FROM pg_roles WHERE rolname = :r", r=app["application_id"]):
             db.run(f'DROP ROLE "{app["application_id"]}"')
             print(
@@ -219,6 +313,11 @@ def main():
             f"templates {sorted(templates) or 'none'}"
         )
 
+    # Subscription hubs: edp_shared and the team hubs (bring your own hub), and which one serves each app.
+    for line in onboard_hubs(db, hubs, apps, me, catalog):
+        print(line)
+    grant_hub_workspace(w, warehouse_id, catalog, hubs)
+
     data_api_url = f"https://{host}/api/2.0/workspace/{tf_output('workspace_id')}/rest/{DATABASE}"  # the old bypass
     out = ROOT / "examples/subscribers/apps"
     out.mkdir(exist_ok=True)
@@ -227,6 +326,7 @@ def main():
             "# Written by `make registry` (rewritten every run). No secrets: the profile holds the SP's credentials.\n"
             "# The app needs only these two: it looks up the API's URL by app name, then gets its topic and\n"
             "# Event Hubs connection from the API.\n"
+            f"# Its realtime rules run on subscription hub {apps[name].get('subscription_hub') or SHARED_HUB}.\n"
             f"databricks.profile   = {name}\n"
             f"api.app              = {API_APP}\n"
             "# E2E checks (--e2e): all must be refused to this app.\n"

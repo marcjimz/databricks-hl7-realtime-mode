@@ -44,7 +44,15 @@ class AppTest {
         assertNull(p.getProperty("--duration"));
 
         assertThrows(IllegalArgumentException.class, () -> App.settings(List.of(f.toString(), "client_secret=x")));
-        assertThrows(IllegalArgumentException.class, () -> App.required(p, "eventhubs.namespace"));
+        assertThrows(IllegalArgumentException.class, () -> App.required(p, "api.app"), "a setting the app needs");
+    }
+
+    @Test
+    void durationsReadLikeThePythonExamples() {
+        assertEquals(java.time.Duration.ofSeconds(40), App.duration(List.of("--duration=40")));
+        assertEquals(java.time.Duration.ofSeconds(90), App.duration(List.of("--duration=PT1M30S")));
+        assertNull(App.duration(List.of("--e2e")));
+        assertThrows(IllegalArgumentException.class, () -> App.duration(List.of("--duration=soon")));
     }
 
     @Test
@@ -57,7 +65,7 @@ class AppTest {
 
     @Test
     void onlyAServicePrincipalMayRunTheApp() {
-        assertTrue(App.isServicePrincipal("38fafc55-d28b-4f48-8d17-299f8d2698ee"));
+        assertTrue(App.isServicePrincipal("00000000-0000-4000-8000-000000000001"));
         assertFalse(App.isServicePrincipal("someone@example.com"));
         assertFalse(App.isServicePrincipal(null));
     }

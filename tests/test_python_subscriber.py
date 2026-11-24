@@ -100,6 +100,18 @@ def test_the_generated_client_runs_the_whole_handshake(client):
     assert api.call(cancel, c, name="critical-k").name == "critical-k"
 
 
+def test_the_connection_names_the_apps_hub_and_its_grant(client):
+    """What the e2e reads: the hub that runs the app's realtime rules (edp_shared unless the platform assigned it its
+    own), the sources and columns it may read, and that hub's heartbeats."""
+    c = client("sp-a")
+    conn = api.call(get_connection, c)
+    assert conn.hub == "edp_shared"
+    assert list(conn.sources) == ["silver_observations"]
+    assert {"patient_id", "value_num", "observation_cd_desc"} <= set(conn.fields)
+    status = api.call(get_status, c, wait=0)
+    assert status.hub_name == "edp_shared" and isinstance(status.heartbeats, list)
+
+
 def test_refusals_carry_databricks_errors_and_apply_nothing(client):
     c = client("sp-a")
     with pytest.raises(api.ApiError) as e:
@@ -226,6 +238,17 @@ def test_the_consumer_uses_entra_tokens_and_follows_event_hubs_guidance():
     assert not {k for k in cfg if "password" in k or "username" in k}, "no keys or connection strings"
 
 
+def test_the_producer_authenticates_like_the_consumer_and_is_not_a_consumer():
+    tokens = eventhubs.Tokens(lambda: ("t", NOW + 3600))
+    p = eventhubs.producer_config("ns1.servicebus.windows.net:9093", tokens)
+    c = eventhubs.consumer_config("ns1.servicebus.windows.net:9093", "g1", tokens)
+    for k in ("bootstrap.servers", "security.protocol", "sasl.mechanism", "metadata.max.age.ms",
+              "connections.max.idle.ms"):  # fmt: skip
+        assert p[k] == c[k], k
+    assert not {"group.id", "enable.auto.commit", "auto.offset.reset", "session.timeout.ms"} & set(p)
+    assert (p["request.timeout.ms"], p["message.timeout.ms"]) == (20_000, 30_000), "as the Java example's producer()"
+
+
 # --- Settings ---------------------------------------------------------------------------------------------------------
 def test_settings_are_found_in_the_shared_apps_folder(tmp_path):
     apps = tmp_path / "apps"
@@ -255,7 +278,7 @@ def test_the_api_is_found_by_app_name_unless_its_url_is_set():
 
 
 def test_only_a_service_principal_may_run_the_app():
-    assert subscriber.is_service_principal("38fafc55-d28b-4f48-8d17-299f8d2698ee")
+    assert subscriber.is_service_principal("00000000-0000-4000-8000-000000000001")
     assert not subscriber.is_service_principal("someone@example.com")
 
 

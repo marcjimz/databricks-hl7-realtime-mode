@@ -6,6 +6,7 @@ import com.databricks.hl7.subscriber.api.SubscriptionsApi;
 import com.databricks.hl7.subscriber.api.client.ApiException;
 import com.databricks.hl7.subscriber.api.model.Accepted;
 import com.databricks.hl7.subscriber.api.model.Connection;
+import com.databricks.hl7.subscriber.api.model.Heartbeat;
 import com.databricks.hl7.subscriber.api.model.Notification;
 import com.databricks.hl7.subscriber.api.model.One;
 import com.databricks.hl7.subscriber.api.model.Refusal;
@@ -16,6 +17,7 @@ import com.databricks.sdk.WorkspaceClient;
 import com.databricks.sdk.service.iam.MeRequest;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,26 +33,65 @@ import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.errors.AuthorizationException;
 
 /**
- * End-to-end checks against the live Subscription API, hub, and Event Hubs, as this app's service principal. Every
- * check has an input, an expected result, and the actual result; the run prints them as a table and exits 1 if any fails.
+ * End-to-end checks against the live Subscription API, hub, and Event Hubs, as this app's service principal: the same
+ * 26 checks as the Python example's e2e.py. Every check has an input, an expected result, and the actual result; the run
+ * prints them as a table and exits 1 if any fails (a skipped check doesn't fail it).
  *
  * <pre>
  *   java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e                  (local, with the SP's profile)
  *   DATABRICKS_BUNDLE_ROOT=examples/subscribers/java databricks bundle run e2e   (workspace job, run as the SP)
  * </pre>
  *
- * It only uses subscriptions named e2e-* (one at a time, cancelled at the end) and its own consumer group, so it leaves
- * the app's own subscriptions alone. Settings (written by `make registry`): e2e.forbidden_credential, e2e.forbidden_topic,
- * e2e.own_topic, e2e.base_schema, e2e.data_api_url.
+ * It only uses subscriptions named e2e-* (one at a time; every one still enabled is cancelled at the end) and its own
+ * consumer group, so it leaves the app's own subscriptions alone. It runs the same whichever hub serves the app
+ * (edp_shared, or a team's own): the API names it, and the heartbeat check reads that hub's. Settings (written by
+ * `make registry`): e2e.forbidden_credential, e2e.forbidden_topic, e2e.own_topic, e2e.base_schema, e2e.data_api_url.
  */
 public final class E2E {
     private static final Duration WAIT = Duration.ofMinutes(3);
-    private static final String GOOD = "SELECT patient_id, value_num FROM silver_observations "
-            + "WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5";
-    private static final String CHANGED = "SELECT patient_id, value_num, units FROM silver_observations "
-            + "WHERE observation_cd_desc = 'Potassium' AND value_num >= 7.0";
+    static final List<String> SOURCES = List.of("silver_encounters", "silver_observations", "silver_orders",
+            "silver_diagnoses", "silver_documents");
+    /** Every subscription name the checks register. */
+    static final List<String> NAMES = List.of("e2e-potassium", "e2e-ok", "e2e-refused");
 
-    record Check(String name, String input, String expected, String actual, boolean pass) { }
+    /** The rule the checks register, and its change. */
+    record Rules(String good, String changed) { }
+
+    /**
+     * Potassium by the test's name if the app may read that column, else by its LOINC code (e.g. under the
+     * ed-respiratory-monitoring template).
+     */
+    static Rules potassium(List<String> fields) {
+        String test = fields == null || fields.isEmpty() || fields.contains("observation_cd_desc")
+                ? "observation_cd_desc = 'Potassium'" : "alt_observation_cd = '2823-3'";
+        return new Rules("SELECT patient_id, value_num FROM silver_observations WHERE " + test + " AND value_num >= 6.5",
+                "SELECT patient_id, value_num, units FROM silver_observations WHERE " + test + " AND value_num >= 7.0");
+    }
+
+    /** A silver source this app isn't granted (the first), or null if it's granted all of them. */
+    static String ungrantedSource(List<String> sources) {
+        return SOURCES.stream().filter(s -> sources == null || !sources.contains(s)).findFirst().orElse(null);
+    }
+
+    /** The e2e-* subscriptions still enabled. */
+    static List<String> leftovers(List<Subscription> subscriptions) {
+        return subscriptions.stream().filter(s -> Boolean.TRUE.equals(s.getEnabled()) && s.getName().startsWith("e2e-"))
+                .map(Subscription::getName).sorted().toList();
+    }
+
+    /** When `hub` (this app's) last ran a realtime batch of `source`, or null. */
+    static String heartbeat(List<Heartbeat> heartbeats, String hub, String source) {
+        if (heartbeats == null) return null;
+        for (Heartbeat h : heartbeats) {
+            if (hub != null && hub.equals(h.getHub()) && "realtime".equals(h.getTier()) && source.equals(h.getSource())) {
+                return String.valueOf(h.getLastBatchAt());
+            }
+        }
+        return null;
+    }
+
+    /** One row of the table; result is PASS, FAIL, or SKIP. */
+    record Check(String name, String input, String expected, String actual, String result) { }
 
     private final List<Check> checks = new ArrayList<>();
     private final WorkspaceClient workspace;
@@ -58,7 +99,7 @@ public final class E2E {
     private final Connection connection;
     private final Properties cfg;
 
-    private E2E(WorkspaceClient workspace, SubscriptionsApi api, Connection connection, Properties cfg) {
+    E2E(WorkspaceClient workspace, SubscriptionsApi api, Connection connection, Properties cfg) {
         this.workspace = workspace;
         this.api = api;
         this.connection = connection;
@@ -72,16 +113,30 @@ public final class E2E {
         } catch (Exception e) {
             e2e.record("run", "-", "completes", "aborted: " + e, false);
         } finally {
-            for (String name : List.of("e2e-potassium", "e2e-ok")) {
-                try {
-                    api.cancel(name);
-                } catch (ApiException alreadyGone) {
-                    // 404: nothing to clean up
-                }
-            }
+            cleanup(api);
         }
         e2e.print();
-        return e2e.checks.stream().allMatch(Check::pass) ? 0 : 1;
+        return e2e.ok() ? 0 : 1;
+    }
+
+    /**
+     * Cancel every e2e-* subscription still enabled (an accepted refusal check leaves e2e-refused); if the API can't
+     * list them, every name the checks use.
+     */
+    static void cleanup(SubscriptionsApi api) {
+        List<String> names;
+        try {
+            names = leftovers(api.getStatus(0).getSubscriptions());
+        } catch (ApiException | RuntimeException e) {
+            names = NAMES;
+        }
+        for (String name : names) {
+            try {
+                api.cancel(name);
+            } catch (ApiException alreadyGone) {
+                // 404: nothing to clean up
+            }
+        }
     }
 
     private String setting(String key) {
@@ -99,6 +154,9 @@ public final class E2E {
         record("Connection from the API", "GET /api/v1/connection", "this app's own topic and credential",
                 connection.getTopic() + " via " + connection.getCredential() + " @ " + connection.getBootstrapServers(),
                 (own == null || own.equals(connection.getTopic())) && connection.getCredential() != null);
+        String hub = connection.getHub();
+        record("This app's hub", "GET /api/v1/connection", "the hub that runs its realtime rules",
+                hub == null || hub.isBlank() ? "none" : hub, hub != null && !hub.isBlank());
         String bootstrap = connection.getBootstrapServers(), scope = connection.getTokenScope();
         record("Own Event Hubs credential", connection.getCredential(), "token issued", attempt(() ->
                 "token, expires " + EventHubs.mint(workspace, connection.getCredential(), scope).expiresAt()),
@@ -134,7 +192,13 @@ public final class E2E {
         // Refused in the declare call itself: Databricks' own errors, or a shape the hub won't run.
         refused("Column not granted", "SELECT patient_id FROM silver_observations WHERE msg_sending_facility = 'NORTH'",
                 "UNRESOLVED_COLUMN");
-        refused("Source not granted", "SELECT patient_id FROM silver_encounters", "TABLE_OR_VIEW_NOT_FOUND");
+        String source = ungrantedSource(connection.getSources());
+        if (source != null) {
+            refused("Source not granted", "SELECT patient_id FROM " + source, "TABLE_OR_VIEW_NOT_FOUND");
+        } else {
+            skip("Source not granted", "a source this app isn't granted", "TABLE_OR_VIEW_NOT_FOUND",
+                    "this app is granted every source");
+        }
         refused("Misspelled column", "SELECT patient_id FROM silver_observations WHERE value_numm > 6", "UNRESOLVED_COLUMN");
         refused("Syntax error", "SELECT patient_id FROM silver_observations WHER value_num > 6", "PARSE_SYNTAX_ERROR");
         refused("Subquery", "SELECT patient_id FROM silver_observations WHERE value_num > "
@@ -149,8 +213,10 @@ public final class E2E {
             refused("Table outside this app's views", "SELECT patient_id FROM " + base + ".silver_observations",
                     "SQL_NOT_ALLOWED");
         }
+        Rules rules = potassium(connection.getFields());
+        String good = rules.good(), changed = rules.changed();
         var mixed = new LinkedHashMap<String, String>();
-        mixed.put("e2e-ok", GOOD);
+        mixed.put("e2e-ok", good);
         mixed.put("e2e-bad", "SELECT patient_id FROM silver_observations WHERE value_numm > 6");
         int atomic;
         try {
@@ -162,7 +228,7 @@ public final class E2E {
         record("One refusal applies nothing", "declare e2e-ok (valid) + e2e-bad", "422, e2e-ok not registered",
                 atomic + ", e2e-ok " + (registered("e2e-ok") ? "registered" : "not registered"),
                 atomic == 422 && !registered("e2e-ok"));
-        boolean valid = Boolean.TRUE.equals(api.validate(Api.declared(Map.of("e2e-ok", GOOD))).getValid());
+        boolean valid = Boolean.TRUE.equals(api.validate(Api.declared(Map.of("e2e-ok", good))).getValid());
         record("Validate applies nothing", "validate e2e-ok", "valid, not registered",
                 (valid ? "valid" : "invalid") + ", " + (registered("e2e-ok") ? "registered" : "not registered"),
                 valid && !registered("e2e-ok"));
@@ -170,8 +236,8 @@ public final class E2E {
         // Register, receive, change, receive the change, cancel.
         String group = cfg.getProperty("databricks.profile", "subscriber") + "-e2e-" + UUID.randomUUID();
         try (var consumer = new KafkaConsumer<String, String>(EventHubs.consumer(bootstrap, group))) {
-            Accepted r1 = api.putSubscription("e2e-potassium", new One().sql(GOOD));
-            record("Register", GOOD, "ACCEPTED, canonical SQL", r1.getState() + " revision " + r1.getRevision() + ": "
+            Accepted r1 = api.putSubscription("e2e-potassium", new One().sql(good));
+            record("Register", good, "ACCEPTED, canonical SQL", r1.getState() + " revision " + r1.getRevision() + ": "
                     + r1.getQuery(), r1.getState() == Accepted.StateEnum.ACCEPTED);
             record("Hub runs it", "e2e-potassium revision " + r1.getRevision(), "ACTIVE",
                     awaitState(r1.getSubscriptionId(), r1.getRevision(), "ACTIVE"), s -> s.equals("ACTIVE"));
@@ -181,13 +247,13 @@ public final class E2E {
                     "payload {patient_id, value_num}, value_num >= 6.5", describe(n1),
                     n1 != null && keys(n1).equals(Set.of("patient_id", "value_num")) && number(n1, "value_num") >= 6.5);
 
-            Accepted again = api.putSubscription("e2e-potassium", new One().sql(GOOD));
-            record("Same SQL again", GOOD, "same revision, unchanged", "revision " + again.getRevision()
+            Accepted again = api.putSubscription("e2e-potassium", new One().sql(good));
+            record("Same SQL again", good, "same revision, unchanged", "revision " + again.getRevision()
                     + (Boolean.TRUE.equals(again.getUnchanged()) ? ", unchanged" : ", changed"),
                     again.getRevision().equals(r1.getRevision()) && Boolean.TRUE.equals(again.getUnchanged()));
 
-            Accepted r2 = api.putSubscription("e2e-potassium", new One().sql(CHANGED));
-            record("Change the rule", CHANGED, "next revision, then ACTIVE", "revision " + r2.getRevision()
+            Accepted r2 = api.putSubscription("e2e-potassium", new One().sql(changed));
+            record("Change the rule", changed, "next revision, then ACTIVE", "revision " + r2.getRevision()
                     + ", then " + awaitState(r2.getSubscriptionId(), r2.getRevision(), "ACTIVE"),
                     r2.getRevision() == r1.getRevision() + 1);
             var n2 = awaitNotification(consumer, r2);
@@ -200,9 +266,9 @@ public final class E2E {
             record("Cancel", "DELETE e2e-potassium", "CANCELLED by the hub",
                     awaitState(cancel.getSubscriptionId(), cancel.getRevision(), "CANCELLED"), s -> s.equals("CANCELLED"));
         }
-        Map<String, String> hub = api.getStatus(0).getHub();
-        record("Hub heartbeat", "silver_observations", "a batch within 2 minutes", hub.getOrDefault("silver_observations", "never"),
-                s -> !s.equals("never") && Instant.parse(s.replace("+00:00", "Z")).isAfter(Instant.now().minusSeconds(120)));
+        String last = heartbeat(api.getStatus(0).getHeartbeats(), hub, "silver_observations");
+        record("Hub heartbeat", hub + ": silver_observations", "a batch within 2 minutes", last == null ? "never" : last,
+                s -> !s.equals("never") && OffsetDateTime.parse(s).toInstant().isAfter(Instant.now().minusSeconds(120)));
     }
 
     private void refused(String name, String sql, String code) {
@@ -267,17 +333,7 @@ public final class E2E {
     }
 
     private String writeOnce(String topic, String bootstrap) {
-        var p = EventHubs.consumer(bootstrap, "unused");
-        for (String k : List.of("group.id", "enable.auto.commit", "auto.offset.reset", "key.deserializer",
-                "value.deserializer", "session.timeout.ms")) {
-            p.remove(k);
-        }
-        p.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
-        p.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
-        p.put("max.block.ms", "30000");
-        p.put("delivery.timeout.ms", "30000");
-        p.put("request.timeout.ms", "20000");
-        try (var producer = new KafkaProducer<String, String>(p)) {
+        try (var producer = new KafkaProducer<String, String>(EventHubs.producer(bootstrap))) {
             producer.send(new ProducerRecord<>(topic, "e2e", "{\"forged\":true}")).get(45, java.util.concurrent.TimeUnit.SECONDS);
             return "written";
         } catch (java.util.concurrent.ExecutionException e) {
@@ -307,9 +363,22 @@ public final class E2E {
         record(name, input, expected, actual, pass.test(actual));
     }
 
-    private void record(String name, String input, String expected, String actual, boolean pass) {
-        checks.add(new Check(name, input, expected, actual, pass));
-        System.out.printf("%s  %s%n", pass ? "PASS" : "FAIL", name);
+    void record(String name, String input, String expected, String actual, boolean pass) {
+        add(new Check(name, input, expected, actual, pass ? "PASS" : "FAIL"));
+    }
+
+    /** A check that doesn't apply to this app (e.g. it's granted every source): shown, never a failure. */
+    void skip(String name, String input, String expected, String reason) {
+        add(new Check(name, input, expected, reason, "SKIP"));
+    }
+
+    private void add(Check c) {
+        checks.add(c);
+        System.out.printf("%s  %s%n", c.result(), c.name());
+    }
+
+    boolean ok() {
+        return checks.stream().noneMatch(c -> c.result().equals("FAIL"));
     }
 
     private static Set<String> keys(Notification n) {
@@ -324,16 +393,18 @@ public final class E2E {
         return n == null ? "none within " + WAIT.toMinutes() + " min" : "revision " + n.getRevision() + " " + Listener.payloadJson(n);
     }
 
-    private void print() {
+    void print() {
         System.out.println();
         System.out.println("| # | Check | Input | Expected | Actual | Result |");
         System.out.println("|---|---|---|---|---|---|");
         int i = 1;
         for (Check c : checks) {
             System.out.printf("| %d | %s | %s | %s | %s | %s |%n", i++, c.name(), cell(c.input()), cell(c.expected()),
-                    cell(c.actual()), c.pass() ? "PASS" : "**FAIL**");
+                    cell(c.actual()), c.result().equals("FAIL") ? "**FAIL**" : c.result());
         }
-        System.out.printf("%n%d checks, %d failed%n", checks.size(), checks.stream().filter(c -> !c.pass()).count());
+        long failed = checks.stream().filter(c -> c.result().equals("FAIL")).count();
+        long skipped = checks.stream().filter(c -> c.result().equals("SKIP")).count();
+        System.out.printf("%n%d checks, %d failed%s%n", checks.size(), failed, skipped > 0 ? ", " + skipped + " skipped" : "");
     }
 
     private static String cell(String s) {

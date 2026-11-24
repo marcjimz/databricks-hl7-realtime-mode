@@ -5,13 +5,13 @@ arrive on its own Event Hub. Adding, changing, or cancelling a subscription is a
 deployment per subscription.
 
 ```
-Java app (as its own SP) ──PUT [{name, sql}]──► Subscription API (Databricks App, 2 instances, stateless)
-        │  GET ?wait=120 ─────────────────────►   caller = the SP the Apps proxy verified
+App (as its own SP) ──PUT [{name, sql}]──► Subscription API (Databricks App, 2 instances, stateless)
+        │  GET ?wait=25 ─────────────────────►   caller = the SP the Apps proxy verified
         │                                          shape check, then Databricks compiles the SQL (DESCRIBE QUERY)
         │                                          against the app's own views: its errors pass through unchanged
         │                                          store it as the app's own registry role (Lakebase)
         │                                                       │ rules
-        │    silver_* topics ──► subscription hub (micro-batch, all rules in one pass) ──► <catalog>.subscribers.<app>
+        │    silver_* topics ──► the app's subscription hub (edp_shared, or its team's own) ──► <catalog>.subscribers.<app>
         └──────────────────────── consume with a UC-minted Event Hubs token ◄────────────────────────────┘
 ```
 
@@ -24,46 +24,73 @@ Java app (as its own SP) ──PUT [{name, sql}]──► Subscription API (Data
   - it waits for the hub.
 - **Registry** (`src/registry/registry.sql`, Lakebase Postgres): the apps' subscriptions and the platform's grants. Only
   the API writes to it, and always as the calling app's own role.
-- **Hub** (`resources/pipelines/subscription_hub.yml`, `src/pipelines/subscription_hub`, `src/hl7rt/subscriptions.py`):
-  one serverless pipeline per silver source (in one pipeline, the sources' batches slowed each other; see "Measured"),
-  and one more for the deferred tier (see "Delivery tiers"). They run the same code; each names its sources
-  (`hl7.subscriptions.sources`) and batches every `hub_trigger_interval_seconds` (default 1; SDP's default is 4 s).
-  - Each micro-batch it reads only the subscriptions that changed (one query when nothing did), re-checks them, and
-    evaluates all of a source's rules in one pass.
-  - It writes the matches to each app's hub.
+- **Hub** (`hub/resources/subscription_hub.yml`, `src/pipelines/subscription_hub`, `src/hl7rt/engine.py`): one
+  serverless pipeline per hub, with a flow per silver source, batching every `hub_trigger_interval_seconds` (default 1;
+  SDP's default is 4 s). Each app's realtime rules run on its hub: `edp_shared` or its team's own (see "Two ways to
+  subscribe"). Every app's deferred rules run on one more pipeline (see "Delivery tiers").
+  - Each micro-batch it reads only the subscriptions that changed (one query when nothing did), re-checks them, reads
+    the batch once, and matches every rule of that source.
+  - It writes each app's matches with that app's own Event Hubs producer: a topic that refuses writes parks only that
+    app's notifications (in the registry, delivered in order once the topic is back), never another app's.
   - A rule that fails on the data is reported FAILED on its own; the other rules keep running.
-- **App** (`examples/subscribers/java`, Java 17): declares its subscriptions in code, sends them to the API, and consumes its hub.
+- **App** (`examples/subscribers/python` and `examples/subscribers/java`, the same client twice): declares its
+  subscriptions in code, sends them to the API, and consumes its hub.
 
-The hub runs micro-batches (seconds, not milliseconds). It needs `foreachBatch` to apply a rule set that changes at
-runtime, and Real-Time Mode doesn't support `foreachBatch`. `foreach_batch_sink` is Public Preview, so the hub runs on
-the PREVIEW channel. The RTM hot path is unchanged.
+## Two ways to subscribe
+
+The rules, the API, and the app are the same either way. The platform decides which hub runs an app's rules
+(`subscriber_apps.<app>.subscription_hub` in Terraform, default `edp_shared`), and `GET /api/v1/connection` tells the
+app. Each rule also has a tier: `realtime` (the default) or `deferred`, for work that can wait (see "Delivery tiers").
+
+| | `edp_shared` (the default) | A team's own hub |
+|---|---|---|
+| Deployed by | the platform, with the main bundle (`make demo dev`) | the team, from the [`hub/`](../hub/README.md) bundle, **before** its apps register rules (`make hub dev HUB=<name>`) |
+| Runs as | the platform's deployer | the team's service principal |
+| Runs | the realtime rules of every app assigned to it, and **every** app's deferred rules | only its apps' realtime rules |
+| Event Hubs | `<catalog>_eventhubs` | `hub_<name>_eventhubs`: Data Receiver on the five silver hubs, Data Sender only on its apps' hubs, ACCESS for its service principal only |
+| Registry | the owner (its queries filter to its hub) | its own Lakebase role: row-level security lets it read only its apps' rules and write only its own rows |
+| Rule cap | 2,000 enabled rules per tier | 2,000 (`subscriber_hubs.<name>.max_enabled_rules`) |
+| Cost | shared by everyone on it | one always-on serverless pipeline, ~$3.80/h estimated, whatever the apps or rules |
+
+- **Why a team would run its own:** isolation of compute and a rule cap of its own, for a business unit rather than an
+  app (a pipeline per app would cost ~$3.80/h each).
+- **What it takes:** the platform adds the hub to `subscriber_hubs` and assigns apps to it, then `make up` (Terraform,
+  `make uc`, `make registry`). The team deploys the bundle as its service principal. Details: [hub/README.md](../hub/README.md).
+- **Trust:** a team hub's service principal reads every column of silver; the hub enforces each app's column grants in
+  its own code. Running a hub means being trusted with silver.
+
+The hub runs micro-batches (seconds, not milliseconds): it needs `foreachBatch` to apply rules that change at runtime,
+which Real-Time Mode doesn't support. That feature (`foreach_batch_sink`) is Public Preview. The Real-Time Mode hot
+path is unchanged.
 
 **How the hub evaluates rules:**
-- **Up to 1,000 enabled rules across all apps.** Past that, a new rule is refused with `RULE_LIMIT_REACHED`; cancel
-  one first.
-- **A change touches only its own source, and only the changed rule is parsed again.** Each source has its own
-  generation, so an edit to an observations rule doesn't rebuild the encounters hub's rules. A quick recompile runs in
-  the batch that saw the change; a slow one runs in the background while batches keep the last compiled set.
-- **Simple rules run as data:** comparisons of a column with a literal, combined with `AND` and `OR` (flattened to at
-  most 64 AND groups). Each group is indexed on its most selective `=` or `IN` (patient or visit ID first, then codes,
-  then points of care, then anything else, such as message types), so a record meets only the groups that name one of
-  its values, in a plan whose size doesn't depend on the rule count. A record that matches several groups of one rule
-  is one notification.
-- **Other rules run as SQL expressions:** functions, `LIKE`, `NOT` around a group.
+- **Up to 2,000 enabled rules per hub and tier.** Past that, a new rule is refused with `RULE_LIMIT_REACHED`, naming
+  the hub; cancel one first, or move apps to another hub.
+- **A change touches only its own rule.** The hub reads only the subscriptions that changed and loads each new
+  revision: its state is then `PLACED` (loaded, waiting for data), and `ACTIVE` once a batch has used it.
+- **Simple rules are matched in memory:** comparisons of a column with a literal, combined with `AND` and `OR`. Each
+  rule is indexed on its most selective `=` or `IN` (patient or visit ID first, then codes, then points of care), so
+  a record is checked only against the rules that name one of its values.
+- **Other rules run as SQL expressions** (functions, `LIKE`, `NOT` around a group), in the same read of the batch.
 - **The path doesn't change the result:** both select the same records as the SQL editor and send identical
-  notifications.
+  notifications (`tests/test_subscriptions.py`, `tests/test_matching.py`).
+- **A retried batch decides as it did the first time.** Before it publishes, the hub records which rule revisions
+  decided the batch; a retry (after a crash or restart) uses those revisions, even if a rule changed in between.
+- **One app can't hold up another.** Each app has its own Event Hubs producer. If its topic stops acknowledging (for
+  longer than 3 × its recent p99, 2–10 s), its notifications are held in the registry as pending and sent in order
+  when the topic is back; the other apps' notifications go on.
 
-**Measured** (2026-11-05, demo load, rules matching 0.1% of patients each). Delivery is the app-hub broker time minus
-the source record's broker time:
+**Measured on dev** (2026-11-24, demo load, 30 minutes, both patterns at once: one app on `edp_shared`, one on its own
+hub, each with 7 rules across all five sources). Delivery is the app-topic broker time minus the source record's broker
+time:
 
-| Rules on one source | Hub batch interval | Delivery p50 | p99 | One rule change → ACTIVE |
-|---|---|---|---|---|
-| 1 | 3.4–4 s | 2.7 s | 4.7 s | ~5 s |
-| 1,000 (the cap) | ~4 s | 4.5 s | 7.1 s | 8 s |
-| 1,000, of which 100 use functions | ~4 s | 4.5 s | 6.5 s | — |
+| Hub | Delivery p50 | p99 | max | Duplicates | Rule edit → ACTIVE p50 / p99 |
+|---|---|---|---|---|---|
+| `edp_shared` | 1.31 s | 2.48 s | 14.0 s | 0 | 2.0 / 4.3 s |
+| A team's hub | 1.28 s | 2.47 s | 13.7 s | 0 | 1.8 / 3.9 s |
 
-From the raw HL7 topic to the app's hub, one rule measured p99 4.8 s, of which the hot path takes under 100 ms. These
-numbers don't include the app's own poll. How it got here, and what's next past the cap: [SCALABILITY.md](SCALABILITY.md).
+At 50 apps and 2,000 rules, one hub delivered p99 2.9 s steady and 6.5 s under heavy churn. The runs, the topologies,
+and their costs: [SCALABILITY.md](SCALABILITY.md#hubs-at-50-apps-and-2000-rules).
 
 ## Dynamic patient rules
 
@@ -80,8 +107,8 @@ WHERE patient_id IN ('MRN050001', 'MRN050002', ...)
 
 - **Adding or removing a patient is an edit of that rule** (`PUT /api/v1/subscriptions/{name}`). It's a new revision
   of the same subscription: it doesn't count against the rule cap, and it doesn't touch any other rule, of this app or
-  another. The hub indexes the rule on `patient_id` in an in-memory lookup, so a long list costs a map entry per
-  patient, not a scan or a bigger plan (measured to the cap with 2,000-patient lists: docs/SCALABILITY.md).
+  another. The hub's matcher indexes the rule on `patient_id`, so a long list costs a map entry per patient, not a scan
+  (measured to the cap with 2,000-patient lists: docs/SCALABILITY.md).
 - **Lists of thousands fit.** A rule may be up to 200,000 characters (~10,000 patient IDs); a 10,000-patient rule
   parses and flattens in well under a second.
 - **Live only.** A rule delivers records from the batch its revision goes live (ACTIVE) on. Records of a newly added
@@ -90,26 +117,9 @@ WHERE patient_id IN ('MRN050001', 'MRN050002', ...)
 - **The example:** `examples/subscribers/python/monitor.py` runs the whole workflow (logic in `patient_rules.py`) and
   times each census edit until ACTIVE. The synthetic feed plays coherent ED encounters for it to follow
   (`generator_journeys_per_minute`).
-- **Measured** (2026-11-16, dev, demo load of 200 msg/s, 6 ED journeys a minute; five patient rules edited together
-  per census change, from a separate app; 10–30 minute runs):
-
-  | Hub | Census edit → ACTIVE p50 / p99 | Patient record → app p50 / p99 / max | n (edits, records) |
-  |---|---|---|---|
-  | One pipeline for all sources, SDP's default 4 s trigger | 6.1 / 8.4 s | 4.4 / 7.7 / 13.3 s | 244, 1,629 |
-  | One pipeline, 1 s trigger | 4.3–4.5 / 7.0–9.3 s | 5.1–5.3 / 6.9–9.6 s | 140 + 86, 797 + 503 |
-  | **One pipeline per source, 1 s trigger** (current) | **3.4 / 8.4 s** | **3.6 / 5.8 / 6.6 s** | 94, 455 |
-
-  No record was delivered for a patient after their removal went live, in any run. Edit → ACTIVE is the five PUTs
-  (~1 s once Databricks has compiled the rule's shape: the API reuses that compile for edits that only change literals,
-  `rules.shape`; a new shape compiles on the warehouse, ~1.4 s per rule), then the hub's next batch, which recompiles
-  the edit in-batch (0.2–0.5 s).
-
-  Where a batch's time goes (`hub_progress`, per source, p50 of the current setup): ~3 s per batch, of which ~1.1–1.4 s
-  pass inside Spark's batch call before the hub's function starts (`age_ms`), ~1.1–1.4 s are the hub's collect, match,
-  and Event Hubs write (`write_ms`), and ~0.6 s are Spark's offsets, commits, and source metrics (`spark_ms`). In one
-  pipeline, the five sources' batches overlapped 5–8 at a time on one driver and Python process and took ~4–5 s each,
-  so a shorter trigger alone made delivery slower. What's left is per-batch overhead of `foreachBatch` on serverless;
-  going well under ~3 s needs a different engine (Real-Time Mode, the Phase 3 study).
+- **Measured:** on dev, edits of a 200-patient rule went live (ACTIVE) in p50 ~2 s / p99 ~4 s, alongside 6 other
+  rules (above). No record was delivered for a patient after their removal went live, in any run
+  ([SCALABILITY.md](SCALABILITY.md)).
 
 ## Data templates
 
@@ -122,11 +132,12 @@ with the template's columns as its grant. Template changes apply to the hub at t
 
 ## Delivery tiers
 
-Each subscription has a tier: `realtime` (the default, for clinical work: the hub as above) or `deferred` (work that can
-wait, such as billing). Deferred rules run on one more hub pipeline, `subscription_hub_deferred`, for every source: the same code on a
-longer trigger (`hub_deferred_interval_seconds`, default 60), so their load never shares a batch with realtime rules.
-Both deliver to the app's own Event Hub. Its heartbeat is listed as `deferred:<source>`, and `getStatus` reports
-`HUB_STALE` for a deferred subscription only after its trigger interval plus the usual 120 s.
+Each subscription has a tier: `realtime` (the default, for clinical work: the app's hub, as above; a delivery tier, not
+Real-Time Mode) or `deferred` (work that can wait, such as billing). Every app's deferred rules, whatever its hub, run on one more pipeline of
+`edp_shared`, `subscription_hub_deferred`: the same code on a longer trigger (`hub_deferred_interval_seconds`, default
+60), so their load never shares a batch with realtime rules, and a team hub stays one pipeline. Both deliver to the
+app's own Event Hub. Its heartbeat is listed with tier `deferred` (and as `deferred:<source>` in the `hub` map), and
+`GET /api/v1/subscriptions` reports `HUB_STALE` for a deferred subscription only after its trigger interval plus the usual 120 s.
 
 ## Security model
 
@@ -138,14 +149,19 @@ Both deliver to the app's own Event Hub. Its heartbeat is listed as `deferred:<s
 | What it may read | Unity Catalog views per app (`<catalog>.sub_<app>.<source>`) expose only its granted fields (`subscriber_apps` in Terraform). Databricks compiles each rule against them, so an ungranted column or source is Databricks' own `UNRESOLVED_COLUMN` or `TABLE_OR_VIEW_NOT_FOUND`. Filtering on a column counts as reading it. The registry trigger re-checks the source and fields. |
 | What a rule may do | One SELECT of columns, from one source, with a WHERE filter: any Databricks built-in except functions that reach outside the record (network, secrets, JVM, AI, UDFs). No joins, subqueries, CTEs, set operations, aggregates, parameters, or multiple statements (`SQL_NOT_ALLOWED`). The hub re-checks each rule before evaluating it, granted columns included. |
 | Where results go | The registry assigns the destination (the app's own hub); a request can't name one. |
+| Which hub runs them | The platform assigns each app's hub (`subscriber_apps.<app>.subscription_hub`); a request can't choose one. A status counts only when it comes from the hub that runs the rule. |
+| What a team's hub may touch | Its Event Hubs identity reads only the silver hubs and writes only its apps' hubs (`hub_<name>_eventhubs`, ACCESS for its service principal only). Its registry role reads only its apps' rules and writes only rows of its own hub (row-level security, tested). |
 | Who can read results | Each app's hub is readable only by that app's own access connector (Data Receiver on that one hub). Its UC service credential `sub_<app>_eventhubs` grants ACCESS only to the app's SP. The app holds no Azure secret: Unity Catalog mints a short-lived Event Hubs token. |
 | Secrets | The SP's OAuth secret lives in the Databricks CLI profile (`~/.databrickscfg`). The settings file holds none, and the app refuses to start if it finds one there. |
 
 **Not covered yet:**
-- **Hub identity.** The hub runs as whoever deploys the bundle, which is the registry owner and bypasses RLS. In
-  production, give it a dedicated service principal with read access to the registry and write access to `status` and
-  `hub_heartbeat` only.
+- **`edp_shared`'s identity.** A team's hub runs as its own service principal with a registry role of its own.
+  `edp_shared` still runs as whoever deploys the main bundle, the registry owner, which bypasses RLS (its queries filter
+  to its hub). In production, give it a service principal and a `hub_edp_shared` member role as for a team hub.
 - **Cancellation is a soft stop.** Re-declaring a cancelled name re-enables it under a new revision.
+- **No per-app quota.** One app may use its hub's whole rule cap.
+- **App secrets.** Apps sign in with a service principal's OAuth secret in a CLI profile; production should use
+  workload identity (Entra federated credentials) instead (docs/SCALABILITY.md).
 
 ## No silent failures
 
@@ -186,9 +202,8 @@ revisions it registered. The full contract:
   settings, the notification format, and the errors.
 
 The App runs 2 instances behind one URL. Databricks Apps calls this horizontal scaling: a fixed instance count, 1–5 per
-app. Load-based autoscaling (min < max) isn't enabled for this workspace: the Apps team plans it as a private preview,
-and it adds instances in 2–3 minutes. When it is enabled, set `app_min_instances` < `app_max_instances` in
-`databricks.yml`. The API is stateless (the registry is the only state), so any instance serves any call.
+app. Load-based autoscaling (min < max) isn't available for this workspace yet; when it is, set `app_min_instances` <
+`app_max_instances` in `databricks.yml`. The API is stateless (the registry is the only state), so any instance serves any call.
 
 ## Rules
 
@@ -200,7 +215,8 @@ WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8
 - **Allowed:**
   - `SELECT` lists the fields to deliver: columns only.
   - `FROM` names one silver source: `silver_encounters`, `silver_observations`, `silver_orders`, `silver_diagnoses`, or
-    `silver_documents`. Unqualified, or the app's own view in full, as tested in the editor.
+    `silver_documents` (`silver_messages`, one row per message, isn't a subscription source). Unqualified, or the app's
+    own view in full, as tested in the editor.
   - `WHERE` is any Databricks SQL filter over that record: comparisons, `IN`, `BETWEEN`, `LIKE`, `IS NULL`, `AND`/`OR`/
     `NOT`, and built-ins such as `lower`, `startswith`, `contains`, `abs`, `coalesce`.
 - **Normalized:** identifiers are case-insensitive, as in Databricks, and stored in lowercase. Comments and a trailing
@@ -228,8 +244,7 @@ platform builds it once, as a new governed source (a topic/table), and grants it
 
 ## Set up (bring your own service principal)
 
-Each subscriber app is an onboarding step, done once per app. For the FE sandbox it's scripted, so it survives the
-Sunday wipe.
+Each subscriber app is an onboarding step, done once per app. It's scripted, so it survives a rebuilt environment.
 
 1. **Create the app's service principal and its secret.** In the UI: Settings → Identity and access → Service
    principals → Add, then Secrets → Generate. Or from the CLI: `databricks service-principals create`, then
@@ -242,6 +257,7 @@ Sunday wipe.
        templates      = []  # data templates from subscriber_templates, and/or its own sources and fields:
        sources        = ["silver_observations"]
        fields         = ["patient_id", "observation_cd_desc", "value_num", "units", "abnormal_flag"]
+       # subscription_hub = "lab_team"  # optional: a team's own hub (subscriber_hubs); default edp_shared
      }
    }
    ```
@@ -264,8 +280,9 @@ Sunday wipe.
 4. **Check it end to end:**
    ```bash
    mvn -q -f examples/subscribers/java package
-   java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e      # 25 checks, PASS/FAIL table, exit 1 on any failure
+   java -jar examples/subscribers/java/target/hl7-subscriber.jar --e2e      # 26 checks, PASS/FAIL/SKIP table, exit 1 on any failure
    ```
+   Or the Python client: `uv run python examples/subscribers/python/subscriber.py --e2e`, the same 26 checks.
 
 ## End-to-end checks
 
@@ -281,29 +298,32 @@ Sunday wipe.
 |---|---|---|---|
 | 1 | Sign in | the profile (or the job's identity) | a service principal |
 | 2 | Connection from the API | `GET /api/v1/connection` | this app's own topic and credential |
-| 3 | Own Event Hubs credential | `sub_<app>_eventhubs` | token issued |
-| 4 | Another credential | `<catalog>_eventhubs` (the hub's) | denied (no ACCESS) |
-| 5 | Read a hub that isn't this app's | a silver topic | not authorized |
-| 6 | Write to its own hub (forge a notification) | `<catalog>.subscribers.<app>` | not authorized (Receiver only) |
-| 7 | Skip the API | the registry's old Data API URL | not available |
-| 8 | Column not granted | `WHERE msg_sending_facility = 'NORTH'` | `UNRESOLVED_COLUMN` (Databricks) |
-| 9 | Source not granted | `FROM silver_encounters` | `TABLE_OR_VIEW_NOT_FOUND` (Databricks) |
-| 10 | Misspelled column | `WHERE value_numm > 6` | `UNRESOLVED_COLUMN` (Databricks) |
-| 11 | Syntax error | `WHER value_num > 6` | `PARSE_SYNTAX_ERROR` (Databricks) |
-| 12 | Subquery | `WHERE value_num > (SELECT max(...) ...)` | `SQL_NOT_ALLOWED` |
-| 13 | Join | `... JOIN silver_encounters ...` | `SQL_NOT_ALLOWED` |
-| 14 | Function that reaches outside the record | `http_request(...)` | `SQL_NOT_ALLOWED` |
-| 15 | Table outside this app's views | `FROM <catalog>.<schema>.silver_observations` | `SQL_NOT_ALLOWED` |
-| 16 | One refusal applies nothing | a valid and a misspelled rule together | 422, the valid one not registered |
-| 17 | Validate applies nothing | `POST /validate` | valid, not registered |
-| 18 | Register | potassium ≥ 6.5, fields `patient_id, value_num` | ACCEPTED, with the canonical SQL |
-| 19 | Hub runs it | that revision | ACTIVE |
-| 20 | Notification on its own hub | | exactly those fields, value ≥ 6.5 |
-| 21 | Same SQL again | identical rule | same revision, unchanged |
-| 22 | Change the rule | ≥ 7.0, add `units` | next revision, then ACTIVE |
-| 23 | Notification reflects the change | | new revision, new fields, value ≥ 7.0 |
-| 24 | Cancel | `DELETE` | CANCELLED by the hub |
-| 25 | Hub heartbeat | `silver_observations` | a batch within 2 minutes |
+| 3 | This app's hub | `GET /api/v1/connection` | the hub that runs its realtime rules (`edp_shared` or its team's) |
+| 4 | Own Event Hubs credential | `sub_<app>_eventhubs` | token issued |
+| 5 | Another credential | `<catalog>_eventhubs` (the hub's) | denied (no ACCESS) |
+| 6 | Read a hub that isn't this app's | a silver topic | not authorized |
+| 7 | Write to its own hub (forge a notification) | `<catalog>.subscribers.<app>` | not authorized (Receiver only) |
+| 8 | Skip the API | the registry's old Data API URL | not available |
+| 9 | Column not granted | `WHERE msg_sending_facility = 'NORTH'` | `UNRESOLVED_COLUMN` (Databricks) |
+| 10 | Source not granted | `FROM` the first silver source this app isn't granted (SKIP if it has all five) | `TABLE_OR_VIEW_NOT_FOUND` (Databricks) |
+| 11 | Misspelled column | `WHERE value_numm > 6` | `UNRESOLVED_COLUMN` (Databricks) |
+| 12 | Syntax error | `WHER value_num > 6` | `PARSE_SYNTAX_ERROR` (Databricks) |
+| 13 | Subquery | `WHERE value_num > (SELECT max(...) ...)` | `SQL_NOT_ALLOWED` |
+| 14 | Join | `... JOIN silver_encounters ...` | `SQL_NOT_ALLOWED` |
+| 15 | Function that reaches outside the record | `http_request(...)` | `SQL_NOT_ALLOWED` |
+| 16 | Table outside this app's views | `FROM <catalog>.<schema>.silver_observations` | `SQL_NOT_ALLOWED` |
+| 17 | One refusal applies nothing | a valid and a misspelled rule together | 422, the valid one not registered |
+| 18 | Validate applies nothing | `POST /validate` | valid, not registered |
+| 19 | Register | potassium ≥ 6.5 (by name if `observation_cd_desc` is granted, else LOINC `2823-3`), fields `patient_id, value_num` | ACCEPTED, with the canonical SQL |
+| 20 | Hub runs it | that revision | ACTIVE |
+| 21 | Notification on its own hub | | exactly those fields, value ≥ 6.5 |
+| 22 | Same SQL again | identical rule | same revision, unchanged |
+| 23 | Change the rule | ≥ 7.0, add `units` | next revision, then ACTIVE |
+| 24 | Notification reflects the change | | new revision, new fields, value ≥ 7.0 |
+| 25 | Cancel | `DELETE` | CANCELLED by the hub |
+| 26 | Hub heartbeat | this app's hub, `silver_observations` | a batch within 2 minutes |
+
+Afterwards it cancels every `e2e-*` subscription the app still has enabled.
 
 Cross-app cases need a second service principal live:
 - **Today:** they run against a real PostgreSQL in `tests/test_registry.py` (an app can't read, cancel, or claim another
@@ -314,10 +334,11 @@ Cross-app cases need a second service principal live:
 
 The **HL7 subscriptions** dashboard (`make demo dev` prints its URL) reads the registry live. Refresh it to update.
 - **Counts:** active subscriptions, failed ones, and apps subscribed.
-- **Hub heartbeat:** per silver source, seconds since the last batch and the rules running. A source is STALE after 2
-  minutes.
+- **Hub heartbeat:** per hub, tier, and silver source, seconds since the last batch and the rules running. A source
+  is STALE after 2 minutes.
 - **Current subscriptions:** per app and service principal, the registered revision, its SQL, fields, the hub's state
-  (PENDING, ACTIVE, FAILED with the error, or CANCELLING), and how long the hub took to confirm it.
+  (PENDING, PLACED, ACTIVE, FAILED with the error, or CANCELLING), the hub that runs it, and how long the hub took to
+  confirm it.
 - **Cancelled subscriptions**, below.
 
 How it reads the registry:

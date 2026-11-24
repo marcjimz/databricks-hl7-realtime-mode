@@ -1,0 +1,51 @@
+# The subscription hub: silver entity topics -> each served app's own topic, by rules registered at runtime in Lakebase.
+# ONE definition for both ways to subscribe (docs/subscriptions.md):
+#   - edp_shared, the platform's hub: the main bundle (databricks.yml) includes this file, subscription_hub=edp_shared;
+#   - a team's own hub: hub/databricks.yml deploys this file, subscription_hub=<name>, as the team's service principal.
+# Either way it serves only the apps assigned to it (subscriber_apps.<app>.subscription_hub) and only their realtime
+# rules; every app's deferred rules run on edp_shared's deferred pipeline (resources/pipelines/subscription_hub.yml).
+# Micro-batch (NOT Real-Time Mode): it needs foreachBatch to apply a changing rule set, which RTM doesn't support.
+# foreach_batch_sink is Public Preview, so this pipeline runs on the PREVIEW channel. One pipeline, a flow per silver
+# source: at 50 apps and 2,000 rules it delivered p99 2.9 s (docs/SCALABILITY.md). For a unit that needs the tightest
+# tail under churn, copy it once per source with hl7.subscriptions.sources (about 3.7x the cost).
+x-hub: &hub
+  catalog: ${var.catalog}
+  schema: ${var.hub_schema}
+  serverless: true
+  continuous: true
+  channel: PREVIEW
+  root_path: ../../src
+  libraries:
+    - glob:
+        include: ../../src/pipelines/subscription_hub/**
+  environment:
+    dependencies:
+      - pg8000>=1.31           # pure Python; psycopg[binary] aborted the serverless Python process
+      - databricks-sdk>=0.159  # Lakebase endpoint + database credential APIs
+      - sqlglot>=30.27         # the hub re-checks each SQL rule (src/subscription_api/rules.py)
+      - confluent-kafka>=2.6   # a producer per app on the driver, so one app's broken hub can't stall another's
+x-hub-conf: &hub_conf
+  hl7.subscriptions.hub: ${var.subscription_hub}
+  hl7.subscriptions.on_failure: ${var.hub_on_failure}
+  hl7.subscriptions.chunk: ${var.hub_rules_per_projection}
+  hl7.subscriptions.max_records_per_batch: ${var.hub_max_records_per_batch}
+  hl7.eh.namespace: ${var.eh_namespace}
+  hl7.eh.service_credential: ${var.hub_service_credential}
+  hl7.registry.endpoint: ${var.registry_endpoint}
+  hl7.registry.database: ${var.registry_database}
+  hl7.registry.connections: ${var.hub_registry_connections}
+  hl7.topics.silver_encounters: ${var.hl7_silver_encounters_topic}
+  hl7.topics.silver_observations: ${var.hl7_silver_observations_topic}
+  hl7.topics.silver_orders: ${var.hl7_silver_orders_topic}
+  hl7.topics.silver_diagnoses: ${var.hl7_silver_diagnoses_topic}
+  hl7.topics.silver_documents: ${var.hl7_silver_documents_topic}
+
+resources:
+  pipelines:
+    subscription_hub:
+      <<: *hub
+      name: hl7rt-${bundle.target}-hub-${var.subscription_hub}
+      configuration:
+        <<: *hub_conf
+        hl7.subscriptions.tier: realtime
+        pipelines.trigger.interval: ${var.hub_trigger_interval_seconds} seconds  # SDP's default is 4 s

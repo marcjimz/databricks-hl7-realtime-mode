@@ -14,6 +14,9 @@
 #   make clear-data dev   empty the Delta tables and refill from live data (~2 min; RTM keeps running)
 #   make stop dev         stop the feeds, every pipeline, and the Subscription API (stops Databricks billing)
 #
+#   make hub dev HUB=<name>        deploy and start a team's own subscription hub (hub/; terraform var subscriber_hubs)
+#   make hub-stop dev HUB=<name>   stop it
+#
 # The subscriber examples run on their own, from the repo root:
 #   uv run python examples/subscribers/python/subscriber.py [--e2e]   (Python; make python-client regenerates its API client)
 #   java -jar examples/subscribers/java/target/hl7-subscriber.jar [--e2e]   (Java; its workspace E2E job is its own bundle)
@@ -35,20 +38,27 @@ export DATABRICKS_AUTH_TYPE    ?= azure-cli
 export BUNDLE_VAR_catalog      ?= $(call tf_out,catalog)
 export BUNDLE_VAR_eh_namespace ?= $(call tf_out,eh_namespace)
 
-HUBS       := $(addprefix subscription_hub_,encounters observations orders diagnoses documents deferred)
+# edp_shared, the platform's subscription hub: realtime (hub/resources/subscription_hub.yml) and every app's deferred rules.
+HUBS       := subscription_hub subscription_hub_deferred
 PIPELINES  := hl7_bronze hl7_silver lakehouse epic_json $(HUBS)
 GENERATORS := hl7_generator epic_json_generator
+# A team hub (make hub HUB=<name>): its service principal, from terraform output subscriber_hubs.
+hub_principal = $(if $(HUB),$(shell $(TF) output -json subscriber_hubs 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("$(HUB)",{}).get("application_id",""))' 2>/dev/null))
 active_runs = $(DBX) jobs list-runs --job-id $$id --active-only -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))'
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")
 
 .PHONY: help install test lint python-client up uc registry fabric-up fabric-pause fabric-resume fabric-down powerbi \
-	demo clear-data stop guard-target $(ENVS)
+	demo clear-data stop hub hub-stop guard-target guard-hub $(ENVS)
 
 help:
-	@sed -n '3,22p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
+	@sed -n '3,25p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 
 guard-target:
 	@test -n "$(TARGET)" || { echo "error: name the environment, e.g. 'make demo dev' (one of: $(ENVS))"; exit 2; }
+
+guard-hub:
+	@test -n "$(HUB)" || { echo "error: name the hub, e.g. 'make hub dev HUB=lab_team' (a key of subscriber_hubs)"; exit 2; }
+	@test -n "$(hub_principal)" || { echo "error: hub $(HUB) isn't in terraform output subscriber_hubs (add it, then make up)"; exit 2; }
 
 install:
 	uv sync
@@ -103,8 +113,10 @@ fabric-down:
 powerbi:
 	@uv run python infra/powerbi.py
 
-# Continuous pipelines start on deploy; `run` starts any that are stopped (running ones are left alone).
+# Continuous pipelines start on deploy; `run` starts any that are stopped (running ones are left alone). The registry
+# is brought up to date first, so a hub starting new code finds its tables; once more at the end for the API's grants.
 demo: guard-target
+	@HL7_API_APP=hl7-subscriptions-$(TARGET) uv run python infra/registry.py | grep -v '^ok'
 	$(BUNDLE) deploy -t $(TARGET)
 	@for p in $(PIPELINES); do $(BUNDLE) run -t $(TARGET) --no-wait $$p >/dev/null 2>&1 && echo "started $$p" || echo "running $$p"; done
 	@for j in $(GENERATORS); do id=$(call resource_id,jobs,$$j); \
@@ -128,6 +140,20 @@ stop: guard-target
 	  echo "stopped $$j"; done
 	@for p in $(PIPELINES); do $(DBX) pipelines stop $(call resource_id,pipelines,$$p) >/dev/null && echo "stopped $$p"; done
 	@$(DBX) apps stop hl7-subscriptions-$(TARGET) >/dev/null 2>&1 && echo "stopped subscription_api" || true
+
+# A team's own subscription hub (hub/, the same pipeline as edp_shared), run as its service principal: deploy it before
+# its apps register rules. The bundle's local cache is per target, not per hub, so it's cleared first (another hub's
+# state there would make the deploy rename that hub's pipeline into this one); the hub's state lives in the workspace.
+HUB_BUNDLE = cd hub && BUNDLE_VAR_subscription_hub=$(HUB) BUNDLE_VAR_hub_principal=$(hub_principal) $(BUNDLE)
+hub_pipeline = $(DBX) pipelines list-pipelines --filter "name LIKE 'hl7rt-$(TARGET)-hub-$(HUB)'" -o json | \
+	python3 -c 'import sys,json;print(next(p["pipeline_id"] for p in json.load(sys.stdin) if p["name"] == "hl7rt-$(TARGET)-hub-$(HUB)"))'
+hub: guard-target guard-hub
+	@rm -rf hub/.databricks/bundle/$(TARGET)
+	$(HUB_BUNDLE) deploy -t $(TARGET)
+	@$(HUB_BUNDLE) run -t $(TARGET) --no-wait subscription_hub >/dev/null 2>&1 && echo "started hub $(HUB)" || echo "running hub $(HUB)"
+
+hub-stop: guard-target guard-hub
+	@$(DBX) pipelines stop $$($(hub_pipeline)) >/dev/null && echo "stopped hub $(HUB)"
 
 # Environment words are goals too; make them no-ops.
 $(ENVS):

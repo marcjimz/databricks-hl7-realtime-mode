@@ -1,4 +1,4 @@
-"""The customer's Epic JSON feed (pre-parsed by an outside system), improved.
+"""An existing Epic JSON feed (pre-parsed by an outside system), improved.
 
 Payload on the topic:
     {"introspector": {...}, "schema": "...", "table": "...", "txType": "...",
@@ -34,7 +34,7 @@ PAYLOAD_SCHEMA = StructType(
     ]
 )
 
-# (name, type) in the customer's silver column order. "timestamp" fields accept HL7 DTM and ISO forms.
+# (name, type) in the feed's silver column order. "timestamp" fields accept HL7 DTM and ISO forms.
 FIELDS: list[tuple[str, str]] = [
     # Patient / visit
     ("account_id", "string"),
@@ -122,7 +122,7 @@ def _reason() -> Column:
 
 
 def to_silver(bronze: DataFrame) -> DataFrame:
-    """Bronze -> silver with the customer's column contract. Invalid rows are excluded (see to_quarantine)."""
+    """Bronze -> silver with the feed's column contract. Invalid rows are excluded (see to_quarantine)."""
 
     def field(name: str, kind: str) -> Column:
         v = F.try_element_at(F.col("_m"), F.lit(name))

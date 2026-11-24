@@ -87,6 +87,23 @@ class EventHubsTest {
     }
 
     @Test
+    void theProducerAuthenticatesLikeTheConsumerAndIsNotAConsumer() {
+        var p = EventHubs.producer("ns1.servicebus.windows.net:9093");  // the E2E's forged write
+        var c = EventHubs.consumer("ns1.servicebus.windows.net:9093", "app-a");
+        for (String k : List.of("bootstrap.servers", "security.protocol", "sasl.mechanism", "sasl.jaas.config",
+                "sasl.login.callback.handler.class", "metadata.max.age.ms", "connections.max.idle.ms")) {
+            assertEquals(c.get(k), p.get(k), k);
+        }
+        for (String k : List.of("group.id", "enable.auto.commit", "auto.offset.reset", "key.deserializer",
+                "value.deserializer", "session.timeout.ms")) {
+            assertFalse(p.containsKey(k), k);
+        }
+        assertEquals("org.apache.kafka.common.serialization.StringSerializer", p.get("value.serializer"));
+        assertEquals("20000", p.get("request.timeout.ms"), "as the Python example's producer_config");
+        assertEquals("30000", p.get("delivery.timeout.ms"));
+    }
+
+    @Test
     void followsMicrosoftsEventHubsClientGuidanceAndCommitsOnlyAfterHandling() {
         var p = EventHubs.consumer("ns1.servicebus.windows.net:9093", "app-a");
         assertTrue(Integer.parseInt((String) p.get("metadata.max.age.ms")) < 240_000, "Azure closes idle links at 240 s");

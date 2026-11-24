@@ -18,7 +18,7 @@ Prerequisites:
 export DATABRICKS_HOST=$(terraform -chdir=infra/azure output -raw workspace_url) DATABRICKS_AUTH_TYPE=azure-cli
 B="uv run python examples/benchmarks/patient_lists.py"
 
-$B seed 990                 # 198 censuses x 5 rules x 2,000 patients (the cap is 1,000 rules across all apps)
+$B seed 990                 # 198 censuses x 5 rules x 2,000 patients (the cap is 2,000 rules per hub and tier)
 $B status                   # wait for [['ACTIVE', 990]]
 uv run python examples/subscribers/python/monitor.py examples/subscribers/apps/sp-hl7-ed-monitor.properties \
   --duration=600            # static step: edit -> ACTIVE and delivery
@@ -29,9 +29,10 @@ $B offboard                 # remove the virtual app and its role
 
 While a step runs, read the hub's side from `<catalog>_registry.subscription_registry.hub_progress`. It has one row per
 batch and source:
-- `write_ms`: collect, match, and write;
+- `collect_ms`, `match_ms`, `bind_ms`, `deliver_ms`, `status_ms`: the hub's phases (read, match, record the batch's
+  revisions, write to the apps' topics, report);
 - `age_ms`: the newest record's age when the batch function started;
-- `compile_ms`: the rule set's last compile;
+- `rows`, `delivered`, `parked`: records read, notifications sent, and notifications held as pending;
 - `spark_ms`: Spark's own split of the batch.
 
 Benchmark rules' delivery is on the monitor app's topic (subscription names `perf-*`): compare each record's

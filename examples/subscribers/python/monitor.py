@@ -39,6 +39,10 @@ APPLY_EVERY = 1.0  # seconds: census changes in this window are one edit per rul
 WAIT_SECONDS = 60
 
 
+class HubCantRun(Exception):
+    """The hub reported one of the monitor's rules FAILED (exit 3)."""
+
+
 class Monitor:
     def __init__(self, client, template: str | None):
         self.client, self.template = client, template
@@ -52,6 +56,7 @@ class Monitor:
         self.delivery_ms: list[float] = []
         self.after_removal: list[str] = []
         self.received = 0
+        self.failure: tuple[int, str] | None = None  # (exit code, why) when the apply thread had to stop
 
     def put(self, name: str, sql: str | None):
         if sql is None:
@@ -67,7 +72,8 @@ class Monitor:
         return r
 
     def wait_active(self, revisions: dict[str, int]) -> float | None:
-        """Seconds until the hub runs these revisions (name -> revision), or None if not within WAIT_SECONDS."""
+        """Seconds until the hub runs these revisions (name -> revision), or None if not within WAIT_SECONDS. Raises
+        HubCantRun if the hub reports one of them FAILED."""
         started = time.monotonic()
         while time.monotonic() - started < WAIT_SECONDS:
             status = api.call(get_status, self.client, wait=10)
@@ -76,10 +82,22 @@ class Monitor:
                 return time.monotonic() - started
             failed = [p for p in status.problems if p.split(":")[0] in revisions] if status.state == "FAILED" else []
             if failed:
-                exit_with(3, f"the hub can't run {failed}")
+                raise HubCantRun(f"the hub can't run {failed}")
         return None
 
     def apply_loop(self, stop: threading.Event):
+        """The apply thread: if it can't go on (the hub can't run an edit, or the API refuses one), it records why and
+        stops the run, and the main thread exits with that code. (sys.exit here would end only this thread.)"""
+        try:
+            self._apply(stop)
+        except HubCantRun as e:
+            self.failure = (3, str(e))
+        except Exception as e:  # noqa: BLE001
+            self.failure = (3, f"a census edit failed: {e}")
+        finally:
+            stop.set()
+
+    def _apply(self, stop: threading.Event):
         """Apply each new census version to the patient rules, then time it until the hub runs it."""
         while not stop.is_set():
             with self.lock:
@@ -171,23 +189,33 @@ def main(argv: list[str]):
         for r in e.refusals:
             print(f"refused     {r.name if isinstance(r.name, str) else '':<22} {r.code}: {first_line(r.message)}")
         exit_with(2, f"{e.code}: {first_line(e.message)}")
-    if m.wait_active(base) is None:
-        exit_with(4, "the base rule wasn't ACTIVE in time (are the subscription hub pipelines running?)")
+    try:
+        if m.wait_active(base) is None:
+            exit_with(4, "the base rule wasn't ACTIVE in time (are the subscription hub pipelines running?)")
+    except HubCantRun as e:
+        exit_with(3, str(e))
     print("hub         base rule ACTIVE; following ED registrations", flush=True)
 
-    from confluent_kafka import Consumer, KafkaError, KafkaException
+    from confluent_kafka import Consumer
 
     tokens = eventhubs.tokens_for(workspace, connection.credential, connection.token_scope)
     group = cfg.get("consumer.group") or f"{cfg.get('databricks.profile') or 'subscriber'}-monitor"
     consumer = Consumer(eventhubs.consumer_config(connection.bootstrap_servers, group, tokens))
     consumer.subscribe([connection.topic])
     stop = threading.Event()
-    applier = threading.Thread(target=m.apply_loop, args=(stop,), daemon=True)
-    applier.start()
-    run_for = duration(argv) or float("inf")
-    stop_at = time.time() + run_for
+    threading.Thread(target=m.apply_loop, args=(stop,), daemon=True).start()
+    listen(m, consumer, stop, time.time() + (duration(argv) or float("inf")))
+    stop.set()
+    consumer.close()
+    exit_with(*finish(m))
+
+
+def listen(m: Monitor, consumer, stop: threading.Event, stop_at: float):
+    """Hand each record to the monitor until stop_at, Ctrl-C, or the apply thread stops the run."""
+    from confluent_kafka import KafkaError, KafkaException
+
     try:
-        while time.time() < stop_at:
+        while time.time() < stop_at and not stop.is_set():
             for msg in consumer.consume(num_messages=500, timeout=1.0):
                 if msg.error():
                     if msg.error().code() == KafkaError._PARTITION_EOF:
@@ -196,12 +224,18 @@ def main(argv: list[str]):
                 m.on_record(msg.value(), time.time())
     except KeyboardInterrupt:
         pass
-    stop.set()
-    consumer.close()
+
+
+def finish(m: Monitor) -> tuple[int, str]:
+    """Print the summary, cancel every ed-* subscription, and return the exit code and message: the apply thread's
+    failure if it had one."""
     code = m.summary()
     for name in patient_rules.PATIENT_RULES + tuple(patient_rules.BASE):
-        m.put(name, None)  # leave nothing behind
-    exit_with(code, "stopped; ed-* subscriptions cancelled")
+        try:
+            m.put(name, None)  # leave nothing behind
+        except api.ApiError as e:
+            print(f"WARNING     couldn't cancel {name}: {e}", flush=True)
+    return m.failure or (code, "stopped; ed-* subscriptions cancelled")
 
 
 if __name__ == "__main__":

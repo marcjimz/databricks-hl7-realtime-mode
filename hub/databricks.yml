@@ -1,0 +1,103 @@
+# A team's own subscription hub (bring your own hub; README.md here). The same pipeline as edp_shared, the platform's
+# hub (resources/subscription_hub.yml, which the main bundle includes too), serving only the apps assigned to this hub,
+# run as the team's service principal. Deploy it before its apps register rules:
+#
+#   make hub dev HUB=<name>            (from the repo root; or: cd hub && databricks bundle deploy --var ...)
+#
+# The platform onboards the hub first (terraform var subscriber_hubs, then make up, make uc, make registry): its
+# identity (read silver, write only its apps' hubs), credential hub_<name>_eventhubs, registry role, and schema.
+# No `mode: development`: it turns off `continuous`.
+
+bundle:
+  name: hl7_hub
+
+include:
+  - resources/*.yml
+
+# The hub's code is the platform's src/ (its pipeline, hl7rt, and the rule checks); nothing in this folder runs.
+sync:
+  paths:
+    - ../src
+
+# The code runs as the hub's service principal, which reads every silver column: so it lives where only the deployer
+# can change it (not /Workspace/Shared, which every user may write), and the service principal may only read it.
+# Deploy each hub from one identity (one pipeline per hub; a second copy refuses to run beside the first).
+workspace:
+  root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/hl7_hub/${var.subscription_hub}/${bundle.target}
+
+run_as:
+  service_principal_name: ${var.hub_principal}
+
+permissions:
+  - level: CAN_VIEW
+    service_principal_name: ${var.hub_principal}
+
+variables:
+  subscription_hub:
+    description: This hub's name, its key in terraform subscriber_hubs (apps name it in subscription_hub).
+  hub_principal:
+    description: The hub's service principal (application ID, terraform subscriber_hubs.<hub>.application_id); it runs it.
+  catalog:
+    description: The platform's catalog (terraform output catalog).
+  schema:
+    description: The platform's silver schema; topics are named after its tables.
+    default: hl7_realtime
+  eh_namespace:
+    description: Event Hubs namespace name (terraform output eh_namespace).
+  hub_service_credential:
+    description: The hub's UC service credential (make uc creates it; ACCESS for hub_principal only).
+    default: hub_${var.subscription_hub}_eventhubs
+  hub_schema:
+    description: The pipeline's target schema (make registry creates it and grants it to hub_principal; no tables).
+    default: hub_${var.subscription_hub}
+
+  # Silver entity topics (= the Delta tables they land in: <catalog>.<schema>.<table>)
+  hl7_silver_encounters_topic:
+    description: Silver, one record per ADT event.
+    default: ${var.catalog}.${var.schema}.silver_encounters
+  hl7_silver_observations_topic:
+    description: Silver, one record per OBX result.
+    default: ${var.catalog}.${var.schema}.silver_observations
+  hl7_silver_orders_topic:
+    description: Silver, one record per ORM order.
+    default: ${var.catalog}.${var.schema}.silver_orders
+  hl7_silver_diagnoses_topic:
+    description: Silver, one record per DG1 diagnosis.
+    default: ${var.catalog}.${var.schema}.silver_diagnoses
+  hl7_silver_documents_topic:
+    description: Silver, one record per MDM document.
+    default: ${var.catalog}.${var.schema}.silver_documents
+
+  # The subscription registry (Lakebase)
+  registry_project:
+    description: Lakebase project holding the subscription registry.
+    default: hl7-subscriptions
+  registry_endpoint:
+    description: Lakebase endpoint the hub connects to.
+    default: projects/${var.registry_project}/branches/production/endpoints/primary
+  registry_database:
+    description: Postgres database with the registry schemas.
+    default: databricks_postgres
+
+  # Hub settings (the platform's defaults; databricks.yml at the repo root documents them)
+  hub_rules_per_projection:
+    description: Rules the hub evaluates per Spark projection (rules that aren't plain filters).
+    default: 200
+  hub_max_records_per_batch:
+    description: Most silver records the hub reads per micro-batch per source (it holds a batch in memory).
+    default: 20000
+  hub_trigger_interval_seconds:
+    description: Trigger interval, in seconds. Unset, SDP's streaming default (4 s) is most of delivery.
+    default: 1
+  hub_registry_connections:
+    description: Lakebase connections the pipeline keeps for its batches.
+    default: "4"
+  hub_on_failure:
+    description: When an app's topic refuses writes. park = keep its notifications in the registry and deliver them in
+      order once it's back, while the other apps go on; block = wait for it (one app per hub only).
+    default: park
+
+targets:
+  # The workspace comes from DATABRICKS_HOST or a profile (the Makefile sets it from Terraform outputs).
+  dev:
+    default: true

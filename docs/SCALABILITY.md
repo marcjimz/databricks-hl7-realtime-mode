@@ -4,7 +4,7 @@ This plan is for showing that runtime subscriptions hold up with many apps, many
 and that apps stay isolated from each other while that happens.
 
 Today's evidence:
-- one live app, with 25/25 end-to-end checks through the Subscription API;
+- live apps on two hubs, each passing the 26 end-to-end checks through the Subscription API;
 - registry and API tests against a real PostgreSQL;
 - a first hub measurement at 1, 100, and 1,000 rules (below). It shows the hub's batch time growing with the rule
   count.
@@ -30,16 +30,19 @@ Each section names the test that will prove it, and the pass bar.
 | Event Hubs partitions | 200 × PU per namespace; 100 per hub | app hubs at 4 partitions: ~190 apps at 4 PU. At 1 partition: ~760 | `partition_count` per app (1 for low-volume apps) |
 | Kafka consumer groups | 1,000 per namespace | one group per app instance set, plus the E2E's throwaway groups | delete stale groups; namespace sharding |
 | Brokered connections | 10,000 × PU | each app consumer ≈ 1 connection per broker it reads | fine to thousands of apps |
-| Lakebase connections | by CU: 105 at 0.5 CU … 1,795 at 8 CU (min(max, 8 × min) rule) | hub: 1 per hub pipeline; the API: a small pool per instance | raise min/max CU; read replica for the hub |
-| Subscription API | 1–5 fixed instances per app (autoscaling: future private preview); each declare compiles new rules on a SQL warehouse | app declare/wait calls; the app polls status every 30 s | more instances; warehouse sizing; measure (test P3) |
+| Lakebase connections | by CU: 105 at 0.5 CU … 1,795 at 8 CU (min(max, 8 × min) rule) | hub: a bounded pool per hub pipeline (`hub_registry_connections`, default 4, plus 2); the API: a small pool per instance | raise min/max CU; read replica for the hub |
+| Subscription API | 1–5 fixed instances per app (load-based autoscaling isn't available yet); each declare compiles new rules on a SQL warehouse | app declare/wait calls; the app checks status every 30 s (`?wait=0`) | more instances; warehouse sizing; measure (test P3) |
 | UC temporary service credentials | **unpublished** | one call per app per token lifetime (~1 h), cached | measure (test P3) |
 | Azure RBAC role assignments | 4,000 per subscription | 1 per app (Receiver on its hub) | fine to thousands; group-based assignment beyond |
 | Hub compute | serverless autoscaling; one filter per rule per source per batch | batch time grows with rules: **the first bottleneck to measure** | single-pass evaluation, then hub shards (below) |
 
 ### The hub at its rule cap (measured)
 
-The hub runs at most **1,000 enabled rules across all apps**. The registry enforces the cap (`RULE_LIMIT_REACHED`, in
-`subscription_registry.limits`) and the API returns it as a refusal. For calibration: Fabric Activator allows 500 rules
+*This section and the next measured the previous engine (Spark matching, one pipeline per source, a cap of 1,000 rules across all apps). The current engine is measured in "Hubs at 50 apps and 2,000 rules" below; its cap is 2,000 rules per hub and tier.*
+
+The previous hub ran at most **1,000 enabled rules across all apps** (today: 2,000 per hub and tier, in
+`subscription_registry.hubs`). The registry enforces the cap (`RULE_LIMIT_REACHED`) and the API returns it as a
+refusal. For calibration: Fabric Activator allows 500 rules
 per item. The cap has to *perform*, so here is how the hub got there. All runs are at demo load, rules matching 0.1% of
 patients each, on one source. `hub_progress` records each batch's phases.
 
@@ -79,6 +82,29 @@ What each step taught:
 
 ### Dynamic patient lists at the cap (measured 2026-11-16)
 
+The ED monitor alone (2026-11-16, previous engine, demo load of 200 msg/s, 6 ED journeys a minute; five patient
+rules edited together per census change, from a separate app; 10–30 minute runs):
+
+| Hub | Census edit → ACTIVE p50 / p99 | Patient record → app p50 / p99 / max | n (edits, records) |
+|---|---|---|---|
+| One pipeline for all sources, SDP's default 4 s trigger | 6.1 / 8.4 s | 4.4 / 7.7 / 13.3 s | 244, 1,629 |
+| One pipeline, 1 s trigger | 4.3–4.5 / 7.0–9.3 s | 5.1–5.3 / 6.9–9.6 s | 140 + 86, 797 + 503 |
+| **One pipeline per source, 1 s trigger** | **3.4 / 8.4 s** | **3.6 / 5.8 / 6.6 s** | 94, 455 |
+
+No record was delivered for a patient after their removal went live, in any run. Edit → ACTIVE is the five PUTs
+(~1 s once Databricks has compiled the rule's shape: the API reuses that compile for edits that only change literals,
+`rules.shape`; a new shape compiles on the warehouse, ~1.4 s per rule), then the hub's next batch, which recompiles
+the edit in-batch (0.2–0.5 s).
+
+Where a batch's time went (`hub_progress`, per source, p50 of that setup): ~3 s per batch, of which ~1.1–1.4 s
+pass inside Spark's batch call before the hub's function starts (`age_ms`), ~1.1–1.4 s are the hub's collect, match,
+and Event Hubs write (`write_ms`), and ~0.6 s are Spark's offsets, commits, and source metrics (`spark_ms`). In one
+pipeline, the five sources' batches overlapped 5–8 at a time on one driver and Python process and took ~4–5 s each,
+so a shorter trigger alone made delivery slower. What's left is per-batch overhead of `foreachBatch` on serverless;
+going well under ~3 s needed a different engine: the current one (below) delivers p99 ~2.5 s.
+
+At scale:
+
 The ED workflow (docs/subscriptions.md, "Dynamic patient rules") at scale: each virtual app watches a census of 2,000
 patients with five rules, one per silver source (`examples/benchmarks/patient_lists.py`; 50 of each census's patients
 are in the feed, so each rule matches 0.1% of patients, as above). The ED monitor runs alongside as its own app and
@@ -104,9 +130,9 @@ What it showed:
   - every batch re-shipped the whole table into its broadcast join (observations' write: 2–5.7 s);
   - every edit rebuilt the source's whole table (`compile_ms` 2 s, 5.8 s on observations), and under churn those
     rebuilds ran continuously, competing with the batches.
-- **The index is now a hash map in the hub's memory** (`subscriptions.Index`): the hub already collects each batch
+- **The index became a hash map in the hub's memory** (since replaced by `matching.Matcher`): the hub already collects each batch
   (a few hundred records), looks their values up, and joins only the (record, group) candidates, broadcast, to the
-  small groups table. The plan no longer depends on list sizes (`test_the_plan_does_not_grow_with_a_patient_list`), and
+  small groups table. The plan no longer depends on list sizes (`test_the_read_plan_does_not_grow_with_a_patient_list`), and
   notifications are byte-identical to the Spark-table path's.
 - **What's left at 990 under churn:**
   - each change still rebuilds the source's whole map and groups table (1.2–2.6 s);
@@ -124,7 +150,39 @@ Not done, and not needed at the cap:
 - an index for numeric-only rules;
 - a separate cap for expression-path rules.
 
-Sharding (below) is the lever past 1,000 rules, or for isolating a heavy tenant.
+Sharding (below) was the lever past 1,000 rules, or for isolating a heavy tenant. It's now built by business unit, as
+hubs (next section); the hash shard below stays a plan.
+
+### Hubs at 50 apps and 2,000 rules
+
+The current engine (`src/hl7rt/engine.py`) comes from two benchmarks, run before it moved into the repo (their code
+and resources were kept outside it):
+- **The two-app benchmark** (2026-11-19) compared a hub pipeline per app with one shared hub, with two real service
+  principals.
+- **The 50-app benchmark** (2026-11-20) ran the shared hub at 50 apps and 2,000 rules over a synthetic registry, each
+  app with its own topic, on the same live silver.
+
+The engine matches on the driver, has a producer per app, holds an app's notifications as pending when its topic
+refuses writes, and records which revisions decided each batch.
+
+| Topology at 50 apps / 2,000 rules | Delivery p99 steady | p99 under churn | Cost (estimated) |
+|---|---|---|---|
+| **One pipeline, a flow per source** (the default for every hub) | **2.9 s** | 6.5 s | ~$3.80/h |
+| One pipeline per source | 3.0 s | 2.8 s | ~$14.20/h |
+| Two business-unit pipelines, 25 apps each | 2.8 s | 16.3 s (one unit degraded alone, 13 min) | ~$7.65/h |
+
+- **Matching isn't the cost:** 2,000 rules matched in p99 under 0.1 s per batch; batch p99 2.8–2.9 s steady. Every
+  slow batch was the read of the silver batch (10–70 s stalls). The hub's silver reads now carry the 5 s hung-request
+  guard, which capped the same stalls on the RTM hops; its effect on the hub isn't measured yet.
+- **Cost is per pipeline, not per app or rule:** the two-app benchmark billed 8.2–8.8 DBU/h for a five-flow pipeline whether it served one
+  app or two. A pipeline per app would cost ~$3.80/h each, so a dedicated hub is for a business unit
+  (`subscriber_hubs`), and the cap is per hub: 2,000 enabled rules per tier.
+- **Isolation (two-app benchmark):** with one producer for all apps, a deleted app topic stalled the other app (p99 10.2 s against
+  3.0 s, 2,207 duplicates). With a producer per app and late acks handled, the same failure left it at p99 2.8 s, 0
+  duplicates. A retried batch decided from its recorded revisions in 20 of 20 tries, though rules had changed.
+- **Missed at 50 apps:** the churn target (p99 5 s; one pipeline measured 6.5 s) and edit → ACTIVE p99 3 s (3.0–4.0 s).
+  Duplicates came only around restarts (3,886 at one cold restart). Not measured: a mix of simple and expression rules
+  at scale, and the real registry at 2,000 rules.
 
 **Past the cap: shard the hub.**
 - **How:** the API assigns each rule a `shard` when it's registered, by hash of its subscription ID or by app for tenant
@@ -134,8 +192,29 @@ Sharding (below) is the lever past 1,000 rules, or for isolating a heavy tenant.
 - **Costs:** each shard reads the full silver stream (N× Event Hubs read) and has its own compute.
 
 The Subscription API scales separately. It's stateless, with 2 fixed instances; Databricks Apps allows up to 5, and
-load-based autoscaling is a future private preview. Its load is registration calls and waits, not the data path. Test:
+load-based autoscaling isn't available yet. Its load is registration calls and waits, not the data path. Test:
 concurrent `PUT` + `GET ?wait` from many SPs at 2 vs 5 instances, against p99 latency and errors.
+
+### Both patterns on dev (2026-11-24)
+
+Demo load, 30 minutes, both patterns at once: app-a on `edp_shared`
+and app-b on its own hub `bu_demo` (run as app-b's service principal), each with the same 7 realtime rules across all
+five sources: one expression rule (`startswith`), and a 200-patient list edited every 20 s. Delivery is the app-topic
+broker time minus the source record's broker time:
+
+| Hub | Notifications | Delivery p50 | p90 | p99 | max | Duplicates | Edit → PLACED p50 / p99 | Edit → ACTIVE p50 / p99 |
+|---|---|---|---|---|---|---|---|---|
+| `edp_shared` (app-a) | 78,571 | 1.31 s | 1.86 s | 2.48 s | 14.0 s | 0 | 1.15 / 2.79 s | 2.0 / 4.33 s |
+| `bu_demo` (app-b) | 78,533 | 1.28 s | 1.83 s | 2.47 s | 13.7 s | 0 | 1.04 / 3.19 s | 1.82 / 3.94 s |
+
+- **Both hubs decided exactly the same records** for every rule (e.g. 24,266 and 24,266 for one rule, 7,379 and 7,379
+  for the expression rule), each on its own pipeline, checkpoint, and identity.
+- **The expression rule's tail is the simple rules' tail** (p99 2.44 / 2.52 s): it runs in the same read.
+- **Batch phases** (p99): the silver read and collect 1.1 s, matching ≤ 5 ms, binding ~40 ms, delivery ~0.5 s. Nothing
+  was held as pending.
+- **The max:** three minutes had a p99 over 7 s. Two of them (03:12 and 03:21 UTC) hit both hubs at once, so the cause
+  is upstream of the hubs; one (03:32) hit only `bu_demo` (12.2 s against 3.5 s). Not traced.
+- **Edits:** 105 per app, all ACTIVE; times include the API call (the PUT) and the status poll (every 0.25 s).
 
 ## Test plan
 
@@ -177,8 +256,9 @@ revision.
 **Must fix before production:**
 - **Per-app quota:** max subscriptions and max predicate nodes per app, enforced in the trigger with a QUOTA_EXCEEDED
   error. Today one app could register thousands of rules and slow the hub for everyone.
-- **Hub identity:** a dedicated service principal with SELECT on the registry and write access to `status` and
-  `hub_heartbeat` only, instead of the deploying user (who owns the registry and bypasses RLS).
+- **Hub identity:** done for team hubs (their own service principal, Event Hubs identity, and Lakebase role under RLS;
+  `hub/README.md`). `edp_shared` still runs as the deploying user, who owns the registry and bypasses RLS: give it the
+  same setup.
 - **App credentials:** workload identity (Entra federated credentials) for apps in production, instead of
   client secrets in `~/.databrickscfg`.
 
@@ -199,11 +279,11 @@ can't reach. Real service principals are only needed for the paths that authenti
 | P7 | Soak | P1 at 1,000 rules for 12 hours | the above, plus memory and duplicate counts | no drift, no growth |
 
 **Correctness at scale:** for every test, recompute the expected matches from the silver Delta tables using each
-rule's `predicate_sql` rendering, and compare with the delivered notifications after dedup by `notificationId`. The
+rule's SQL (`where_sql`), and compare with the delivered notifications after dedup by `notificationId`. The
 sets must be equal: no missing match, no extra one, nothing for a cancelled or superseded revision.
 
-**Instrumentation to add first:** the hub writes per-batch rows (rules, input rows, matches, batch ms) to a
-`hub_progress` table, as the spike did. Then a dashboard tile per test.
+**Instrumentation:** the hub writes a row per batch (rules, input rows, deliveries, phase times) to `hub_progress`.
+Next: a dashboard tile per test.
 
 ### Elasticity and failure
 
@@ -217,7 +297,7 @@ sets must be equal: no missing match, no extra one, nothing for a cancelled or s
 | E6 | Database token expiry (hourly) during a long run | hub reconnects; no gap in heartbeat > 2 min |
 | E7 | App crash between poll and commit | replays its uncommitted records; app dedupes |
 | E8 | Event Hubs throttling (exceed PU) | hub backs off; the heartbeat keeps advancing; app warns if not |
-| E9 | Rebuild (`make up` after a wipe) | E2E 25/25 PASS on the new environment |
+| E9 | Rebuild (`make up` after a wipe) | E2E 26 checks, 0 failed, on the new environment |
 
 ## How elastic scaling works, per component
 

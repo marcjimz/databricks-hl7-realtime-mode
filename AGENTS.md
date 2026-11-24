@@ -19,11 +19,12 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
 
 - Layers are **raw → bronze → silver**, each both an RTM Kafka topic and an SDP streaming table. Silver is one topic and
   table per entity. There's no gold layer on the hot path: nothing there needs a join, so silver writes the entity rows
-  itself (one hop less). `gold` is kept for future business views built off the hot path.
+  itself (one hop less). Business views can be built later off the hot path, from the Delta tables.
 - **Subscriptions** over silver: apps register Databricks SQL rules at runtime through the Subscription API (a Databricks
-  App; the rules live in a Lakebase registry), a micro-batch hub pipeline
-  delivers matches to each app's own hub, and a Java app (`examples/subscribers/java`) shows the client side. See
-  "Subscription rules" and docs/subscriptions.md. The earlier SQL-file design is in `examples/subscriptions/`.
+  App; the rules live in a Lakebase registry), a micro-batch subscription hub delivers matches to each app's own topic,
+  and the same example client in Python and Java (`examples/subscribers/`) shows the client side. Two ways to run an
+  app's rules, same rules and API: the platform's shared hub `edp_shared` (default), or a team's own hub deployed from
+  the `hub/` bundle. See "Subscription rules" and docs/subscriptions.md.
 - Phases 0–5 were built on an AWS workspace (cross-cloud to Event Hubs); the repo now targets one Azure region end
   to end. New work: one branch + one PR per unit, verified on dev before merging.
 
@@ -58,6 +59,8 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
 ```
 databricks.yml        variables + targets; include: resources/**
 resources/<type>/     bundle resources grouped by type: jobs/, pipelines/, schemas/, dashboards/
+hub/                  the subscription hub's ONE pipeline definition (resources/subscription_hub.yml, which the main
+                      bundle includes as edp_shared) and the bundle a team deploys to run its own hub
 src/hl7rt/            shared library: pure DataFrame transforms, Event Hubs helpers, generators (unit-tested)
 src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path = src/)
 src/dashboards/       the AI/BI dashboard definitions (.lvdash.json); powerbi/: the live Power BI dashboard's views and
@@ -71,31 +74,30 @@ infra/powerbi.py      idempotent Power BI deploy (`make powerbi`): views, read-o
 src/registry/         the subscription registry: schema, owner trigger, RLS, API functions, grants (registry.sql)
 src/subscription_api/ the Subscription API (Databricks App, FastAPI): the integration contract (OpenAPI), caller, shape
                       check, Databricks compiles, store, wait
-examples/             clients and parked designs, not part of the platform:
+examples/             clients and benchmarks, not part of the platform:
                       subscribers/python/ and subscribers/java/ (the same example subscriber twice: `uv run python ...`
                       from the repo root, or Maven + `java -jar`; both API clients are generated from docs/api/openapi.json;
                       unit-tested by `make test`, not in the wheel or bundle sync); subscribers/apps/ (their settings,
-                      written by `make registry`, gitignored);
-                      subscriptions/ (earlier SQL-file design; not deployed, linted, or tested)
+                      written by `make registry`, gitignored); benchmarks/ (the patient-list scale benchmark)
 tests/                pytest with local Spark (.venv via uv); test_registry.py uses a throwaway local PostgreSQL
 docs/                 integration.md + api/openapi.json (the contract), latency, subscriptions, SCALABILITY test plan,
-                      Epic JSON, story.html (interactive deck),
-                      SPIKE-sql-channels (full-SQL design spike, not built);
-                      diagrams/ (.drawio + PNG + slides)
+                      Epic JSON, examples/criteria.md (existing criteria as rules), story.html (interactive deck),
+                      diagrams/ (.drawio + PNG)
 ```
 
 - Put logic in `src/hl7rt` as functions of DataFrames, so it's testable without a cluster. Keep
   `src/pipelines/*` to decorators + wiring.
-- **Keep the repo to what's deployed or tested.** `src/` is the framework only. Clients of it (the Java subscriber) and
-  parked designs go to `examples/` with a README. Throwaway experiments stay outside the repo folder.
+- **Keep the repo to what's deployed or tested.** `src/` is the framework only. Clients of it (the example subscribers)
+  and benchmarks go to `examples/` with a README. Parked designs, spikes, and throwaway experiments stay outside the
+  repo.
 - Generators are console scripts in the `hl7rt` wheel. The bundle `artifacts:` block builds it into
   `.build/` (gitignored), and it runs as serverless `python_wheel_task` jobs with
   `environment_version: "3"` (Python 3.12).
 - **Terraform owns Azure; the Databricks CLI owns Unity Catalog.** UC objects live in the shared regional metastore and
-  outlive the weekly sandbox wipe, so Terraform state for them would go stale. `infra/uc.sh` creates or repoints them
+  outlive a sandbox wipe, so Terraform state for them would go stale. `infra/uc.sh` creates or repoints them
   and recreates a catalog built for an earlier workspace (catalog property `hl7.workspace_id`). It refuses to touch a catalog
   it didn't create. Azure names are deterministic (prefix-based) so a rebuild reuses the same storage URL.
-- **Replaying a wipe (verified 2026-11-01, real Sunday wipe).** `make up` handled stale Terraform state by itself
+- **Replaying a wipe (verified 2026-11-01, a real sandbox wipe).** `make up` handled stale Terraform state by itself
   (resources seen as deleted, 18 recreated, metastore assignment replaced). Three things needed handling, and
   `tests/test_infra.py` guards each:
   - **The old managed resource group can survive the wipe or a workspace delete.** Azure's default name
@@ -143,8 +145,7 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   - Output mode is update only.
 - **Not supported:** stream-to-stream joins, Delta source/sink, `foreachBatch`, session windows, `mapPartitions`,
   `flatMapGroupsWithState`, and `transformWithStateInPandas`.
-  - The parked `examples/subscriptions` join ran on classic before GA. "Event A then event B" subscriptions need
-    `transformWithState`, or micro-batch.
+  - "Event A then event B" subscriptions need `transformWithState`, or micro-batch.
 - **Epoch boundaries pause by design.** Every `pipelines.trigger.interval` the engine commits offsets, checkpoints, and
   plans the next epoch (driver: `Interbatch latency for batch N`, ~1–1.7 s). The next epoch then opens new Kafka
   consumers. There is no zero-pause mode.
@@ -165,12 +166,11 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
     tail grew. 4 PU (the default) also halves the namespace-wide ~300 ms stalls seen at 2 PU.
   - Capacity wasn't the issue for Phase 3's partition stall (client config was), and it doesn't fix hung connections.
 - **Workspace, Event Hubs, and storage share one Azure region** (`location` + `metastore_id`, default eastus2 with
-  `fevm-shared-sandbox-eastus2`). Phases 0–5 ran AWS us-east-1 → Azure eastus, crossing clouds on every hop (~8 ms
+  the region's metastore). Phases 0–5 ran AWS us-east-1 → Azure eastus, crossing clouds on every hop (~8 ms
   produce round trip). The latency results were measured in westus2.
-  - **A region's features depend on its control-plane shard, not just the region.** New westus2 workspaces land on the
-    new `westus2-c3` shard (`dig <workspace host>`), where Lakebase Autoscaling was still off (Nov 2026: "Lakebase
-    Autoscaling is not enabled in this region"), while older westus2 workspaces have it. We moved to eastus2. Check
-    the features you need on a fresh workspace before committing to a region.
+  - **A feature available in a region may not be available to every new workspace there.** A fresh westus2 workspace
+    had no Lakebase Autoscaling ("Lakebase Autoscaling is not enabled in this region") while older ones did, so the
+    repo moved to eastus2. Check the features you need on a fresh workspace before committing to a region.
 
 ## Subscription rules (see docs/subscriptions.md)
 
@@ -180,7 +180,7 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   App) runs `DESCRIBE QUERY` against the caller's own views and passes Databricks' errors through unchanged. The only
   rule logic of our own is the shape check (`rules.py`): one SELECT of columns, from one silver source, with a WHERE. No
   joins, subqueries, CTEs, set operations, aggregates, parameters, or functions that reach outside the record.
-  - **Why the shape check:** the hub evaluates the WHERE with its own permissions. In the spike, a `(SELECT ...)` inside
+  - **Why the shape check:** the hub evaluates the WHERE with its own permissions. In an early prototype, a `(SELECT ...)` inside
     app SQL ran with the hub's permissions.
   - **Keep it small.** Don't add custom validation that Databricks already does. Joins and cross-event logic become new
     platform-built sources, not app rules.
@@ -195,17 +195,35 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
     overwrites a forged copy (verified live).
   - **Registry access:** app roles are NOLOGIN and granted only to `subscription_service` (the API's SP). The API writes
     with `SET LOCAL ROLE <app>`, so the owner trigger and RLS see the app.
-  - **No other path:** the Lakebase Data API is off, and old SP login roles are dropped. E2E check 7 and
+  - **No other path:** the Lakebase Data API is off, and old SP login roles are dropped. E2E check 8 and
     `tests/test_registry.py` guard this.
 - **Postgres 16+:** the role's creator doesn't get `SET` on it. Even the registry owner can't act as an app without an
   explicit `GRANT <app> TO <me> WITH SET TRUE`, which the perf seeding does and then revokes.
 - **The API is stateless and horizontally scaled:** a fixed 2 instances (`app_min_instances` = `app_max_instances`).
   - **Why fixed:** load-based autoscaling (min < max) isn't enabled for this workspace ("Autoscaling is not enabled for
-    this workspace"). The Apps team plans it as a private preview, with 2–3 minute scale-up.
+    this workspace").
   - **Updating the count:** instance counts change through the new update API (`databricks apps create-update`), not
     `PATCH`.
 - **Each app reads only its own hub:** its own access connector with Data Receiver on that hub, behind its own UC
   service credential, ACCESS granted to its SP only (`subscriber_apps` in Terraform, then `make uc`).
+- **Two ways to run an app's rules; the platform assigns which** (`subscriber_apps.<app>.subscription_hub`, default
+  `edp_shared` → `subscription_registry.apps.hub`; an app never chooses). Same rules, API, and app code either way.
+  - **`edp_shared`:** the main bundle deploys `hub/resources/subscription_hub.yml` with `subscription_hub=edp_shared`,
+    plus `subscription_hub_deferred`, which runs **every** app's deferred rules (`runs_deferred`; a team hub stays one
+    pipeline). It runs as the deployer (the registry owner, which bypasses RLS), so its queries filter by hub.
+  - **A team's own hub** (`subscriber_hubs` in Terraform): the team deploys the `hub/` bundle (`make hub dev HUB=<name>`)
+    as its SP (`run_as`). Its identity is scoped everywhere: connector `<prefix>-hub-<name>` with Receiver on the
+    silver hubs and Sender only on its apps' hubs, UC credential `hub_<name>_eventhubs` (ACCESS for its SP), Lakebase
+    role `hub_<name>` (a member of group `hub`; RLS reads only its apps' rules and writes only rows with its hub), and
+    schema `<catalog>.hub_<name>` (a pipeline needs a target). Its SP reads every silver column: running a hub means
+    being trusted with silver.
+  - **Why not a pipeline per app:** an always-on serverless pipeline costs ~$3.80/h whatever it reads (billed in the two-app benchmark:
+    8.2–8.8 DBU/h per 5-flow pipeline, flat in apps and rules), so a dedicated hub is for a business unit.
+  - **Hub state is keyed by hub:** `status` (PK subscription, hub; a status counts only from the hub that runs the rule),
+    `hub_heartbeat` (hub, tier, source), `hub_progress`, and the engine's tables. Every insert names its columns.
+  - **The bundle code for a team hub doesn't live in `/Workspace/Shared`** (every user may write there, and it runs with
+    an SP that reads all of silver): it deploys under the deployer's home, CAN_VIEW for the SP. Deploy each hub from
+    one identity.
 - **No silent states in the app.** It exits non-zero on a refused or failed rule, an unconfirmed activation, a stopped
   hub (heartbeat), a non-SP identity, or an app that isn't onboarded. It prints only the revisions it just registered.
   - **It never skips a match.** Its consumer group resumes from its last commit, so after time away it works through the
@@ -238,7 +256,7 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
 
   Keep logic on the server. Add a package only for a new role, not per class.
 - **The Python client mirrors the Java one, module for module** (`examples/subscribers/python`: subscriber, my_subscriptions,
-  api, notifications, eventhubs, e2e), with the same output, exit codes, and 25 checks. `build.py` generates its client
+  api, notifications, eventhubs, e2e), with the same output, exit codes, and 26 checks. `build.py` generates its client
   with openapi-python-client into `generated/` (gitignored) whenever the contract is newer; never hand-write a model there
   either. `tests/test_python_subscriber.py` runs the generated client against the real API in-process, so an API change
   that breaks clients fails `make test`. Keep both examples' `MySubscriptions` the same: they declare the SP's whole set.
@@ -248,57 +266,70 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   connection whose first statement hits a network error is replaced, and one that failed is never pooled (a dead one
   once made every API call 500 for days); the hub's client reopens and retries its idempotent statement once.
   `tests/test_subscription_api.py` and `tests/test_hub_registry.py` kill the connection to prove it.
-- **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). Its flows run
-  batches concurrently, so the shared registry client serializes access (`tests/test_hub_registry.py`). Use pg8000:
-  psycopg[binary] aborted the serverless Python process. Serverless has no `persist`/`cache`, so a failed batch is
-  recomputed to find the failing rule.
-- **The hub runs at most 1,000 enabled rules** (`subscription_registry.limits`; the trigger serializes the count with an
-  advisory lock, and an upsert of an already-enabled name isn't a new rule). At the cap it delivers p99 ~7 s
-  (docs/SCALABILITY.md has the measured steps). Keep it fast with these rules:
-  - **Compile per registry change, never per batch, and only what changed.** The registry client reads only the
-    subscriptions whose generation moved, and each source has its own generation (`Registry.source_generation`), so
-    one app's edit never rebuilds another source's rules. Checks and AND groups are cached per revision/WHERE, so a
-    recompile re-parses only the changed rule. A quick recompile runs in the batch that saw it (`SYNC_COMPILE_MS`); a
-    slow one runs in a background thread while batches use the last set (`_RuleSet`). `hub_progress` records each
-    batch's phases: read it before optimizing.
-  - **`max(generation)` alone misses a write that commits out of order** (it took its number before a later write
-    committed). The client also compares the registry's sum of generations with its own and reloads everything when
-    they differ (`tests/test_hub_registry.py`).
-  - **Don't build expressions with PySpark `Column` calls per rule.** Each call is a round trip to the driver (about
-    70 ms per rule). Build one `F.expr` string per chunk, from checked parts only: the WHERE regenerated from its
-    parsed tree, quoted identifiers (`rules.identifier`), and escaped literals (`rules.literal`).
-  - **Simple rules are data, joined through an equality index** (`disjuncts()` and `index_key()` in rules.py,
-    `_data_matches`). Without the index, a cross join of records and rules was 10× slower. `OR` is flattened to AND
-    groups (DNF, at most `MAX_DISJUNCTS`; distribution holds in SQL's three-valued logic too), each indexed on its most
-    selective `=`/`IN` (IDs, then `*_cd`, then points of care, then the rest: never the first clause by default,
-    which is usually a low-selectivity `msg_type`). **The index is a hash map in the hub's memory** (`Index`:
-    (column, value) → groups), not a Spark table: the hub looks up its collected batch and joins only the candidates.
-    As a broadcast table it was ~1.2 M rows at the cap with 2,000-patient lists, re-shipped every batch and rebuilt
-    on every edit (delivery p99 18 s under churn, 11 s with the map; docs/SCALABILITY.md). A group's other clauses
-    are stored once in a small groups table. A record is delivered for the first group that holds (one notification per record and rule). Anything
-    not simple keeps the expression path. Both paths must match `spark.sql` and send identical notifications
-    (`tests/test_subscriptions.py`).
+- **The hub is micro-batch on the PREVIEW channel** (`foreach_batch_sink`; RTM has no foreachBatch). One pipeline per
+  hub and tier, with a flow per silver source sharing one `hl7rt.engine.Engine`; flows run batches on concurrent
+  threads. Use pg8000: psycopg[binary] aborted the serverless Python process. Lakebase connections are bounded: batch
+  threads share a `registry.Pool` of `hl7.registry.connections`, drainers one more connection (the 50-app benchmark opened one per
+  drainer thread and exhausted Lakebase's 225 connections in two minutes, dev hubs included). One engine per hub and
+  lane: a second one waits for the session lock, then fails `HUB_ALREADY_RUNNING`.
+- **The hub runs at most 2,000 enabled rules per hub and tier** (`hubs.max_enabled_rules`; the trigger serializes the
+  count with an advisory lock per (hub, tier), a tier change counts as a new rule for its target, and an upsert of an
+  already-enabled name isn't a new rule). The 50-app benchmark measured one pipeline at 50 apps and 2,000 rules: delivery p99 2.9 s
+  steady, 6.5 s under churn (docs/SCALABILITY.md). Keep it fast with these rules:
+  - **Place rules when they change, never per batch, and only what changed.** The registry client reads only the
+    subscriptions whose generation moved, and each new revision is placed alone (`PLACED` from then on; `ACTIVE` once a
+    batch decided with it). `hub_progress` records each batch's phases (collect, match, bind, deliver, status): read
+    it before optimizing.
+  - **A (max, sum, count) of generations, not `max(generation)` alone:** a write that commits out of order (it took its
+    number before a later write committed), an app moved to another hub, or a deleted row shows only in the sum or
+    count, and the client then reloads everything (`tests/test_hub_registry.py`).
+  - **Simple rules are matched on the driver** (`hl7rt.matching`): `OR` flattened to AND groups (DNF, at most
+    `MAX_DISJUNCTS`; distribution holds in SQL's three-valued logic too), each indexed in memory on its most selective
+    `=`/`IN` (IDs, then `*_cd`, then points of care, then the rest: never the first clause by default, which is usually
+    a low-selectivity `msg_type`). A record is delivered for the first group that holds (one notification per record and
+    rule). In Spark, a cross join of records and rules was 10× slower than an index, and a broadcast index
+    table gave delivery p99 18 s under churn against 11 s for a hash map (docs/SCALABILITY.md).
+  - **Payloads are Spark's bytes:** Spark renders each field any rule selects once per record, as its `to_json` member
+    (`hl7rt.render`), and the driver joins a rule's members. Never format numbers or timestamps in Python.
+  - **Anything not simple runs as a Spark expression in the same read** (an array of the matched rules per chunk of
+    `hl7.subscriptions.chunk`, `subscriptions.matches_sql`). Don't build expressions with PySpark `Column` calls per
+    rule (a driver round trip each, ~70 ms): build one `F.expr` string per chunk, from checked parts only (the WHERE
+    regenerated from its parsed tree, `rules.identifier`, `rules.literal`). Both paths must match `spark.sql` and send
+    identical notifications (`tests/test_subscriptions.py`, `tests/test_matching.py`, whose oracle is
+    `subscriptions.notifications`, the expression path: keep it).
   - **Patients are SQL.** Dynamic workflows edit a rule's `patient_id IN (...)` list (a new revision, not a new rule:
     no cap slot). Rules may be 200,000 characters (`MAX_SQL`, ~10,000 IDs). Delivery is live from the revision's
     ACTIVE batch: no backfill.
-  - **Read each micro-batch once** (collect into a local DataFrame; batches are bounded by `maxOffsetsPerTrigger`).
-    Each union branch over the source would read it again.
+  - **Read each micro-batch once** (one collect; batches are bounded by `maxOffsetsPerTrigger`). Each union branch over
+    the source would read it again. A source with no rules on this hub isn't read, but its heartbeat is written.
+  - **Bind before publishing.** Each batch records, per app, the revisions that decided it and a digest of its
+    notification IDs (`bindings`, keyed by hub, lane, app, source, query ID, and batch ID). A retry (a failed attempt,
+    or a restart before the commit) decides from its binding, with the revisions as they ran (`revisions`: the registry
+    rewrites a revision's SQL in place), not the latest rules (two-app benchmark: 20 of 20 retries matched, though rules had changed).
+  - **Deliver per app** (`hl7rt.delivery`): a producer per app, warmed when the app first has a placed rule (a cold
+    producer's first ack took > 2 s and parked every new app once in the 50-app benchmark). When an app's topic doesn't acknowledge
+    within 3 × its recent p99 (2–10 s), its notifications are parked in `pending` and drained in order, under an
+    advisory lock per app, once it answers; never another app's. A delivery callback never touches the database (the two-app benchmark:
+    it killed the drainer); late acks are unparked afterwards. Block mode (`on_failure: block`, one app per hub) waits
+    in the batch and never raises: SDP fails the update after more than 2 flow failures.
   - **Serverless doesn't allow `persist`/`cache` or Spark codegen settings.** Restructure the plan instead.
   - **A running continuous pipeline doesn't pick up changed source files on deploy** unless its definition changed.
     Restart it (stop + start-update; it resumes from its checkpoint).
 - **Data templates and tiers are subscription properties.** A template (`subscriber_templates` in Terraform →
   `subscription_registry.templates`, per app) is a named per-workflow grant: a subscription naming one is held to its
   columns by the API (`TEMPLATE_DENIED`), the registry trigger, and the hub (it runs the rule with the template's columns
-  as its grant). A tier (`realtime` | `deferred`) picks the hub: `subscription_hub_<entity>` or `subscription_hub_deferred`
-  (same code, `hl7.subscriptions.tier`, a longer `pipelines.trigger.interval`), keyed `deferred:<source>` in heartbeat
-  and progress. The hub resources share one YAML anchor; keep them in step (`tests/test_config_wiring.py`).
-- **One realtime hub pipeline per silver source.** In one pipeline, the five sources' batches shared a driver and a
-  Python process: a batch took ~1.4 s alone and ~4–5 s once every source had live rules (5–8 batches overlapping), so
-  a shorter trigger made delivery slower, not faster. Set the hub's `pipelines.trigger.interval` explicitly
-  (`hub_trigger_interval_seconds`): SDP's default for streaming flows is 4 s, which was most of delivery.
-  `hub_progress.age_ms` (the newest record's age when the batch function starts) and `spark_ms` (Spark's own split of
-  the batch) show time spent outside the hub's phases. Measured and rejected: running a single-read plan on the batch
-  itself instead of collecting it (write 2.0–2.7 s vs ~1.7 s).
+  as its grant). A tier (`realtime` | `deferred`) picks the pipeline: the app's hub, or `subscription_hub_deferred` on
+  `edp_shared` (`registry.runs_on(hub, tier)`; same code, `hl7.subscriptions.tier`, a longer
+  `pipelines.trigger.interval`). The deferred pipeline must equal the shared definition except name, tier, and trigger
+  (`tests/test_config_wiring.py`).
+- **One pipeline per hub, a flow per source, 1 s trigger.** With Spark matching, five sources in one pipeline slowed each
+  other (~1.4 s batches alone, ~4–5 s together), so the earlier hub ran a pipeline per source. With driver matching, one
+  pipeline carried 50 apps and 2,000 rules at p99 2.9 s (the 50-app benchmark), and on dev `edp_shared` and a team hub each delivered
+  p99 2.5 s with 7 rules (2026-11-24), at about a quarter of the cost; one pipeline per source is the option
+  for the tightest tail under churn (2.8 s vs 6.5 s, ~3.7× the cost; set `hl7.subscriptions.sources`). Set the hub's
+  `pipelines.trigger.interval` explicitly (`hub_trigger_interval_seconds`): SDP's default for streaming flows is 4 s,
+  which was most of delivery. The silver reads carry the 5 s hung-request guard (`eventhubs.hub_read_options`): the 50-app benchmark's
+  slow batches were all 10–70 s silver reads.
 - **The Apps proxy may cut long requests.** Clients poll `?wait` in short calls (≤25 s); the API caps each call at
   60 s.
 - **Monitoring reads the registry through Unity Catalog.** `make registry` registers the database as `<catalog>_registry`
@@ -307,13 +338,16 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   column's type. `tests/test_dashboard.py` keeps both dashboards portable.
 - **The Databricks SDK lets `DATABRICKS_*` environment variables override a profile.** The app pins
   `auth_type=oauth-m2m` from its profile and refuses to run as anything but a service principal.
-- **`--e2e` is the acceptance test** (25 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
-  every new guarantee, and keep docs/subscriptions.md's table in step. Plans beyond one SP: docs/SCALABILITY.md.
+- **`--e2e` is the acceptance test** (26 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
+  every new guarantee, in both languages (`tests/test_subscriber_examples.py` fails if their lists differ), and update
+  docs/subscriptions.md's table by hand. Checks read what the app is granted from
+  `/connection` (a source it isn't granted, the fields its rule may use), so they pass under any grant or template.
+  Plans beyond one SP: docs/SCALABILITY.md.
 - **Serverless JAR tasks need environment_version 4+** (`java_dependencies`). Binding a job's `run_as` to an SP needs
   the deployer to have **Service Principal: User** on it, so the app's job is its own bundle (`examples/subscribers/java`):
   in the platform bundle it made every `make demo` fail for deployers without that role.
-- **Maven Central is blocked on the Databricks network.** Use the internal mirror in `~/.m2/settings.xml`
-  (`maven-proxy.dev.databricks.com`). Keep it out of the repo: customers won't have it.
+- **If Maven Central is blocked on your network,** point Maven at your organization's mirror in `~/.m2/settings.xml`.
+  Keep mirror settings out of the repo: customers have their own.
 
 ## Data contracts
 
@@ -389,8 +423,8 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
 - **Targets:** `make up` (Azure + `make uc`), `make demo dev` (deploy + start all pipelines and both feeds),
   `make clear-data dev`, `make stop dev` (stops compute billing). Deploy starts new or changed continuous pipelines;
   `demo` starts the rest.
-- **`make up`** builds or rebuilds Azure (Terraform plan → you confirm → apply) and then runs `make uc`. The FE sandbox is
-  wiped every Sunday: rerun `make up`, then `make demo dev`. The Makefile reads the workspace URL, `catalog`, and
+- **`make up`** builds or rebuilds Azure (Terraform plan → you confirm → apply) and then runs `make uc`. After a sandbox
+  wipe, rerun `make up`, then `make demo dev`. The Makefile reads the workspace URL, `catalog`, and
   `eh_namespace` from Terraform outputs (`DATABRICKS_HOST`, `BUNDLE_VAR_*`) and authenticates with the Azure CLI, so a new
   workspace needs no login or config edits. `uc.sh` clears the local bundle cache when it recreates the catalog.
 - **`make clear-data <env>`** empties the Delta tables (full refresh of the lakehouse mirror) without touching RTM
@@ -421,7 +455,7 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   split the message into segments once and each needed segment into fields once, then read fields from those
   columns. Spark won't collapse a projection if that would duplicate an expensive expression. Inlining the
   segment split inside every field produced a **379 KB plan with 290 `split()` calls per record**. The RTM
-  driver sat in `STARTING` with 55% GC. `tests/test_hl7v2.py::test_silver_plan_splits_each_segment_once` guards it.
+  driver sat in `STARTING` with 55% GC. `tests/test_silver.py::test_silver_plan_splits_the_message_once_and_reads_bronze_json_once` guards it.
 
 - **ANSI is on** (Spark 4 / DBR 18): use `try_to_timestamp`, `try_element_at`, `try_cast`. A single
   malformed value with `to_timestamp` fails the whole stream.

@@ -40,7 +40,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
  * principal isn't an onboarded subscriber app.
  *
  * <pre>
- *   java -jar hl7-subscriber.jar [file.properties] [key=value ...] [--duration=PT5M] [--e2e]
+ *   java -jar hl7-subscriber.jar [file.properties] [key=value ...] [--duration=300|PT5M] [--e2e]
  * </pre>
  *
  * Settings: only databricks.profile (the service principal) and api.app (the Subscription API's Databricks App name;
@@ -71,8 +71,7 @@ public final class App {
             return;
         }
         if (argv.contains("--e2e")) System.exit(E2E.run(workspace, api, connection, cfg));
-        Duration runFor = argv.stream().filter(a -> a.startsWith("--duration=")).findFirst()
-                .map(a -> Duration.parse(a.substring("--duration=".length()))).orElse(null);
+        Duration runFor = duration(argv);
 
         // 1. Declare what the code says. Databricks compiles each rule in this call: ACCEPTED, or refused with its error.
         DeclareResult declared;
@@ -180,6 +179,18 @@ public final class App {
 
     public static boolean isServicePrincipal(String userName) {
         return userName != null && userName.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+    }
+
+    /** --duration=40 (seconds, as the Python example) or --duration=PT1M30S; null when absent. */
+    static Duration duration(List<String> argv) {
+        return argv.stream().filter(a -> a.startsWith("--duration=")).findFirst().map(a -> {
+            String v = a.substring("--duration=".length());
+            try {
+                return v.matches("\\d+") ? Duration.ofSeconds(Long.parseLong(v)) : Duration.parse(v);
+            } catch (java.time.format.DateTimeParseException e) {
+                throw new IllegalArgumentException("--duration: seconds or PT1M30S, not " + v);
+            }
+        }).orElse(null);
     }
 
     /** The SP's Databricks OAuth token (the SDK refreshes it). */

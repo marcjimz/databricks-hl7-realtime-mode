@@ -29,12 +29,14 @@ dist/
 # Tooling
 .isaac/
 .claude/settings.local.json
+.claude/worktrees/
 .idea/
 .vscode/
 .DS_Store
 
 # Local reference docs (not for the repo)
-docs/Databricks_Dynamic_Subscription_Feasibility_Spec_v0_3.md
+docs/*_Spec_*.md
+docs/private/
 
 # Java subscriber: build output and the local config
 examples/subscribers/java/target/
@@ -44,5 +46,5 @@ examples/subscribers/java/apps/
 examples/subscribers/python/generated/
 examples/subscribers/java/.databricks/
 
-# Slide deck: ~21 MB of template assets; regenerate or share via Drive instead of committing
+# Slide decks: large template assets; keep them out of git
 docs/diagrams/*.pptx

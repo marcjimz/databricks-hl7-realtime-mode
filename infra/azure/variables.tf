@@ -14,7 +14,7 @@ variable "databricks_account_id" {
 }
 
 variable "metastore_id" {
-  description = "Existing Unity Catalog metastore in var.location to assign the workspace to (e.g. fevm-shared-sandbox-eastus2)."
+  description = "Existing Unity Catalog metastore in var.location to assign the workspace to (your region's metastore)."
   type        = string
 }
 
@@ -36,7 +36,7 @@ variable "prefix" {
 }
 
 variable "owner" {
-  description = "Owner email, applied as the `owner` tag (required by sandbox subscription policy)."
+  description = "Owner email, applied as the `owner` tag (some subscriptions' policies require it)."
   type        = string
 }
 
@@ -99,16 +99,34 @@ variable "subscriber_templates" {
 }
 
 variable "subscriber_apps" {
-  description = "Subscriber apps: name -> its Databricks service principal's application ID and what it may read: data templates (subscriber_templates) and/or sources and columns of its own. Each gets its own hub and a hub-scoped identity (subscribers.tf)."
+  description = "Subscriber apps: name -> its Databricks service principal's application ID and what it may read: data templates (subscriber_templates) and/or sources and columns of its own. Each gets its own hub and a hub-scoped identity (subscribers.tf). subscription_hub picks the subscription hub that runs its realtime rules: edp_shared (the platform's, the default) or a team hub of subscriber_hubs."
   type = map(object({
-    application_id = string
-    templates      = optional(list(string), [])
-    sources        = optional(list(string), [])
-    fields         = optional(list(string), [])
+    application_id   = string
+    templates        = optional(list(string), [])
+    sources          = optional(list(string), [])
+    fields           = optional(list(string), [])
+    subscription_hub = optional(string, "edp_shared")
   }))
   default = {}
   validation {
     condition     = alltrue([for k in keys(var.subscriber_apps) : can(regex("^[a-z0-9][a-z0-9-]{0,40}$", k))])
     error_message = "Subscriber app names are lowercase letters, digits, and hyphens."
+  }
+  validation {
+    condition     = alltrue([for a in values(var.subscriber_apps) : a.subscription_hub == "edp_shared" || contains(keys(var.subscriber_hubs), a.subscription_hub)])
+    error_message = "An app's subscription_hub is edp_shared or a key of subscriber_hubs."
+  }
+}
+
+variable "subscriber_hubs" {
+  description = "Team subscription hubs (bring your own hub): name -> the service principal that deploys and runs it (hub/, run as that SP) and its rule cap. Each gets an identity that reads the silver hubs and writes only its apps' hubs (hubs.tf). edp_shared, the platform's hub, isn't listed: it's the default."
+  type = map(object({
+    application_id    = string
+    max_enabled_rules = optional(number, 2000)
+  }))
+  default = {}
+  validation {
+    condition     = alltrue([for k in keys(var.subscriber_hubs) : can(regex("^[a-z][a-z0-9_]{1,30}$", k)) && k != "edp_shared"])
+    error_message = "Hub names are 2-31 lowercase letters, digits, and underscores, starting with a letter; edp_shared is the platform's."
   }
 }

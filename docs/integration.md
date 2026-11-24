@@ -15,10 +15,14 @@ Two things to configure:
 2. **The Subscription API's app name** (a Databricks App, e.g. `hl7-subscriptions-dev`). Its URL changes when the
    workspace is rebuilt, so look it up: `GET $WS/api/2.0/apps/<name>` returns `url` to any caller with CAN_USE on it.
 
-Everything else comes from the API (`GET /api/v1/connection`): the app's topic, the Kafka bootstrap servers, and its
-Unity Catalog credential for Event Hubs. Before that works, the platform team onboards the app: the sources and columns
-it may read (docs/subscriptions.md, "Set up"). The app needs network access to the workspace and the API (HTTPS), and
-to the bootstrap servers (port 9093).
+Everything else comes from the API (`GET /api/v1/connection`): the app's topic, the Kafka bootstrap servers, its
+Unity Catalog credential for Event Hubs, the hub that runs its rules, and what it's granted.
+- **Onboarding first:** the platform team onboards the app: the sources and columns it may read, and its hub
+  (docs/subscriptions.md, "Set up" and "Two ways to subscribe").
+- **Network:** HTTPS to the workspace and the API, and port 9093 to the bootstrap servers.
+- **One code path:** the app's code is the same whichever hub runs its rules.
+
+The handshake below uses `curl` and `jq`.
 
 ## The handshake
 
@@ -32,7 +36,8 @@ API=$(curl -s "$WS/api/2.0/apps/hl7-subscriptions-dev" -H "Authorization: Bearer
 
 # 2. Where to read, and with which credential (once; it doesn't change while the app is onboarded)
 curl -s "$API/api/v1/connection" -H "Authorization: Bearer $TOKEN"
-#   → {"topic", "bootstrapServers", "credential", "tokenScope"}
+#   → {"topic", "bootstrapServers", "credential", "tokenScope", "hub", "sources", "fields"}
+#     hub: the hub that runs its realtime rules (edp_shared, or its team's own); sources/fields: what it's granted
 
 # 3. Declare the whole set. Atomic: all accepted, or nothing applied. Undeclared rules are cancelled.
 curl -s -X PUT "$API/api/v1/subscriptions" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
@@ -43,9 +48,12 @@ curl -s -X PUT "$API/api/v1/subscriptions" -H "Authorization: Bearer $TOKEN" -H 
 # 4. Wait, in short calls, until the hub runs exactly these revisions
 curl -s "$API/api/v1/subscriptions?wait=25" -H "Authorization: Bearer $TOKEN"
 #   state: READY (start reading) | PENDING (poll again) | FAILED (see problems) | HUB_STALE (the hub is stopped)
+#   each subscription: state PENDING | PLACED (in the hub's matcher) | ACTIVE (decided a batch) | FAILED | CANCELLED,
+#   and the hub that runs it; heartbeats: [{hub, tier, source, lastBatchAt, batchId, rules}] for the hubs that run yours
 
 # 5. A Kafka token for the topic, issued by Unity Catalog to this service principal only (credential and tokenScope from 2)
 curl -s -X POST "$WS/api/2.1/unity-catalog/temporary-service-credentials" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{"credential_name": "<credential>", "azure_options": {"resources": ["<tokenScope>"]}}'
 #   → {"azure_aad": {"aad_token"}, "expiration_time"}   (refresh before it expires)
 ```
@@ -55,7 +63,7 @@ receive. `POST /api/v1/validate` runs every check without applying anything.
 
 ## Reading the topic
 
-Use any Kafka client on `destination`. Settings:
+Use any Kafka client on the app's topic (`topic` from the connection; each accepted rule's `destination` is the same topic). Settings:
 - `bootstrap.servers`: `bootstrapServers` from the connection
 - `security.protocol`: `SASL_SSL`, with `sasl.mechanism` `OAUTHBEARER` (the token is `aad_token`)
 - **one stable `group.id` per app**, so it resumes where it stopped
@@ -71,6 +79,8 @@ Each message is keyed by patient ID. The value is JSON:
 ```
 
 - **Delivery is at least once:** deduplicate on `notificationId`.
+- **`source_ts`** (the source record's broker time) is snake_case, unlike the other fields; it's part of version 1 of
+  the contract, so it stays.
 - **Act only on the `(subscriptionId, revision)` pairs your last declare returned.** Anything else is backlog from an
   earlier revision.
 - **`payload`** holds exactly the columns the rule selects, nulls included.
@@ -81,8 +91,9 @@ Each message is keyed by patient ID. The value is JSON:
 |---|---|
 | 401 | `UNAUTHENTICATED`: no valid token |
 | 403 | `APP_NOT_ONBOARDED`: the service principal isn't a subscriber app |
-| 422 | Databricks' error class (`UNRESOLVED_COLUMN…`, `PARSE_SYNTAX_ERROR`, …), `SQL_NOT_ALLOWED` (not one filter over one record), `INVALID_NAME`, `DUPLICATE_NAME`, `RULE_LIMIT_REACHED` (1,000 rules). Nothing applied. |
+| 422 | Databricks' error class (`UNRESOLVED_COLUMN…`, `PARSE_SYNTAX_ERROR`, …), `SQL_NOT_ALLOWED` (not one filter over one record), `INVALID_NAME`, `DUPLICATE_NAME`, `TEMPLATE_DENIED`, `RULE_LIMIT_REACHED` (the hub's cap, 2,000 rules per tier by default). Nothing applied. |
 | 404 | `NOT_FOUND_OR_INACCESSIBLE`: `DELETE` of a name with no active subscription |
+| 503 | `NOT_CONFIGURED`: `GET /api/v1/connection` before the platform has finished onboarding the app (its topic or credential isn't set) |
 
 ## The example clients
 
@@ -94,4 +105,4 @@ Both are generated from `api/openapi.json` and do the same steps, with the same 
 - `api/`: the client generated from `api/openapi.json` (`SubscriptionsApi` and its models);
 - `platform/EventHubs`: step 5 and the Kafka settings;
 - `notifications/Listener`: dedupe and current revisions;
-- `e2e/E2E`: 25 live checks.
+- `e2e/E2E`: 26 live checks.
