@@ -10,9 +10,9 @@ Serverless Real-Time Mode (GA), Azure westus2 (workspace, Event Hubs Premium at 
 | producer → raw | −1 ms | 14 ms | **57 ms** | 0.6 s |
 | raw → bronze | 7 ms | 47 ms | **86 ms** | 1.4 s |
 | bronze → silver (full HL7 parse) | 0 ms | 31 ms | **78 ms** | 2.1 s |
-| silver → gold | 0 ms | 31 ms | **78 ms** | 1.5 s |
 
-Every hop is under 200 ms at p99, and there are 0 duplicate keys. The max comes from checkpoint boundaries and
+Every hop is under 200 ms at p99, and there are 0 duplicate keys. (This run also had a silver → gold hop, p99 78 ms;
+silver now writes the entity rows itself, so there's no gold hop on the hot path.) The max comes from checkpoint boundaries and
 occasional Event Hubs connection hangs (both below).
 
 ## How it's measured
@@ -48,5 +48,5 @@ Ruled out by measurement:
   namespace or a private endpoint would test the remaining suspects.
 - **The tail beyond p99** (seconds) is not addressed.
 
-The full history (AWS cross-cloud phases 0–5, the classic-compute investigation, driver-log breakdowns) is in
-[latency-history.md](https://github.com/marcjimz/databricks-hl7-realtime-mode/blob/de0fd16/examples/aws-cross-cloud/latency-history.md) (removed from the repo with the AWS setup; kept in git history).
+The full history (AWS cross-cloud phases 0–5, the classic-compute investigation, driver-log breakdowns) was removed
+from the repo with the AWS setup; it's in git history (`git show de0fd16:examples/aws-cross-cloud/latency-history.md`).

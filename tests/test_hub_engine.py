@@ -280,8 +280,8 @@ def test_each_apps_producer_is_warmed_once_it_has_a_placed_rule(pg, batch):
 
 
 def test_the_hub_reads_and_writes_with_the_hung_request_guard():
-    """A hung Event Hubs connection held a read or a write until the 60 s request timeout (S6/S7: batches spent 10-70 s
-    reading silver; a hung write failed the flow). Reads and the per-app producers give up after 5 s."""
+    """A hung Event Hubs connection held a read or a write until the 60 s request timeout (benchmarks: batches spent
+    10-70 s reading silver; a hung write failed the flow). Reads and the per-app producers give up after 5 s."""
     opts = eventhubs.hub_read_options("ehns", "cred", "cat.hl7.silver_observations", 20000)
     assert opts["kafka.request.timeout.ms"] == eventhubs.HUNG_REQUEST_GUARD["kafka.request.timeout.ms"] == "5000"
     assert (opts["subscribe"], opts["startingOffsets"], opts["maxOffsetsPerTrigger"]) == (

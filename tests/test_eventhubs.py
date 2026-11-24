@@ -68,7 +68,7 @@ def test_librdkafka_producer_follows_event_hubs_guidance():
 
 def test_the_hub_gives_up_on_a_hung_read_or_send_quickly():
     """Seen live: a hung Event Hubs connection held the hub's write for 2 minutes (delivery timeout) and failed the
-    flow; retried three times, that failed the whole update. S6/S7's slow batches spent 10-70 s reading silver. Like
+    flow; retried three times, that failed the whole update. Benchmarks' slow batches read silver 10-70 s. Like
     the RTM hops, the hub's reads and its per-app producers give up on a hung request after 5 s and retry on a new
     connection."""
     from pathlib import Path

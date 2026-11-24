@@ -70,7 +70,7 @@ uv run python examples/subscribers/python/monitor.py --duration=600    # dynamic
 | `notifications.py` | The delivery contract: dedupe, current revisions, catch-up (`notifications/Listener`) |
 | `eventhubs.py` | Unity Catalog token, OAUTHBEARER, Event Hubs client settings (`platform/EventHubs`) |
 | `e2e.py` | The 26 live checks (`e2e/E2E`) |
-| `build.py` | Generates the client from the contract (Maven's openapi-generator step) |
+| `build.py` | Generates the client from the contract with openapi-python-client (the Java build's openapi-generator step, for Python) |
 | `monitor.py` | Dynamic patient monitoring: follows ED registrations and edits the patient rules per census change (no Java version) |
 | `patient_rules.py` | The monitor's rules and census logic, with no I/O |
 

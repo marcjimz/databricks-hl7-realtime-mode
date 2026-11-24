@@ -10,9 +10,9 @@ the matches to the app's own topic. There are two ways to get one, with the same
 | Serves | every app not assigned elsewhere, plus **every** app's `deferred` rules | only your apps' `realtime` rules |
 | Event Hubs | `<catalog>_eventhubs` | `hub_<name>_eventhubs`: reads silver, writes only your apps' topics |
 | Registry | the owner | its own Lakebase role: reads only your apps' rules, writes only its own rows |
-| Cost | shared by everyone on it | one always-on serverless pipeline (~$3.80/h measured), whatever the apps or rules |
+| Cost | shared by everyone on it | one always-on serverless pipeline (~$3.80/h estimated), whatever the apps or rules |
 
-Both deploy the same pipeline definition, `resources/subscription_hub.yml`. The main bundle includes it with
+Both deploy the same pipeline definition, `hub/resources/subscription_hub.yml`. The main bundle includes it with
 `subscription_hub=edp_shared`; this bundle deploys it under your hub's name. One pipeline with a flow per silver
 source carried 50 apps and 2,000 rules at delivery p99 2.9 s (docs/SCALABILITY.md).
 
@@ -38,7 +38,7 @@ so running a hub means your team is trusted with silver.
    - an access connector with Data Receiver on the five silver hubs and Data Sender on each assigned app's hub;
    - credential `hub_lab_team_eventhubs`, with ACCESS for the service principal only;
    - registry role `hub_lab_team`, with the service principal as its member;
-   - schema `<catalog>.hub_lab_team`, the pipeline's target, where it writes no tables;
+   - schema `<catalog>.hub_lab_team`, the pipeline's target (it creates no tables there);
    - use of the registry's Lakebase project.
 
 2. **Your team deploys the hub.** The deployer needs the **Service Principal: User** role on the hub's service
@@ -61,7 +61,7 @@ so running a hub means your team is trusted with silver.
 ## Notes
 
 - **Deploy each hub from one identity.** Bundle state lives under the deployer's home folder. Two people deploying the
-  same hub would create two pipelines, and the second refuses to run beside the first. Deploying from CI as the hub's
+  same hub would create two pipelines, and the second fails while the first runs. Deploying from CI as the hub's
   service principal avoids this.
 - **The code isn't in `/Workspace/Shared`.** It runs with the service principal's access, so it stays where only the
   deployer can change it, and the service principal can only read it.
@@ -69,4 +69,4 @@ so running a hub means your team is trusted with silver.
 - **For the tightest tail under churn,** deploy one pipeline per source by setting `hl7.subscriptions.sources`. That
   measured p99 2.8 s against 6.5 s for one pipeline, at about 3.7× the cost.
 - **Moving an app to another hub** (change `subscription_hub`, then `make up`) lets the new hub start from the live
-  edge. Wait until the old hub has delivered the app's parked notifications.
+  edge. First wait until the old hub has sent the app's pending notifications (held while its topic was down).

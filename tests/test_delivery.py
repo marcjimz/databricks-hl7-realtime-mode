@@ -322,7 +322,7 @@ def test_a_cold_app_is_not_parked_for_a_slow_first_ack(lane, monkeypatch):
     monkeypatch.setattr(delivery, "PARK_COLD_S", 1.0)
     p, s = FakeProducer(), FakeStore()
     d = park(lambda app: p, s, lane)
-    p.slow["hub-new"] = 0.5  # its first acks take longer than the 0.2 s floor (S7: every new app was parked once)
+    p.slow["hub-new"] = 0.5  # its first acks take longer than the 0.2 s floor (a fixed wait parked every new app once)
     assert d.publish(msgs("new", "hub-new", 3)) == {"delivered": 3, "parked": 0}
     assert d.state.get("new", "CLOSED") == "CLOSED"
 

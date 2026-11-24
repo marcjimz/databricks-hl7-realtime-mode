@@ -40,7 +40,7 @@ App (as its own SP) ──PUT [{name, sql}]──► Subscription API (Databrick
 
 The rules, the API, and the app are the same either way. The platform decides which hub runs an app's rules
 (`subscriber_apps.<app>.subscription_hub` in Terraform, default `edp_shared`), and `GET /api/v1/connection` tells the
-app.
+app. Each rule also has a tier: `realtime` (the default) or `deferred`, for work that can wait (see "Delivery tiers").
 
 | | `edp_shared` (the default) | A team's own hub |
 |---|---|---|
@@ -59,72 +59,38 @@ app.
 - **Trust:** a team hub's service principal reads every column of silver; the hub enforces each app's column grants in
   its own code. Running a hub means being trusted with silver.
 
-The hub runs micro-batches (seconds, not milliseconds). It needs `foreachBatch` to apply a rule set that changes at
-runtime, and Real-Time Mode doesn't support `foreachBatch`. `foreach_batch_sink` is Public Preview, so the hub runs on
-the PREVIEW channel. The RTM hot path is unchanged.
+The hub runs micro-batches (seconds, not milliseconds): it needs `foreachBatch` to apply rules that change at runtime,
+which Real-Time Mode doesn't support. That feature (`foreach_batch_sink`) is Public Preview. The Real-Time Mode hot
+path is unchanged.
 
 **How the hub evaluates rules:**
 - **Up to 2,000 enabled rules per hub and tier.** Past that, a new rule is refused with `RULE_LIMIT_REACHED`, naming
   the hub; cancel one first, or move apps to another hub.
-- **A change touches only its own rule.** The hub reads only the subscriptions whose generation moved, re-checks them,
-  and places each new revision in its matcher: the subscription's state is then `PLACED`, and `ACTIVE` once a batch
-  has decided records with it.
-- **Simple rules are matched on the driver:** comparisons of a column with a literal, combined with `AND` and `OR`
-  (flattened to at most 64 AND groups). Each group is indexed in memory on its most selective `=` or `IN` (patient or
-  visit ID first, then codes, then points of care, then anything else), so a record meets only the groups that name
-  one of its values. Spark renders each selected field of the batch once, exactly as `to_json` would; the notification
-  joins those, so it's byte for byte what the SQL path writes.
+- **A change touches only its own rule.** The hub reads only the subscriptions that changed and loads each new
+  revision: its state is then `PLACED` (loaded, waiting for data), and `ACTIVE` once a batch has used it.
+- **Simple rules are matched in memory:** comparisons of a column with a literal, combined with `AND` and `OR`. Each
+  rule is indexed on its most selective `=` or `IN` (patient or visit ID first, then codes, then points of care), so
+  a record is checked only against the rules that name one of its values.
 - **Other rules run as SQL expressions** (functions, `LIKE`, `NOT` around a group), in the same read of the batch.
 - **The path doesn't change the result:** both select the same records as the SQL editor and send identical
   notifications (`tests/test_subscriptions.py`, `tests/test_matching.py`).
-- **A retried batch decides as it did the first time.** Before it publishes, the hub records which revisions decided
-  the batch (`bindings`); a retry of that batch (after a crash or restart) decides from those revisions, even if a rule
-  changed in between.
-- **One app can't hold up another.** Each app has its own producer. If its topic refuses writes for longer than it
-  usually takes to acknowledge (3 × its recent p99, 2–10 s), its notifications are parked in the registry (`pending`)
-  and delivered in order when the topic is back; the other apps' notifications go on.
+- **A retried batch decides as it did the first time.** Before it publishes, the hub records which rule revisions
+  decided the batch; a retry (after a crash or restart) uses those revisions, even if a rule changed in between.
+- **One app can't hold up another.** Each app has its own Event Hubs producer. If its topic stops acknowledging (for
+  longer than 3 × its recent p99, 2–10 s), its notifications are held in the registry as pending and sent in order
+  when the topic is back; the other apps' notifications go on.
 
-**Measured, this engine, on dev** (2026-11-24, demo load, 30 minutes): both patterns at once. app-a on `edp_shared`
-and app-b on its own hub `bu_demo` (run as app-b's service principal), each with the same 7 realtime rules across all
-five sources: one expression rule (`startswith`), and a 200-patient list edited every 20 s. Delivery is the app-topic
-broker time minus the source record's broker time:
+**Measured on dev** (2026-11-24, demo load, 30 minutes, both patterns at once: one app on `edp_shared`, one on its own
+hub, each with 7 rules across all five sources). Delivery is the app-topic broker time minus the source record's broker
+time:
 
-| Hub | Notifications | Delivery p50 | p90 | p99 | max | Duplicates | Edit → PLACED p50 / p99 | Edit → ACTIVE p50 / p99 |
-|---|---|---|---|---|---|---|---|---|
-| `edp_shared` (app-a) | 78,571 | 1.31 s | 1.86 s | 2.48 s | 14.0 s | 0 | 1.15 / 2.79 s | 2.0 / 4.33 s |
-| `bu_demo` (app-b) | 78,533 | 1.28 s | 1.83 s | 2.47 s | 13.7 s | 0 | 1.04 / 3.19 s | 1.82 / 3.94 s |
+| Hub | Delivery p50 | p99 | max | Duplicates | Rule edit → ACTIVE p50 / p99 |
+|---|---|---|---|---|---|
+| `edp_shared` | 1.31 s | 2.48 s | 14.0 s | 0 | 2.0 / 4.3 s |
+| A team's hub | 1.28 s | 2.47 s | 13.7 s | 0 | 1.8 / 3.9 s |
 
-- **Both hubs decided exactly the same records** for every rule (e.g. 24,266 and 24,266 for one rule, 7,379 and 7,379
-  for the expression rule), each on its own pipeline, checkpoint, and identity.
-- **The expression rule's tail is the simple rules' tail** (p99 2.44 / 2.52 s): it runs in the same read.
-- **Batch phases** (p99): the silver read and collect 1.1 s, matching ≤ 5 ms, binding ~40 ms, delivery ~0.5 s. Nothing
-  was parked.
-- **The max:** three minutes had a p99 over 7 s. Two of them (03:12 and 03:21 UTC) hit both hubs at once, so the cause
-  is upstream of the hubs; one (03:32) hit only `bu_demo` (12.2 s against 3.5 s). Not traced.
-- **Edits:** 105 per app, all ACTIVE; times include the API call (the PUT) and the status poll (every 0.25 s).
-
-**Measured, this engine at scale** (spike S7, 2026-11-20, dev, demo load: the same engine over a synthetic registry,
-every app with its own topic, rules matching ~0.1% of a source's records each):
-
-| Apps (rules) | Topology | Delivery p99 steady | p99 under churn (30 membership edits/s) | Cost (estimated) |
-|---|---|---|---|---|
-| 2 (80) → 50 (2,000) | one pipeline, a flow per source | 2.7–2.9 s | — | ~$3.80/h |
-| 50 (2,000) | one pipeline, a flow per source (the default) | 2.9 s | 6.5 s | ~$3.80/h |
-| 50 (2,000) | one pipeline per source | 3.0 s | 2.8 s | ~$14.20/h |
-
-Matching 2,000 rules took p99 under 0.1 s per batch. Every slow batch was spent reading the batch from silver, not
-matching or delivering. The ~$3.80/h is S6's billed 8.2–8.8 DBU/h for a five-flow pipeline, flat in apps and rules.
-
-**Measured, the previous engine** (Spark matching, one pipeline per source; 2026-11-05, demo load):
-
-| Rules on one source | Hub batch interval | Delivery p50 | p99 | One rule change → ACTIVE |
-|---|---|---|---|---|
-| 1 | 3.4–4 s | 2.7 s | 4.7 s | ~5 s |
-| 1,000 (its cap) | ~4 s | 4.5 s | 7.1 s | 8 s |
-| 1,000, of which 100 use functions | ~4 s | 4.5 s | 6.5 s | — |
-
-From the raw HL7 topic to the app's hub, one rule measured p99 4.8 s, of which the hot path takes under 100 ms. These
-numbers don't include the app's own poll. How it got here: [SCALABILITY.md](SCALABILITY.md).
+At 50 apps and 2,000 rules, one hub delivered p99 2.9 s steady and 6.5 s under heavy churn. The runs, the topologies,
+and their costs: [SCALABILITY.md](SCALABILITY.md#hubs-at-50-apps-and-2000-rules).
 
 ## Dynamic patient rules
 
@@ -151,27 +117,9 @@ WHERE patient_id IN ('MRN050001', 'MRN050002', ...)
 - **The example:** `examples/subscribers/python/monitor.py` runs the whole workflow (logic in `patient_rules.py`) and
   times each census edit until ACTIVE. The synthetic feed plays coherent ED encounters for it to follow
   (`generator_journeys_per_minute`).
-- **Measured with the previous engine** (2026-11-16, dev, demo load of 200 msg/s, 6 ED journeys a minute; five
-  patient rules edited together per census change, from a separate app; 10–30 minute runs). In spike S7, this engine's
-  rule edit → `PLACED` took p50 ~0.5 s / p99 ~1.1 s and edit → `ACTIVE` p99 3.0–4.0 s at 2,000 rules:
-
-  | Hub | Census edit → ACTIVE p50 / p99 | Patient record → app p50 / p99 / max | n (edits, records) |
-  |---|---|---|---|
-  | One pipeline for all sources, SDP's default 4 s trigger | 6.1 / 8.4 s | 4.4 / 7.7 / 13.3 s | 244, 1,629 |
-  | One pipeline, 1 s trigger | 4.3–4.5 / 7.0–9.3 s | 5.1–5.3 / 6.9–9.6 s | 140 + 86, 797 + 503 |
-  | **One pipeline per source, 1 s trigger** | **3.4 / 8.4 s** | **3.6 / 5.8 / 6.6 s** | 94, 455 |
-
-  No record was delivered for a patient after their removal went live, in any run. Edit → ACTIVE is the five PUTs
-  (~1 s once Databricks has compiled the rule's shape: the API reuses that compile for edits that only change literals,
-  `rules.shape`; a new shape compiles on the warehouse, ~1.4 s per rule), then the hub's next batch, which recompiles
-  the edit in-batch (0.2–0.5 s).
-
-  Where a batch's time goes (`hub_progress`, per source, p50 of the current setup): ~3 s per batch, of which ~1.1–1.4 s
-  pass inside Spark's batch call before the hub's function starts (`age_ms`), ~1.1–1.4 s are the hub's collect, match,
-  and Event Hubs write (`write_ms`), and ~0.6 s are Spark's offsets, commits, and source metrics (`spark_ms`). In one
-  pipeline, the five sources' batches overlapped 5–8 at a time on one driver and Python process and took ~4–5 s each,
-  so a shorter trigger alone made delivery slower. What's left is per-batch overhead of `foreachBatch` on serverless;
-  going well under ~3 s needs a different engine (Real-Time Mode, the Phase 3 study).
+- **Measured:** on dev, edits of a 200-patient rule went live (ACTIVE) in p50 ~2 s / p99 ~4 s, alongside 6 other
+  rules (above). No record was delivered for a patient after their removal went live, in any run
+  ([SCALABILITY.md](SCALABILITY.md)).
 
 ## Data templates
 
@@ -184,12 +132,12 @@ with the template's columns as its grant. Template changes apply to the hub at t
 
 ## Delivery tiers
 
-Each subscription has a tier: `realtime` (the default, for clinical work: the app's hub, as above) or `deferred` (work
-that can wait, such as billing). Every app's deferred rules, whatever its hub, run on one more pipeline of
+Each subscription has a tier: `realtime` (the default, for clinical work: the app's hub, as above; a delivery tier, not
+Real-Time Mode) or `deferred` (work that can wait, such as billing). Every app's deferred rules, whatever its hub, run on one more pipeline of
 `edp_shared`, `subscription_hub_deferred`: the same code on a longer trigger (`hub_deferred_interval_seconds`, default
 60), so their load never shares a batch with realtime rules, and a team hub stays one pipeline. Both deliver to the
 app's own Event Hub. Its heartbeat is listed with tier `deferred` (and as `deferred:<source>` in the `hub` map), and
-`getStatus` reports `HUB_STALE` for a deferred subscription only after its trigger interval plus the usual 120 s.
+`GET /api/v1/subscriptions` reports `HUB_STALE` for a deferred subscription only after its trigger interval plus the usual 120 s.
 
 ## Security model
 
@@ -211,6 +159,9 @@ app's own Event Hub. Its heartbeat is listed with tier `deferred` (and as `defer
   `edp_shared` still runs as whoever deploys the main bundle, the registry owner, which bypasses RLS (its queries filter
   to its hub). In production, give it a service principal and a `hub_edp_shared` member role as for a team hub.
 - **Cancellation is a soft stop.** Re-declaring a cancelled name re-enables it under a new revision.
+- **No per-app quota.** One app may use its hub's whole rule cap.
+- **App secrets.** Apps sign in with a service principal's OAuth secret in a CLI profile; production should use
+  workload identity (Entra federated credentials) instead (docs/SCALABILITY.md).
 
 ## No silent failures
 
@@ -251,9 +202,8 @@ revisions it registered. The full contract:
   settings, the notification format, and the errors.
 
 The App runs 2 instances behind one URL. Databricks Apps calls this horizontal scaling: a fixed instance count, 1–5 per
-app. Load-based autoscaling (min < max) isn't enabled for this workspace: the Apps team plans it as a private preview,
-and it adds instances in 2–3 minutes. When it is enabled, set `app_min_instances` < `app_max_instances` in
-`databricks.yml`. The API is stateless (the registry is the only state), so any instance serves any call.
+app. Load-based autoscaling (min < max) isn't available for this workspace yet; when it is, set `app_min_instances` <
+`app_max_instances` in `databricks.yml`. The API is stateless (the registry is the only state), so any instance serves any call.
 
 ## Rules
 
@@ -265,7 +215,8 @@ WHERE observation_cd_desc = 'Hemoglobin' AND value_num < 8
 - **Allowed:**
   - `SELECT` lists the fields to deliver: columns only.
   - `FROM` names one silver source: `silver_encounters`, `silver_observations`, `silver_orders`, `silver_diagnoses`, or
-    `silver_documents`. Unqualified, or the app's own view in full, as tested in the editor.
+    `silver_documents` (`silver_messages`, one row per message, isn't a subscription source). Unqualified, or the app's
+    own view in full, as tested in the editor.
   - `WHERE` is any Databricks SQL filter over that record: comparisons, `IN`, `BETWEEN`, `LIKE`, `IS NULL`, `AND`/`OR`/
     `NOT`, and built-ins such as `lower`, `startswith`, `contains`, `abs`, `coalesce`.
 - **Normalized:** identifiers are case-insensitive, as in Databricks, and stored in lowercase. Comments and a trailing
@@ -293,8 +244,7 @@ platform builds it once, as a new governed source (a topic/table), and grants it
 
 ## Set up (bring your own service principal)
 
-Each subscriber app is an onboarding step, done once per app. For the FE sandbox it's scripted, so it survives the
-Sunday wipe.
+Each subscriber app is an onboarding step, done once per app. It's scripted, so it survives a rebuilt environment.
 
 1. **Create the app's service principal and its secret.** In the UI: Settings → Identity and access → Service
    principals → Add, then Secrets → Generate. Or from the CLI: `databricks service-principals create`, then

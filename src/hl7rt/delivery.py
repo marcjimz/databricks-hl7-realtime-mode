@@ -12,7 +12,8 @@ Two modes, per hub pipeline (hl7.subscriptions.on_failure):
 
 How long a batch waits for an app's acks follows that app: 3x the p99 of its last ACK_SAMPLES ack times, within
 PARK_MIN_S..PARK_MAX_S, and PARK_COLD_S before it has any (a new app's first acks include its token, metadata and
-connection: with a fixed 2 s, S7 parked every new app once). A slow but healthy destination isn't parked for being slow.
+connection: with a fixed 2 s, the 50-app benchmark parked every new app once). A slow but healthy destination isn't
+parked for being slow.
 
 Each app has its own producer (producer_for), so a destination that fails at the connection level (a deleted hub) can't
 stall another app's acks. Delivery reports are waited on per batch (poll), never with flush(), which would also wait

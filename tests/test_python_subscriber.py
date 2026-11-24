@@ -278,7 +278,7 @@ def test_the_api_is_found_by_app_name_unless_its_url_is_set():
 
 
 def test_only_a_service_principal_may_run_the_app():
-    assert subscriber.is_service_principal("38fafc55-d28b-4f48-8d17-299f8d2698ee")
+    assert subscriber.is_service_principal("00000000-0000-4000-8000-000000000001")
     assert not subscriber.is_service_principal("someone@example.com")
 
 

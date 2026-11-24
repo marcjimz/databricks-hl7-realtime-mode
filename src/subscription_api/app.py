@@ -242,7 +242,7 @@ class Connection(_Open):
     app: str
     topic: str = Field(description="Your topic: the Kafka topic your notifications arrive on (same as `destination`)")
     bootstrapServers: str = Field(description="Kafka bootstrap servers (SASL_SSL, OAUTHBEARER)",
-                                  examples=["hl7rtmaz-ehns.servicebus.windows.net:9093"])  # fmt: skip
+                                  examples=["<namespace>.servicebus.windows.net:9093"])  # fmt: skip
     credential: str = Field(
         description="Your Unity Catalog service credential. Mint the Kafka token with it, as your service principal: "
         "POST <workspace>/api/2.1/unity-catalog/temporary-service-credentials "
@@ -250,7 +250,7 @@ class Connection(_Open):
         examples=["sub_my_app_eventhubs"],
     )
     tokenScope: str = Field(description="The resource to request the Kafka token for",
-                            examples=["https://hl7rtmaz-ehns.servicebus.windows.net/.default"])  # fmt: skip
+                            examples=["https://<namespace>.servicebus.windows.net/.default"])  # fmt: skip
     hub: str = Field(description="The hub that runs your realtime rules (the platform assigns it): edp_shared, or "
                      "your team's own hub. Your deferred rules run on edp_shared.",
                      examples=["edp_shared"])  # fmt: skip

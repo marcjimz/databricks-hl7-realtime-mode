@@ -65,7 +65,7 @@ class AppTest {
 
     @Test
     void onlyAServicePrincipalMayRunTheApp() {
-        assertTrue(App.isServicePrincipal("38fafc55-d28b-4f48-8d17-299f8d2698ee"));
+        assertTrue(App.isServicePrincipal("00000000-0000-4000-8000-000000000001"));
         assertFalse(App.isServicePrincipal("someone@example.com"));
         assertFalse(App.isServicePrincipal(null));
     }

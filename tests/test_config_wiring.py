@@ -126,7 +126,7 @@ def test_one_hub_definition_serves_both_patterns():
     assert name == "subscription_hub" and "${var.subscription_hub}" in hub["name"]
     assert conf["hl7.subscriptions.hub"] == "${var.subscription_hub}"
     assert conf["hl7.subscriptions.tier"] == "realtime"
-    assert "hl7.subscriptions.sources" not in conf, "one pipeline serves every source (S7: docs/SCALABILITY.md)"
+    assert "hl7.subscriptions.sources" not in conf, "one pipeline serves every source (docs/SCALABILITY.md)"
     assert conf["pipelines.trigger.interval"] == "${var.hub_trigger_interval_seconds} seconds"
     assert hub["schema"] == "${var.hub_schema}" and conf["hl7.eh.service_credential"] == "${var.hub_service_credential}"
 

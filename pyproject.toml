@@ -1,7 +1,7 @@
 [project]
 name = "hl7rt"
 version = "0.1.0"
-description = "HL7 v2 on Spark Real-Time Mode: raw -> bronze -> silver -> gold over Azure Event Hubs."
+description = "HL7 v2 on Spark Real-Time Mode: raw -> bronze -> silver over Azure Event Hubs, and runtime SQL subscriptions."
 requires-python = ">=3.12"
 
 [project.optional-dependencies]
@@ -44,7 +44,7 @@ addopts = "-q"
 line-length = 120
 target-version = "py312"
 src = ["src", "tests"]
-extend-exclude = ["examples/subscriptions", "examples/subscribers/python/generated"]  # parked (examples/subscriptions/README.md); generated
+extend-exclude = ["examples/subscribers/python/generated"]  # generated
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]

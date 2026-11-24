@@ -570,7 +570,7 @@
             "title": "Bootstrapservers",
             "description": "Kafka bootstrap servers (SASL_SSL, OAUTHBEARER)",
             "examples": [
-              "hl7rtmaz-ehns.servicebus.windows.net:9093"
+              "<namespace>.servicebus.windows.net:9093"
             ]
           },
           "credential": {
@@ -586,7 +586,7 @@
             "title": "Tokenscope",
             "description": "The resource to request the Kafka token for",
             "examples": [
-              "https://hl7rtmaz-ehns.servicebus.windows.net/.default"
+              "https://<namespace>.servicebus.windows.net/.default"
             ]
           },
           "hub": {

@@ -1,4 +1,4 @@
-"""Specs for the Epic JSON feed (the customer's existing bronze/silver), improved."""
+"""Specs for the Epic JSON feed (an existing bronze/silver), improved."""
 
 from datetime import datetime
 
@@ -7,7 +7,7 @@ import pytest
 from conftest import epic_payload
 from hl7rt import epic_json
 
-# The customer's silver column contract, in order. Downstream consumers depend on this.
+# The feed's silver column contract, in order. Downstream consumers depend on this.
 CUSTOMER_SILVER_COLUMNS = [
     "account_id", "admit_dt_tm", "date_of_birth_dt", "ethnicity", "patient_alt_id", "patient_alt_id_namespace",
     "patient_class", "patient_facility", "patient_fhir_resource_id", "patient_id", "patient_id_namespace",

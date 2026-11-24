@@ -21,8 +21,8 @@ rule, not the set, and it's PLACED in the registry from then on. Each batch:
    notifications are parked in the registry and delivered in order once it's back;
 6. mark the revisions it decided with ACTIVE, and write a heartbeat and the batch's phases (hub_progress).
 
-Measured on the S6/S7 spike (docs/SCALABILITY.md): one pipeline with a flow per source delivered p99 2.9 s at 50 apps
-and 2,000 rules (matching p99 under 0.1 s); every slow batch was the silver read.
+Measured in the 50-app benchmark (docs/SCALABILITY.md): one pipeline with a flow per source delivered p99 2.9 s at 50
+apps and 2,000 rules (matching p99 under 0.1 s); every slow batch was the silver read.
 """
 
 import contextlib
@@ -168,7 +168,8 @@ class Engine:
 
     def _warm_up(self, apps):
         """Each app's producer connected, with its topic's metadata, before its first notification: a cold producer
-        (token, metadata, connection) took longer than a batch waits, so S7 parked every new app once."""
+        (token, metadata, connection) took longer than a batch waits, so the 50-app benchmark parked every new app
+        once."""
         if not self.warm:
             return
         with self._init:

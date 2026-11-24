@@ -67,7 +67,7 @@ def producer_config(namespace: str, credential) -> dict:
 def hub_read_options(namespace: str, service_credential: str, topic: str, max_records) -> dict[str, str]:
     """The subscription hub's read of one silver topic: a new checkpoint starts at the live edge (then it resumes from
     the checkpoint), each micro-batch is at most `max_records` (the hub holds a batch in memory), and a hung fetch gives
-    up after 5 s (HUNG_REQUEST_GUARD): S6/S7's slow batches spent 10-70 s reading silver, in every topology."""
+    up after 5 s (HUNG_REQUEST_GUARD): the benchmarks' slow batches spent 10-70 s reading silver, in every topology."""
     return {
         **kafka_options(namespace, service_credential, HUNG_REQUEST_GUARD),
         "subscribe": topic,

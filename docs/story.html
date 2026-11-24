@@ -7,7 +7,7 @@
 <!--
   This repo's story as an interactive deck. One self-contained file: open it in a browser.
   Keys: → / Space next, ← back, Home / End, F fullscreen. Click the architecture to see details.
-  Numbers are measured results from docs/latency.md and docs/subscriptions.md (2026-11-05).
+  Numbers are measured results from README.md, docs/subscriptions.md, and docs/SCALABILITY.md (subscription dev runs 2026-11-24).
 -->
 <style>
   :root {
@@ -183,8 +183,8 @@
     Unity Catalog. Java apps pick the events they need with Databricks SQL, while the pipelines keep running.</p>
   <div class="bigstats">
     <div class="bigstat reveal d1"><b>&lt;90 ms</b><span>p99 per step, raw → silver</span></div>
-    <div class="bigstat reveal d2"><b>~5 s</b><span>p99, silver → the app's topic</span></div>
-    <div class="bigstat reveal d3"><b>1,000</b><span>SQL rules per hub, p99 7 s</span></div>
+    <div class="bigstat reveal d2"><b>2.5 s</b><span>p99, silver → the app's topic</span></div>
+    <div class="bigstat reveal d3"><b>2,000</b><span>SQL rules per hub, p99 2.9 s at 50 apps</span></div>
     <div class="bigstat reveal d4"><b>0</b><span>keys or secrets in the pipelines</span></div>
   </div>
   <p class="foot">→ / ← to move · F for fullscreen</p>
@@ -230,7 +230,7 @@
     <div class="arch">
       <div class="pathlbl"><b>Real time</b>milliseconds</div>
       <div class="lane">
-        <div class="node" data-k="feed"><b>HL7 v2 feed</b><small>ADT · ORU · ORM, or Epic JSON</small></div><span class="arr">→</span>
+        <div class="node" data-k="feed"><b>HL7 v2 feed</b><small>ADT · ORU · ORM · MDM, or Epic JSON</small></div><span class="arr">→</span>
         <div class="node topic" data-k="eh"><b>raw topic</b><small>Event Hubs</small></div><span class="arr">→</span>
         <div class="node rtm" data-k="bronze"><b>Bronze</b><small>land + stamp</small><span class="ms">p99 86 ms</span></div><span class="arr">→</span>
         <div class="node rtm" data-k="silver"><b>Silver</b><small>parse + one row per entity</small><span class="ms">p99 78 ms</span></div><span class="arr">→</span>
@@ -261,7 +261,7 @@
       <h3>Click a part</h3>
       <p>Each part shows what it does, why it's there, and what was measured.</p>
       <div class="facts">
-        <div>Runs on: <b>3</b> real-time pipelines, <b>1</b> lakehouse pipeline, <b>1</b> hub, <b>1</b> app, <b>1</b> operational store. All serverless.</div>
+        <div>Runs on: <b>2</b> real-time pipelines, <b>1</b> lakehouse pipeline, <b>2</b> hub pipelines (realtime and deferred), the Subscription API app, and <b>1</b> operational store. All serverless.</div>
         <div>Rebuild: <b>make up</b> then <b>make demo dev</b></div>
       </div>
     </div>
@@ -277,7 +277,7 @@
       <div class="codetabs" id="codetabs"></div>
       <div class="code grow" id="code"></div>
       <p class="muted" style="font-size:.82rem; margin:.5rem 0 0">Shortened from the real files in the jar
-        (<code>examples/subscribers/java</code>, 7 classes). Settings come from <code>make registry</code>, and the secret stays in the CLI profile.</p>
+        (<code>examples/subscribers/java</code>, 6 classes). Settings come from <code>make registry</code>, and the secret stays in the CLI profile.</p>
     </div>
     <div class="col" style="display:flex; flex-direction:column; min-height:0">
       <div style="display:flex; gap:.5rem; margin-bottom:.5rem">
@@ -286,9 +286,9 @@
       </div>
       <div class="term" id="term"></div>
       <div class="stats">
-        <div class="stat"><b>~5 s</b><span>rule declared → ACTIVE</span></div>
-        <div class="stat"><b>4.7 s</b><span>p99, silver → app (1 rule)</span></div>
-        <div class="stat"><b>7.1 s</b><span>p99 at 1,000 rules</span></div>
+        <div class="stat"><b>~2 s</b><span>rule change → ACTIVE, p50 (dev; p99 ~4 s)</span></div>
+        <div class="stat"><b>2.5 s</b><span>p99, silver → app (dev, 7 rules)</span></div>
+        <div class="stat"><b>2.9 s</b><span>p99 at 50 apps, 2,000 rules</span></div>
         <div class="stat"><b>&lt;90 ms</b><span>p99 per real-time step</span></div>
       </div>
       <p class="muted" style="font-size:.78rem; margin:.4rem 0 0">Terminal output is from the README walkthrough run on 2026-11-05.</p>
@@ -331,7 +331,7 @@
           for", "no data for", averages over 10 s–24 h windows) and a no-code designer.</p>
         <p><b>Here, and not in Activator:</b> rules written in SQL and tested in the SQL editor, registered by each app's code
           at runtime, and checked against that app's Unity Catalog grants. Matches go to the app's own stream, while Activator
-          sends email, Teams, Power Automate, or Fabric items. The limit is 1,000 rules per hub; Activator allows 500 per item.</p>
+          sends email, Teams, Power Automate, or Fabric items. The limit is 2,000 enabled rules per hub and tier; Activator allows 500 per item.</p>
       </div>
     </div>
     <div class="col" style="display:flex; flex-direction:column; gap:.7rem">
@@ -373,14 +373,14 @@
       <h3>Only its granted columns</h3>
       <p>Each app has Unity Catalog views (<code>sub_&lt;app&gt;.&lt;source&gt;</code>) with only its columns. Databricks compiles
         rules against those views, so an ungranted column gets <code>UNRESOLVED_COLUMN</code>.</p>
-      <div class="proof">E2E checks 8–9</div>
+      <div class="proof">E2E checks 9–10</div>
     </div>
     <div class="gcard reveal d2">
       <div class="q">What can a rule do?</div>
       <h3>Filter one record</h3>
       <p>The hub runs filters with its own permissions. Subqueries, joins, and functions that reach outside the record
         (network, secrets, JVM, UDFs) are refused before Databricks compiles the rule.</p>
-      <div class="proof">E2E checks 12–15 · unit tests</div>
+      <div class="proof">E2E checks 13–15 · unit tests</div>
     </div>
     <div class="gcard reveal d2">
       <div class="q">Who reads the results?</div>
@@ -394,7 +394,7 @@
       <h3>No</h3>
       <p>App roles in the operational store can't log in. Only the API acts as them, and row-level security keeps each app
         to its own rows. The store's Data API is off, and old login roles are dropped.</p>
-      <div class="proof">E2E check 7 · registry tests on Postgres</div>
+      <div class="proof">E2E check 8 · registry tests on Postgres</div>
     </div>
     <div class="gcard reveal d3">
       <div class="q">Where are the secrets?</div>
@@ -405,49 +405,52 @@
       <div class="proof">test_no_secrets.py</div>
     </div>
   </div>
-  <p class="foot">Not yet tested live: three apps with different grants on the same hub. That test comes next.</p>
+  <p class="foot">Not yet tested live: three or more apps with different grants on one hub. Two apps have run, each on its own hub. The isolation suite comes next.</p>
 </section>
 
 <!-- 8 · Scale + status ------------------------------------------------------------------------------------------ -->
 <section class="slide light" data-title="Scale and status">
-  <div class="kicker">Measured 2026-11-05 · where it stands</div>
-  <h2>1,000 SQL rules on one stream at p99 7 s, and what's next</h2>
+  <div class="kicker">Measured 2026-11-20 to 2026-11-24 · where it stands</div>
+  <h2>2,000 SQL rules on one hub at p99 2.9 s, and what's next</h2>
   <div class="row grow">
     <div class="col">
       <table>
-        <tr><th>At 1,000 rules</th><th>Before</th><th>Now</th></tr>
-        <tr><td>Hub batch interval</td><td class="num">~67 s</td><td class="num good">~4 s</td></tr>
-        <tr><td>Delivery p50 / p99</td><td class="num">155 / 171 s</td><td class="num good">4.5 / 7.1 s</td></tr>
-        <tr><td>Rule change → ACTIVE</td><td class="num">—</td><td class="num good">8 s</td></tr>
-        <tr><td>One rule, for reference</td><td class="num"></td><td class="num">p99 4.7 s</td></tr>
+        <tr><th>One hub, 50 apps, 2,000 rules</th><th>Steady</th><th>Heavy churn</th></tr>
+        <tr><td>Delivery p99</td><td class="num good">2.9 s</td><td class="num">6.5 s</td></tr>
+        <tr><td>Matching per batch, p99</td><td class="num good">under 0.1 s</td><td class="num">—</td></tr>
       </table>
       <p style="margin:.8rem 0 .3rem"><b>How:</b></p>
       <ul class="checks" style="margin-top:0">
-        <li>Rules are compiled when they change, in the background, not on every batch.</li>
-        <li>Each group of 200 rules runs as one SQL expression.</li>
-        <li>Simple rules are stored as data and matched through an equality index.</li>
+        <li>Rules are compiled when they change, not on every batch.</li>
+        <li>Simple rules (a column compared with a literal, joined by AND and OR) are matched in memory through an index. Other rules run as SQL in the same read.</li>
       </ul>
-      <p class="muted" style="font-size:.85rem">A rule beyond the 1,000-rule cap is refused with <code>RULE_LIMIT_REACHED</code>. More
-        rules than that means more hubs (design in docs/SCALABILITY.md).</p>
+      <table style="margin-top:1rem">
+        <tr><th>Previous engine, 1,000 rules (2026-11-05)</th><th>First try</th><th>Final</th></tr>
+        <tr><td>Hub batch interval</td><td class="num">~67 s</td><td class="num good">~4 s</td></tr>
+        <tr><td>Delivery p50 / p99</td><td class="num">155 / 171 s</td><td class="num good">4.5 / 7.1 s</td></tr>
+        <tr><td>Rule change → ACTIVE</td><td class="num">—</td><td class="num good">8 s</td></tr>
+      </table>
+      <p class="muted" style="font-size:.85rem">A rule beyond the cap (2,000 enabled per hub and tier) is refused with <code>RULE_LIMIT_REACHED</code>. More
+        rules means another hub: a team's own, or a shard (planned; docs/SCALABILITY.md).</p>
     </div>
     <div class="col" style="display:flex; flex-direction:column; gap:.8rem">
       <div class="card" style="border-top-color: var(--green)">
         <h3>Verified on the dev workspace</h3>
         <ul class="checks">
-          <li>Under 200 ms p99 per real-time step, over soaks that span checkpoints</li>
-          <li>Every step lands in a streaming table, with no duplicates after a restart</li>
+          <li>Real-time steps at p99 86 ms (raw → bronze) and 78 ms (bronze → silver) at full demo load; max a few seconds</li>
+          <li>Both hub patterns on dev, 30 minutes: delivery p99 2.5 s, 0 duplicates; rule change → ACTIVE p50 about 2 s</li>
           <li>Java walkthrough: add, change, remove, refuse, stopped hub (exit codes 0, 0, 0, 2, 4)</li>
-          <li>All 25 end-to-end checks pass, including no path around the API</li>
-          <li>Rebuilds after the weekly sandbox wipe with two commands</li>
+          <li>26 end-to-end checks, 0 failed, in Python and Java on both hubs, including no path around the API</li>
+          <li>Rebuilds after a sandbox wipe with two commands</li>
         </ul>
       </div>
       <div class="card" style="border-top-color: var(--yellow)">
         <h3>Next</h3>
         <ul class="checks">
-          <li class="todo">Two more service principals, to test isolation between apps live</li>
+          <li class="todo">The cross-app isolation suite, live, with three service principals (today's tests run on PostgreSQL)</li>
+          <li class="todo">The shared hub on its own service principal (it runs as the deployer today)</li>
           <li class="todo">Windowed platform sources and hub-side enrichment</li>
-          <li class="todo">Running the end-to-end checks as a workspace job (needs the Service Principal: User role)</li>
-          <li class="todo">More hubs beyond 1,000 rules · App autoscaling once available (2 fixed instances today)</li>
+          <li class="todo">More hubs beyond 2,000 rules per hub, or sharding · App autoscaling once available (2 fixed instances today)</li>
         </ul>
       </div>
     </div>
@@ -494,34 +497,34 @@ document.addEventListener("keydown", e => {
 // Architecture ------------------------------------------------------------------------------------------------------
 // key: [title, what it does, [facts]]
 const ARCH = {
-  feed: ["HL7 v2 feed", "ADT (admissions), ORU (results), and ORM (orders) as raw HL7 v2. Or the existing pre-parsed Epic JSON feed, through a drop-in pipeline that produces the same silver schema.",
-    ["Demo load: 200 msg/s from a serverless generator job", "Messages keyed by patient, so each patient's events stay in order"]],
+  feed: ["HL7 v2 feed", "ADT (admissions), ORU (results), ORM (orders), and MDM (notes) as raw HL7 v2. Or the existing pre-parsed Epic JSON feed, through a drop-in pipeline that produces the same silver schema.",
+    ["Full demo load: 200 msg/s HL7 plus 200 msg/s Epic JSON, from a serverless generator job", "Messages keyed by patient, so each patient's events stay in order"]],
   eh: ["Event Hubs topics", "A topic sits between every step. Each topic is named after the table it lands in: <catalog>.<schema>.<table>. Real-Time Mode reads and writes topics. It can't use Delta as a source or a sink.",
     ["Event Hubs Premium (Standard's tail missed 200 ms)", "SAS keys disabled: Entra ID only"]],
   bronze: ["Bronze · Real-Time Mode", "Lands each raw message and carries forward the broker timestamp from every topic it passed through, so each step's latency is measured with broker clocks.",
     ["p50 7 ms · p99 86 ms", "One real-time flow per pipeline, serverless, GA"]],
-  silver: ["Silver · Real-Time Mode", "Parses each HL7 message once, using built-in Spark functions (no JARs or UDFs), and writes one row per entity: messages, encounters, observations (one per result), orders, and diagnoses (one per DG1), each with the message's patient, visit, and header fields. Bad messages go to quarantine from the same flow.",
+  silver: ["Silver · Real-Time Mode", "Parses each HL7 message once, using built-in Spark functions (no JARs or UDFs), and writes one row per entity: messages, encounters, observations (one per result), orders, diagnoses (one per DG1), and documents (one per MDM note), each with the message's patient, visit, and header fields. Bad messages go to quarantine from the same flow.",
     ["p99 78 ms", "The parse costs less than the 16 ms timestamp resolution"]],
-  goldtopics: ["Silver topics", "One topic per entity: messages, encounters, observations, orders, and diagnoses. The subscription hub and the lakehouse pipeline both read them, and neither one adds latency to the real-time path.",
+  goldtopics: ["Silver topics", "One topic per entity: messages, encounters, observations, orders, diagnoses, and documents. The subscription hub and the lakehouse pipeline both read them, and neither one adds latency to the real-time path.",
     ["Each record carries its raw and bronze broker timestamps"]],
-  alltopics: ["Every topic", "Raw, bronze, silver, and quarantine, and the five silver topics all land in tables. Real-Time Mode can't write Delta, so one micro-batch pipeline next to the real-time path does it.",
+  alltopics: ["Every topic", "Raw, bronze, quarantine, and the six silver topics all land in tables. Real-Time Mode can't write Delta, so one micro-batch pipeline next to the real-time path does it.",
     ["If Real-Time Mode gains a Delta sink, this pipeline is no longer needed"]],
   mirror: ["Lakehouse pipeline", "One micro-batch pipeline that upserts each topic into its table, keyed by the record's position in the raw topic. A replay after a restart updates rows instead of duplicating them, and the pipeline adds latency columns as it goes.",
-    ["0 duplicates after restarts (verified)"]],
+    ["Topics can repeat a record after a restart; its Delta row is upserted, so it isn't duplicated"]],
   st: ["Streaming tables", "<catalog>.hl7_realtime.<topic>, one per topic, governed in Unity Catalog. Each row carries hop_ms and e2e_ms, so latency is a query rather than a separate test.",
     ["The latency dashboard reads these tables"]],
   bi: ["SQL · dashboards · Genie", "The same tables serve dashboards, notebooks, Genie, and models. A subscription rule pasted into the SQL editor returns the same records the hub delivers.",
     ["Two bundled dashboards: latency and subscriptions"]],
-  app: ["Java app", "Seven small classes. It declares its SQL rules, waits until the hub runs them, then reads its own topic. It signs in as its own service principal, and Unity Catalog issues its Event Hubs token.",
+  app: ["Java app", "Six small classes. It declares its SQL rules, waits until the hub runs them, then reads its own topic. It signs in as its own service principal, and Unity Catalog issues its Event Hubs token.",
     ["Exits non-zero on refused, failed, or unconfirmed rules", "Resumes where it left off after time away and never skips a match"]],
   api: ["Subscription API · Databricks App", "A stateless FastAPI app, the only way to register rules. It checks a rule's shape, has Databricks compile it against the caller's own views, stores it, and waits until the hub runs it.",
     ["2 instances (horizontal scale)", "Errors from Databricks are passed through unchanged"]],
   reg: ["Operational Store", "A managed Postgres database (Lakebase) that holds subscriptions, revisions, the hub's status for each revision, and heartbeats. Every change gets a new revision, and row-level security keeps each app to its own rows.",
-    ["Enforces the 1,000-rule cap", "Readable in Unity Catalog for the monitoring dashboard"]],
-  hub: ["Subscription hub", "A micro-batch pipeline that reads the silver topics and re-checks every rule. It runs all of a source's rules in one pass and writes each match to that app's topic, with only the fields the rule selects.",
-    ["1,000 rules: batch ~4 s, p99 7.1 s", "A rule that fails on bad data is marked FAILED; the others keep running"]],
+    ["Enforces the 2,000-rule cap per hub and tier", "Readable in Unity Catalog for the monitoring dashboard"]],
+  hub: ["Subscription hub", "A micro-batch pipeline that reads the silver topics and re-checks every rule. It runs all of a source's rules in one pass and writes each match to that app's topic, with only the fields the rule selects. The platform's shared hub runs it by default; a team can run its own.",
+    ["50 apps, 2,000 rules: p99 2.9 s steady, 6.5 s under churn", "A rule that fails on bad data is marked FAILED; the others keep running", "A team's own hub costs about $3.80/h (estimated), so it's for a business unit, not an app"]],
   apptopic: ["The app's own topic", "<catalog>.subscribers.<app>. Only that app can read it, through its own access connector and Unity Catalog service credential. Each notification carries a stable ID and the source record's position.",
-    ["Isolation guarded by E2E checks 2–6"]],
+    ["Isolation guarded by E2E checks 2–6", "Repeats are possible around restarts: dedupe on notificationId"]],
   uc: ["Unity Catalog", "One place for governance: service principals, per-app views with only the granted columns, Event Hubs service credentials, the streaming tables, and the registry for monitoring. Lineage and audit come with it.",
     ["No keys or connection strings anywhere"]],
 };
@@ -566,7 +569,7 @@ EventHubs.useCredential(workspace, connection.getCredential(), connection.getTok
 Response declare(Map&lt;String, String&gt; rules) {
     <span class="k">var</span> body = rules.entrySet().stream()
         .map(e -&gt; Map.of(<span class="s">"name"</span>, e.getKey(), <span class="s">"sql"</span>, e.getValue())).toList();
-    <span class="k">return</span> send(<span class="s">"PUT"</span>, <span class="s">"/api/v1/subscriptions"</span>, body);
+    <span class="k">return</span> send(<span class="s">"PUT"</span>, <span class="s">"/api/v1/subscriptions"</span>, Map.of(<span class="s">"subscriptions"</span>, body));
 }
 Response status(<span class="k">int</span> waitSeconds) {
     <span class="k">return</span> send(<span class="s">"GET"</span>, <span class="s">"/api/v1/subscriptions?wait="</span> + waitSeconds, <span class="k">null</span>);
@@ -583,7 +586,7 @@ Object.keys(CODE).forEach((k, i) => {
 // Terminal ----------------------------------------------------------------------------------------------------------
 const TERM = [
   ["dim", "$ java -jar examples/subscribers/java/target/hl7-subscriber.jar"],
-  ["", "signed in   as sp-hl7-realtime-demo (38fafc55-…)"],
+  ["", "signed in   as sp-hl7-realtime-demo (<application id>)"],
   ["ok", "subscribed  critical-potassium     revision 1 ACCEPTED"],
   ["dim", "            SELECT patient_id, value_num, units FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"],
   ["ok", "hub         critical-potassium     revision 1 ACTIVE"],
@@ -611,12 +614,12 @@ const SEQ = [
   [1, 1, "shape check", "The API checks only the <b>shape</b>: a SELECT of columns from one silver source with a WHERE. No joins, subqueries, or functions that reach outside the record."],
   [1, 2, "DESCRIBE QUERY on the app's own view", "<b>Databricks compiles the rule</b> against this app's views, which have only its granted columns."],
   [2, 1, "OK, or Databricks' error", "If Databricks returns an error (for example UNRESOLVED_COLUMN), the API passes it back <b>unchanged</b>. If any rule is refused, none are applied."],
-  [1, 3, "register: critical-potassium → revision 1", "The rule is stored under this app's name. The store assigns a <b>revision</b> and checks the 1,000-rule cap. Each app sees only its own rules."],
+  [1, 3, "register: critical-potassium → revision 1", "The rule is stored under this app's name. The store assigns a <b>revision</b> and checks the cap of 2,000 enabled rules per hub. Each app sees only its own rules."],
   [1, 0, "ACCEPTED · revision 1", "The app prints ACCEPTED and starts checking for ACTIVE."],
-  [4, 3, "anything changed?", "Every micro-batch, the hub reads one number from the store. When it changes, a <b>background thread</b> recompiles the rules, so batches don't wait."],
+  [4, 3, "anything changed?", "Every micro-batch, the hub asks the store what changed (one query when nothing did) and compiles only those rules. A slow compile runs in a <b>background thread</b> while batches keep using the last set."],
   [4, 3, "revision 1 ACTIVE", "Once the new rules are running, the hub records <b>ACTIVE</b> for that exact revision."],
-  [1, 0, "ACTIVE", "The app sees ACTIVE, about 5 seconds after it sent the rule, and starts reading its own topic."],
-  [4, 0, "match → the app's own topic", "Each match carries <b>only the selected fields</b>, a stable notification ID, and the source record's position. p99 is about 5 s from silver."],
+  [1, 0, "ACTIVE", "The app sees ACTIVE about 2 seconds after it sent the rule (p99 about 4 s), and starts reading its own topic."],
+  [4, 0, "match → the app's own topic", "Each match carries <b>only the selected fields</b>, a stable notification ID, and the source record's position. p99 is about 2.5 s from silver."],
 ];
 const msgs = document.getElementById("msgs"), narr = document.getElementById("narr");
 SEQ.forEach(([a, b, label]) => {
@@ -682,7 +685,7 @@ function judge() {
     } else if (unknown) {
       out = `${NO}  UNRESOLVED_COLUMN.WITH_SUGGESTION: \`${unknown}\` cannot be resolved: this app's view doesn't have it (not granted)\n${DIM("Databricks' own error, passed through · nothing applied · exit 2")}`;
     } else {
-      out = `<span style="color:#00A972">subscribed</span>  my-rule  revision 1 ACCEPTED\n<span style="color:#00A972">hub</span>         my-rule  revision 1 ACTIVE   ${DIM("(about 5 s later, no redeploy)")}`;
+      out = `<span style="color:#00A972">subscribed</span>  my-rule  revision 1 ACCEPTED\n<span style="color:#00A972">hub</span>         my-rule  revision 1 ACTIVE   ${DIM("(about 2 s later, no redeploy)")}`;
     }
   }
   verdict.innerHTML = out;

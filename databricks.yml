@@ -132,7 +132,7 @@ variables:
     description: The hub pipelines' target schema (they write no tables).
     default: ${var.schema}
   hub_registry_connections:
-    description: Lakebase connections a hub pipeline keeps for its batches (S7 exhausted the registry with one per thread).
+    description: Lakebase connections a hub pipeline keeps for its batches (one per thread exhausted the registry in a 50-app benchmark).
     default: "4"
   hub_on_failure:
     description: What a hub does when an app's topic refuses writes. park = keep the app's notifications in the registry

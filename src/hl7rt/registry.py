@@ -15,9 +15,9 @@ connects as its service principal, which row-level security holds to its own app
 
 Connections: the hub's flows run batches on concurrent threads, and a pg8000 connection serves one statement at a
 time, so batch threads share a Pool of at most hl7.registry.connections connections; drainers share one more (a pool of
-1, whose session holds their advisory locks); the session lock (one engine per hub and lane) holds its own. S7 opened
-one per drainer and exhausted Lakebase. Each statement is idempotent (a read, an upsert, an insert that can't conflict
-or a delete), so a connection Lakebase dropped is reopened and the statement run again once.
+1, whose session holds their advisory locks); the session lock (one engine per hub and lane) holds its own. The
+50-app benchmark opened one per drainer and exhausted Lakebase. Each statement is idempotent (a read, an upsert, an
+insert that can't conflict or a delete), so a connection Lakebase dropped is reopened and the statement run again once.
 
 Authenticates as the pipeline's identity with a short-lived Lakebase database credential (no password). pg8000 is pure
 Python; psycopg[binary] aborted the serverless pipeline process (native library clash).

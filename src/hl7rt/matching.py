@@ -1,7 +1,7 @@
 """Matching a source's simple rules against a collected micro-batch, on the driver, with Databricks SQL's semantics.
 
 A simple rule is what rules.disjuncts returns: an OR of AND groups, each clause a column against a literal. This is
-the hub's former Spark data path (its _HOLDS expression) in Python:
+Spark SQL's three-valued logic in Python (tests/test_matching.py compares it with the Spark expression path):
 - a comparison with NULL is unknown, so its group doesn't hold (NOT IN of NULL too);
 - numeric columns compare as DOUBLE; NaN = NaN, and NaN sorts above every number (Spark's ordering);
 - strings compare by code point (Spark's binary UTF-8 order).

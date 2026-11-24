@@ -10,10 +10,10 @@ terraform {
       version = "~> 1.130"
     }
   }
-  # Local state. After the weekly sandbox wipe, `make infra-plan` sees the resources gone and recreates them.
+  # Local state. If the resources are deleted (a sandbox wipe, for example), `make up` sees them gone and recreates them.
 }
 
-# Pinned to the sandbox tenant: the az CLI can otherwise hand out tokens for the user's home tenant.
+# Pinned to var.tenant_id: the az CLI can otherwise hand out tokens for the user's home tenant.
 provider "azurerm" {
   features {
     resource_group {

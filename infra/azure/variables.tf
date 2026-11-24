@@ -14,7 +14,7 @@ variable "databricks_account_id" {
 }
 
 variable "metastore_id" {
-  description = "Existing Unity Catalog metastore in var.location to assign the workspace to (e.g. fevm-shared-sandbox-eastus2)."
+  description = "Existing Unity Catalog metastore in var.location to assign the workspace to (your region's metastore)."
   type        = string
 }
 
@@ -36,7 +36,7 @@ variable "prefix" {
 }
 
 variable "owner" {
-  description = "Owner email, applied as the `owner` tag (required by sandbox subscription policy)."
+  description = "Owner email, applied as the `owner` tag (some subscriptions' policies require it)."
   type        = string
 }
 

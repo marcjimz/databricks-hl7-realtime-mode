@@ -99,7 +99,7 @@ def test_functions_that_reach_outside_the_record_are_refused(condition):
     assert refused(f"SELECT patient_id FROM silver_observations WHERE {condition}") == "SQL_NOT_ALLOWED"
 
 
-def test_only_this_apps_views_and_gold_sources():
+def test_only_this_apps_views_and_silver_sources():
     assert refused("SELECT patient_id FROM cat.sub_app_b.silver_observations") == "SQL_NOT_ALLOWED"  # another app's
     assert refused("SELECT patient_id FROM cat.hl7_realtime.silver_observations") == "SQL_NOT_ALLOWED"  # the base table
     assert refused("SELECT patient_id FROM silver_hl7") == "SQL_NOT_ALLOWED"  # not a subscription source

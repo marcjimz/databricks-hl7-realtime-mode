@@ -16,10 +16,13 @@ Two things to configure:
    workspace is rebuilt, so look it up: `GET $WS/api/2.0/apps/<name>` returns `url` to any caller with CAN_USE on it.
 
 Everything else comes from the API (`GET /api/v1/connection`): the app's topic, the Kafka bootstrap servers, its
-Unity Catalog credential for Event Hubs, the hub that runs its rules, and what it's granted. Before that works, the
-platform team onboards the app: the sources and columns it may read, and its hub (docs/subscriptions.md, "Set up" and
-"Two ways to subscribe"). The app's code is the same whichever hub runs its rules. The app needs network access to the workspace and the API (HTTPS), and
-to the bootstrap servers (port 9093).
+Unity Catalog credential for Event Hubs, the hub that runs its rules, and what it's granted.
+- **Onboarding first:** the platform team onboards the app: the sources and columns it may read, and its hub
+  (docs/subscriptions.md, "Set up" and "Two ways to subscribe").
+- **Network:** HTTPS to the workspace and the API, and port 9093 to the bootstrap servers.
+- **One code path:** the app's code is the same whichever hub runs its rules.
+
+The handshake below uses `curl` and `jq`.
 
 ## The handshake
 
@@ -50,6 +53,7 @@ curl -s "$API/api/v1/subscriptions?wait=25" -H "Authorization: Bearer $TOKEN"
 
 # 5. A Kafka token for the topic, issued by Unity Catalog to this service principal only (credential and tokenScope from 2)
 curl -s -X POST "$WS/api/2.1/unity-catalog/temporary-service-credentials" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
   -d '{"credential_name": "<credential>", "azure_options": {"resources": ["<tokenScope>"]}}'
 #   → {"azure_aad": {"aad_token"}, "expiration_time"}   (refresh before it expires)
 ```
@@ -59,7 +63,7 @@ receive. `POST /api/v1/validate` runs every check without applying anything.
 
 ## Reading the topic
 
-Use any Kafka client on `destination`. Settings:
+Use any Kafka client on the app's topic (`topic` from the connection; each accepted rule's `destination` is the same topic). Settings:
 - `bootstrap.servers`: `bootstrapServers` from the connection
 - `security.protocol`: `SASL_SSL`, with `sasl.mechanism` `OAUTHBEARER` (the token is `aad_token`)
 - **one stable `group.id` per app**, so it resumes where it stopped
@@ -75,6 +79,8 @@ Each message is keyed by patient ID. The value is JSON:
 ```
 
 - **Delivery is at least once:** deduplicate on `notificationId`.
+- **`source_ts`** (the source record's broker time) is snake_case, unlike the other fields; it's part of version 1 of
+  the contract, so it stays.
 - **Act only on the `(subscriptionId, revision)` pairs your last declare returned.** Anything else is backlog from an
   earlier revision.
 - **`payload`** holds exactly the columns the rule selects, nulls included.
