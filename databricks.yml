@@ -138,6 +138,23 @@ variables:
     description: What a hub does when an app's topic refuses writes. park = keep the app's notifications in the registry
       and deliver them in order once it's back, while the other apps go on; block = wait for it (one app per hub only).
     default: park
+  # Subscribing over Delta tables (e.g. an existing streaming table) instead of the silver topics: every hub pipeline
+  # and the Subscription API read the same list. Rules name a table by its last name part (FROM <table>).
+  subscription_tables:
+    description: Delta tables the subscription hub reads instead of the silver topics (comma list of <catalog>.<schema>.<table>). Empty means the silver topics.
+    default: ""
+  subscription_table_partition:
+    description: SQL expression over a table source's columns (or Delta _metadata) giving each row's partition, an int.
+    default: "0"
+  subscription_table_offset:
+    description: SQL expression giving each row's stable 64-bit offset, unique within its partition (notification IDs are built from it). _metadata.row_id needs row tracking on the table.
+    default: _metadata.row_id
+  subscription_table_ts:
+    description: SQL expression giving each row's source timestamp (the notifications' source_ts).
+    default: _ingested_at
+  subscription_table_max_files:
+    description: Most new files the hub reads per micro-batch per table source (maxFilesPerTrigger; it holds a batch in memory).
+    default: "100"
   registry_catalog:
     description: The registry database in Unity Catalog (registered by make registry), read by the subscriptions dashboard.
     default: ${var.catalog}_registry

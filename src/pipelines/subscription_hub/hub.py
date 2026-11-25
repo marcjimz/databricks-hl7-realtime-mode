@@ -8,6 +8,10 @@ deferred rules. A flow per silver source (hl7.subscriptions.sources; unset, all 
 decisions bound before they're published through a producer per app, so a retried batch decides as its first attempt
 did and one app's broken destination never holds up another's.
 
+With hl7.subscriptions.tables set, the sources are those Delta tables instead (an existing streaming table, say), each
+named after its table: a flow per table reads its new rows from the latest version on, with the coordinates
+notifications carry from SQL expressions (hl7.subscriptions.table_partition, table_offset, table_ts). Same engine.
+
 Rules are Databricks SQL registered at runtime through the Subscription API (src/subscription_api) and stored in the
 Lakebase registry; the pipeline graph never changes. foreach_batch_sink is Public Preview (PREVIEW channel); Real-Time
 Mode doesn't support foreachBatch, so this hop is seconds, not milliseconds. Delivery is at-least-once with stable
@@ -23,7 +27,10 @@ from hl7rt.registry import Pool, Registry
 
 _NAMESPACE, _CREDENTIAL = conf(spark, "eh.namespace"), conf(spark, "eh.service_credential")
 _ENDPOINT, _DATABASE = conf(spark, "registry.endpoint"), conf(spark, "registry.database")
-_SOURCES = conf(spark, "subscriptions.sources", ",".join(subscriptions.SOURCES)).split(",")
+_TABLES = subscriptions.table_sources(conf(spark, "subscriptions.tables", ""))  # source -> table; none: the topics
+for _name, _table in _TABLES.items():
+    subscriptions.add_table_source(_name, spark.read.table(_table).schema)
+_SOURCES = conf(spark, "subscriptions.sources", ",".join(_TABLES or subscriptions.SOURCES)).split(",")
 
 
 class _ServiceCredential:
@@ -64,11 +71,32 @@ def _query(topic: str, flow: str):
     return "unknown", None
 
 
-def _hub(source: str, topic: str):
+def _stream(source: str, name: str):
+    """The flow's input: a table source's new rows with their coordinates, or the silver topic's records (`name`: the
+    source's table or topic)."""
+    if source in _TABLES:
+        return subscriptions.table_records(
+            spark.readStream.options(**subscriptions.table_read_options(conf(spark, "subscriptions.table_max_files")))
+            .table(name),
+            conf(spark, "subscriptions.table_partition"), conf(spark, "subscriptions.table_offset"),
+            conf(spark, "subscriptions.table_ts"),
+        )  # fmt: skip
+    return (
+        spark.readStream.format("kafka")
+        .options(
+            **eventhubs.hub_read_options(
+                _NAMESPACE, _CREDENTIAL, name, conf(spark, "subscriptions.max_records_per_batch")
+            )
+        )  # fmt: skip
+        .load()
+    )
+
+
+def _hub(source: str, name: str):
     flow = f"subscribe_{source}"
 
     def match(batch, batch_id):
-        query_id, spark_ms = _query(topic, flow)
+        query_id, spark_ms = _query(name, flow)
         _engine.process(batch, batch_id, source, query_id, spark_ms)
 
     sink = f"subscription_hub_{source}"
@@ -76,16 +104,8 @@ def _hub(source: str, topic: str):
 
     @dp.append_flow(target=sink, name=flow)
     def read():
-        return (
-            spark.readStream.format("kafka")
-            .options(
-                **eventhubs.hub_read_options(
-                    _NAMESPACE, _CREDENTIAL, topic, conf(spark, "subscriptions.max_records_per_batch")
-                )
-            )  # fmt: skip
-            .load()
-        )
+        return _stream(source, name)
 
 
 for _source in _SOURCES:
-    _hub(_source, conf(spark, f"topics.{_source}"))
+    _hub(_source, _TABLES.get(_source) or conf(spark, f"topics.{_source}"))  # its table, or its topic

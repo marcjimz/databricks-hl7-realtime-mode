@@ -24,6 +24,8 @@ resources:
             value: ${var.registry_database}
           - name: HL7_HUB_DEFERRED_INTERVAL_SECONDS
             value: ${var.hub_deferred_interval_seconds}
+          - name: HL7_SOURCE_TABLES  # the Delta tables the hub reads instead of the silver topics (empty: silver)
+            value: ${var.subscription_tables}
           - name: DATABRICKS_WAREHOUSE_ID
             value_from: sql-warehouse
       resources:

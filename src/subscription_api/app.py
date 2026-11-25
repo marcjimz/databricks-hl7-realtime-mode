@@ -47,6 +47,9 @@ ENDPOINT = os.environ.get("HL7_REGISTRY_ENDPOINT", "")
 DATABASE = os.environ.get("HL7_REGISTRY_DATABASE", "databricks_postgres")
 WAREHOUSE = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
 EVENTHUBS_NAMESPACE = os.environ.get("HL7_EVENTHUBS_NAMESPACE", "")  # where every app's topic lives
+# The sources rules may name: the Delta tables the hub reads instead of the silver topics (HL7_SOURCE_TABLES = its
+# hl7.subscriptions.tables), else the silver sources. Each app may still use only the ones it's granted.
+SOURCES = rules.sources(os.environ.get("HL7_SOURCE_TABLES", ""))
 NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")  # = the registry's CHECK on subscriptions.name
 HUB_STALE_AFTER = 120  # seconds without a hub batch for a source
 DEFERRED_INTERVAL = int(os.environ.get("HL7_HUB_DEFERRED_INTERVAL_SECONDS", "60"))  # the deferred hub's trigger
@@ -357,9 +360,9 @@ class Session:
 def _caller(email: str | None) -> dict:
     if not email:
         raise Refused(401, {"code": "UNAUTHENTICATED", "message": "no verified caller"})
-    conn, opened, rows = pool.open(
+    conn, opened, rows = pool.open(  # onboarding stores principals lowercase; the proxy may send an email in any case
         "SELECT app_role, app_name, destination_topic, eventhubs_credential, hub, allowed_sources, allowed_fields "
-        "FROM subscription_registry.apps WHERE service_principal = :sp",
+        "FROM subscription_registry.apps WHERE lower(service_principal) = lower(:sp)",
         sp=email,
     )
     pool.put(conn, opened)
@@ -401,7 +404,7 @@ def _check(item: Item, who: dict, registered: dict, templates: dict) -> dict:
     """{name, ok: True, rule, template, tier} or {name, ok: False, code, message} (shape check, the template, then
     Databricks)."""
     try:
-        rule = rules.parse(item.sql, rules.SOURCES, who["schema"])
+        rule = rules.parse(item.sql, SOURCES, who["schema"])
     except rules.RuleError as e:
         if e.code != "PARSE":
             return {"name": item.name, "ok": False, "code": e.code, "message": e.message}

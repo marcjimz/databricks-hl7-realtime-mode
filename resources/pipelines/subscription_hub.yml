@@ -33,6 +33,12 @@ x-hub-conf: &hub_conf
   hl7.topics.silver_orders: ${var.hl7_silver_orders_topic}
   hl7.topics.silver_diagnoses: ${var.hl7_silver_diagnoses_topic}
   hl7.topics.silver_documents: ${var.hl7_silver_documents_topic}
+  # Delta tables instead of the silver topics (empty: the topics), and each row's coordinates (SQL expressions)
+  hl7.subscriptions.tables: ${var.subscription_tables}
+  hl7.subscriptions.table_partition: ${var.subscription_table_partition}
+  hl7.subscriptions.table_offset: ${var.subscription_table_offset}
+  hl7.subscriptions.table_ts: ${var.subscription_table_ts}
+  hl7.subscriptions.table_max_files: ${var.subscription_table_max_files}
 
 resources:
   pipelines:

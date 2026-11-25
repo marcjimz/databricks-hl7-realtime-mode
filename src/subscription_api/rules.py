@@ -1,4 +1,5 @@
-"""A subscription rule is Databricks SQL in one shape: SELECT <columns> FROM <one silver source> [WHERE <condition>].
+"""A subscription rule is Databricks SQL in one shape: SELECT <columns> FROM <one source> [WHERE <condition>], a source
+being a silver entity topic or, where the hub reads Delta tables instead, one of those tables (source_tables).
 
 Databricks compiles the SQL against the app's own views (the API runs DESCRIBE QUERY), so a misspelled or ungranted
 column, a wrong source, or a syntax error comes back as Databricks' own error. This module is the only rule logic of our
@@ -15,7 +16,7 @@ from sqlglot import exp
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 
 DIALECT = "databricks"
-# = hl7rt.subscriptions.SOURCES (tests/test_subscriptions.py keeps them in step)
+# = hl7rt.subscriptions.SILVER (tests/test_subscriptions.py keeps them in step)
 SOURCES = frozenset(
     {"silver_encounters", "silver_observations", "silver_orders", "silver_diagnoses", "silver_documents"}
 )
@@ -34,6 +35,29 @@ NOT_ALLOWED = {
     exp.Lateral: "LATERAL", exp.TableSample: "TABLESAMPLE", exp.Placeholder: "a parameter",
     exp.Parameter: "a parameter", exp.Star: "SELECT *", exp.AggFunc: "an aggregate",
 }  # fmt: skip
+
+
+def source_tables(spec: str) -> dict[str, str]:
+    """The Delta tables a deployment subscribes over instead of the silver topics (a comma list of
+    <catalog>.<schema>.<table>: the hub's hl7.subscriptions.tables, the API's HL7_SOURCE_TABLES), as source name ->
+    table. A source is named after its table, lowercase as Databricks compares identifiers: rules say FROM <table>."""
+    out: dict[str, str] = {}
+    for table in (t.strip() for t in spec.split(",")):
+        if not table:
+            continue
+        parts = table.split(".")
+        if len(parts) != 3 or not all(p.strip() for p in parts):
+            raise ValueError(f"{table!r}: a table source is <catalog>.<schema>.<table>")
+        name = parts[-1].strip().lower()
+        if name in out:
+            raise ValueError(f"{table!r}: a second table named {name} ({out[name]}); a source names one table")
+        out[name] = table
+    return out
+
+
+def sources(tables: str = "") -> frozenset[str]:
+    """The sources a rule may name: the Delta tables in `tables` (source_tables) when there are any, else silver's."""
+    return frozenset(source_tables(tables)) or SOURCES
 
 
 class RuleError(ValueError):

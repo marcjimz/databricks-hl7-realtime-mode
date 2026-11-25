@@ -1,4 +1,5 @@
-"""Subscription rules as the hub runs them: every app's SQL rule over a micro-batch of one silver topic.
+"""Subscription rules as the hub runs them: every app's SQL rule over a micro-batch of one source, a silver topic or a
+Delta table the hub was given instead (hl7.subscriptions.tables: add_table_source, table_records).
 
 A rule is Databricks SQL (`SELECT <fields> FROM <source> WHERE <condition>`), compiled by Databricks against the app's
 own views when it was registered (src/subscription_api). The hub evaluates each stored condition per record, so the
@@ -23,16 +24,60 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType
 
 from hl7rt import silver
-from subscription_api.rules import RuleError, check_condition, disjuncts, identifier, literal
+from subscription_api.rules import RuleError, check_condition, disjuncts, identifier, literal, source_tables
 
-SOURCES: dict[str, StructType] = {
+SILVER: dict[str, StructType] = {
     "silver_encounters": silver.ENCOUNTER_SCHEMA,
     "silver_observations": silver.OBSERVATION_SCHEMA,
     "silver_orders": silver.ORDER_SCHEMA,
     "silver_diagnoses": silver.DIAGNOSIS_SCHEMA,
     "silver_documents": silver.DOCUMENT_SCHEMA,
-}
+}  # the built-in sources: the silver entity topics
+# Every source the hub knows: silver's, and the Delta tables it was given (add_table_source, at startup). Changed in
+# place, never rebound: modules that imported it see the same dict.
+SOURCES: dict[str, StructType] = dict(SILVER)
+TABLES: set[str] = set()  # the sources read from a Delta table: their rows already have their columns
 CHUNK = 200  # rules per projection
+
+
+def table_sources(spec: str) -> dict[str, str]:
+    """hl7.subscriptions.tables as source name -> table, named as the API names HL7_SOURCE_TABLES
+    (subscription_api.rules.source_tables), so the hub reads what the API lets rules name. ValueError if malformed."""
+    return source_tables(spec)
+
+
+def add_table_source(name: str, schema: StructType):
+    """A Delta table as the source `name`, with its table's schema (the hub, at startup): its rows are read as they are
+    (table_records gives them their coordinates). It replaces a silver source of the same name."""
+    SOURCES[name] = schema
+    TABLES.add(name)
+    _GROUPS_OF.clear()  # a rule's groups depend on its source's column types (kinds)
+
+
+def reset_sources():
+    """Only the built-in silver sources again (tests)."""
+    SOURCES.clear()
+    SOURCES.update(SILVER)
+    TABLES.clear()
+    _GROUPS_OF.clear()
+
+
+def table_read_options(max_files) -> dict[str, str]:
+    """The hub's read of a table source: a new checkpoint starts at the table's latest version (its history isn't
+    replayed), commits that change or delete rows (retention deletes, OPTIMIZE) are skipped rather than failing the
+    stream (so a corrected row isn't notified again), and a batch is at most `max_files` new files (it's collected
+    once)."""
+    return {"startingVersion": "latest", "skipChangeCommits": "true", "maxFilesPerTrigger": str(max_files)}
+
+
+def table_records(rows: DataFrame, partition: str, offset: str, ts: str) -> DataFrame:
+    """A table source's rows with the coordinates notifications carry, each a SQL expression over the table's columns
+    or Delta's _metadata (hl7.subscriptions.table_partition, table_offset, table_ts): an int partition, a stable 64-bit
+    offset unique within it (notification IDs and bindings are built from the pair), and the source timestamp."""
+    return rows.select(
+        "*", F.expr(partition).cast("int").alias("_partition"), F.expr(offset).cast("long").alias("_offset"),
+        F.expr(ts).cast("timestamp").alias("_source_ts"),
+    )  # fmt: skip
 
 
 @dataclass(frozen=True)
@@ -81,9 +126,13 @@ def runnable(rules: list[Rule]) -> tuple[list[Rule], dict[str, str]]:
     return good, failed
 
 
-def events(topic_records: DataFrame, source: str) -> DataFrame:
-    """A micro-batch of `source`'s topic as records, with the coordinates notifications carry."""
-    return topic_records.select(
+def events(batch: DataFrame, source: str) -> DataFrame:
+    """A micro-batch of `source` as records, with the coordinates notifications carry: a topic's records parsed from
+    their JSON value (Kafka partition, offset, and broker timestamp), or a table's rows as they are (table_records)."""
+    if source in TABLES:  # no JSON to parse: the table's columns, as registered
+        columns = [F.col(identifier(f.name)) for f in SOURCES[source]]
+        return batch.select(*columns, "_partition", "_offset", "_source_ts")
+    return batch.select(
         F.from_json(F.col("value").cast("string"), SOURCES[source]).alias("e"),
         F.col("partition").alias("_partition"), F.col("offset").alias("_offset"),
         F.col("timestamp").alias("_source_ts"),
