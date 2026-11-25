@@ -17,6 +17,11 @@
 #   make hub dev HUB=<name>        deploy and start a team's own subscription hub (hub/; terraform var subscriber_hubs)
 #   make hub-stop dev HUB=<name>   stop it
 #
+#   make subscriptions TARGET=<env>       the subscription layer alone, into a workspace that has its own data, no
+#                                         Terraform (subscriptions/; your environment: subscriptions/targets/<env>.yml):
+#                                         registry, deploy, start the Subscription API, its grants, start the hubs
+#   make subscriptions-stop TARGET=<env>  stop its hub pipelines and its Subscription API
+#
 # The subscriber examples run on their own, from the repo root:
 #   uv run python examples/subscribers/python/subscriber.py [--e2e]   (Python; make python-client regenerates its API client)
 #   java -jar examples/subscribers/java/target/hl7-subscriber.jar [--e2e]   (Java; its workspace E2E job is its own bundle)
@@ -48,10 +53,10 @@ active_runs = $(DBX) jobs list-runs --job-id $$id --active-only -o json | python
 resource_id = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['id'])")
 
 .PHONY: help install test lint python-client up uc registry fabric-up fabric-pause fabric-resume fabric-down powerbi \
-	demo clear-data stop hub hub-stop guard-target guard-hub $(ENVS)
+	demo clear-data stop hub hub-stop subscriptions subscriptions-stop guard-target guard-hub guard-subscriptions $(ENVS)
 
 help:
-	@sed -n '3,25p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
+	@sed -n '3,30p' $(MAKEFILE_LIST) | sed 's/^# \{0,1\}//'
 
 guard-target:
 	@test -n "$(TARGET)" || { echo "error: name the environment, e.g. 'make demo dev' (one of: $(ENVS))"; exit 2; }
@@ -68,8 +73,8 @@ test:
 	mvn -q -f examples/subscribers/java/pom.xml test
 
 lint:
-	uv run ruff check src tests infra examples/subscribers/python examples/benchmarks
-	uv run ruff format --check src tests infra examples/subscribers/python examples/benchmarks
+	uv run ruff check src tests infra subscriptions examples/subscribers/python examples/benchmarks
+	uv run ruff format --check src tests infra subscriptions examples/subscribers/python examples/benchmarks
 	terraform fmt -check -recursive infra
 
 # The plan is applied only after you confirm it (never auto-approved).
@@ -154,6 +159,30 @@ hub: guard-target guard-hub
 
 hub-stop: guard-target guard-hub
 	@$(DBX) pipelines stop $$($(hub_pipeline)) >/dev/null && echo "stopped hub $(HUB)"
+
+# The subscription layer alone (subscriptions/: the Subscription API and edp_shared over your own Delta tables), no
+# Terraform: its target file subscriptions/targets/<env>.yml is the whole environment, for the registry and the bundle
+# alike. What this Makefile exports for dev is dropped first: the host and auth, and every BUNDLE_VAR_*, which would win
+# over the target's variables (BUNDLE_VAR_catalog over its catalog). From a Git folder in the workspace, the notebook
+# subscriptions/setup.py runs the same steps. Commands run in subscriptions/ with -t, so they use the target's workspace.
+SUBS_ENV = unset DATABRICKS_HOST DATABRICKS_AUTH_TYPE $$(env | sed -n 's/^\(BUNDLE_VAR_[A-Za-z0-9_]*\)=.*/\1/p');
+subs_resource = $$($(BUNDLE) summary -t $(TARGET) -o json | python3 -c "import sys,json;print(json.load(sys.stdin)['resources']['$(1)']['$(2)']['$(3)'])")
+
+guard-subscriptions:
+	@test -n "$(TARGET)" || { echo "error: name the target, e.g. 'make subscriptions TARGET=test' (subscriptions/targets/<env>.yml)"; exit 2; }
+	@test -f subscriptions/targets/$(TARGET).yml || { echo "error: no subscriptions/targets/$(TARGET).yml (copy subscriptions/target.example.yml there and name its target $(TARGET))"; exit 2; }
+
+subscriptions: guard-subscriptions
+	@$(SUBS_ENV) uv run python infra/registry.py --target $(TARGET) --phase before-deploy
+	@$(SUBS_ENV) cd subscriptions && $(BUNDLE) deploy -t $(TARGET)
+	@$(SUBS_ENV) cd subscriptions && $(BUNDLE) run -t $(TARGET) subscription_api >/dev/null && echo "started subscription_api"
+	@$(SUBS_ENV) uv run python infra/registry.py --target $(TARGET) --phase after-deploy
+	@$(SUBS_ENV) cd subscriptions && for p in $(HUBS); do $(BUNDLE) run -t $(TARGET) --no-wait $$p >/dev/null 2>&1 && echo "started $$p" || echo "running $$p"; done
+	@$(SUBS_ENV) cd subscriptions && printf 'subscription API: %s (contract: /docs)\n' "$$($(DBX) apps get $(call subs_resource,apps,subscription_api,name) -t $(TARGET) -o json | python3 -c 'import sys,json;print(json.load(sys.stdin)["url"])')"
+
+subscriptions-stop: guard-subscriptions
+	@$(SUBS_ENV) cd subscriptions && for p in $(HUBS); do $(DBX) pipelines stop $(call subs_resource,pipelines,$$p,id) -t $(TARGET) >/dev/null && echo "stopped $$p"; done
+	@$(SUBS_ENV) cd subscriptions && $(DBX) apps stop $(call subs_resource,apps,subscription_api,name) -t $(TARGET) >/dev/null 2>&1 && echo "stopped subscription_api" || true
 
 # Environment words are goals too; make them no-ops.
 $(ENVS):

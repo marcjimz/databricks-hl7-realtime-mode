@@ -1,0 +1,52 @@
+# One environment of the subscription layer (databricks.yml here). Copy this file to targets/<env>.yml and rename the
+# target to match the file (`test` here). targets/ is gitignored, so your values never enter git. The bundle and the
+# registry setup (setup.py, or infra/registry.py --target <env>) read the same file, so they always agree.
+targets:
+  test:
+    workspace:
+      host: https://adb-<workspace-id>.<n>.azuredatabricks.net
+    variables:
+      # Unity Catalog: where the apps' view schemas (<catalog>.sub_<app>) and the hub pipelines' schema go. You need
+      # USE CATALOG and CREATE SCHEMA there; setup creates both schemas.
+      catalog: <catalog>
+      hub_schema: hl7_subscriptions
+
+      # Your Delta streaming tables apps may subscribe to, comma-separated. Each is a source named after its table
+      # (epic_realtime here), and apps' rules read FROM it.
+      subscription_tables: <catalog>.<schema>.epic_realtime
+      # How the hub reads a table's records, as SQL over its columns: a record's partition, its offset within the
+      # partition (unique and increasing), and its source timestamp. Then the most files per micro-batch.
+      subscription_table_partition: "0"
+      subscription_table_offset: _metadata.row_id
+      subscription_table_ts: _ingested_at
+      subscription_table_max_files: "100"
+
+      # Event Hubs: the namespace holding the apps' topics, and the hub's UC service credential (Event Hubs Data
+      # Sender on those topics).
+      eh_namespace: <namespace>
+      eh_service_credential: <UC service credential>
+
+      # The Lakebase registry (setup creates the project) and the Subscription API, a Databricks App.
+      registry_project: hl7-subscriptions
+      registry_catalog: ""          # a name registers the registry in Unity Catalog, for monitoring; empty skips it
+      subscription_api_app: hl7-subscriptions-test
+      warehouse: <SQL warehouse name>   # the API compiles rules on it; setup creates the views with it
+      app_min_instances: 1              # 1 is enough for a test; 2 for availability
+      app_max_instances: 1
+
+      # Data templates: named, narrower grants an app may be given (by name, in its templates).
+      subscriber_templates: {}
+      #   lab-values: {sources: [epic_realtime], fields: [patient_id, msg_type]}
+
+      # The apps. principal: a service principal's application ID, or a user's email (to try it from a notebook).
+      # topic: its own Event Hub. eventhubs_credential: a UC service credential with Event Hubs Data Receiver on that
+      # topic, and ACCESS for the principal. fields: the columns it may read and filter on (["*"]: every column).
+      subscriber_apps:
+        notebook-test:
+          principal: you@example.com
+          topic: <the Event Hub created for it>
+          eventhubs_credential: <UC service credential with Receiver on that topic; ACCESS for the principal>
+          sources: [epic_realtime]
+          fields: [patient_id, msg_type, patient_point_of_care]
+          templates: []
+          subscription_hub: edp_shared

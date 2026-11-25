@@ -4,6 +4,8 @@ MEMORY.md
 
 # Databricks
 .databricks/
+# The subscription layer's environments (your values; subscriptions/target.example.yml shows one)
+subscriptions/targets/
 
 # Terraform: state, tfvars (your environment), and plans stay local, wherever the stack lives
 **/.terraform/
