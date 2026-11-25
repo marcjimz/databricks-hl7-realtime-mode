@@ -1,0 +1,153 @@
+# The subscription layer alone, for a workspace that already has its data (README.md here): the Lakebase registry's
+# Subscription API (a Databricks App) and edp_shared, the subscription hub, reading your own Delta streaming tables.
+# No Terraform: setup.py (a notebook) or infra/registry.py --target <env> prepares the registry before and grants after
+# the deploy. Your environment is a target file, subscriptions/targets/<env>.yml (gitignored; start from
+# target.example.yml), so its values never enter git:
+#
+#   cd subscriptions && databricks bundle deploy -t <env>     (or deploy this folder from a Git folder in the workspace)
+#
+# The resources are the platform's own files, shared with the main bundle; nothing here is a copy.
+# No `mode: development`: it turns off `continuous`.
+
+bundle:
+  name: hl7_subscriptions
+
+include:
+  - ../resources/apps/subscription_api.yml          # the Subscription API
+  - ../hub/resources/subscription_hub.yml           # edp_shared's realtime hub
+  - ../resources/pipelines/subscription_hub.yml     # edp_shared's deferred hub
+  - targets/*.yml                                   # your environments (gitignored)
+
+# The App's and the hubs' code is the platform's src/ (the API, the hub pipeline, hl7rt, the rule checks).
+sync:
+  paths:
+    - ../src
+
+workspace:
+  root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/hl7_subscriptions/${bundle.target}
+
+variables:
+  # Unity Catalog
+  catalog:
+    description: Catalog for the apps' view schemas (<catalog>.sub_<app>) and the hub pipelines' target schema.
+  hub_schema:
+    description: The hub pipelines' target schema in catalog (they write no tables; setup creates it).
+    default: hl7_subscriptions
+  warehouse:
+    description: SQL warehouse (by name) the API compiles rules on and setup creates views with.
+    default: Serverless Starter Warehouse
+  warehouse_id:
+    description: The warehouse's ID (looked up by name).
+    lookup:
+      warehouse: ${var.warehouse}
+
+  # Your data: the Delta streaming tables apps subscribe to (each is a source, named by its table)
+  subscription_tables:
+    description: Delta tables apps may subscribe to, a comma list of <catalog>.<schema>.<table>; the source is <table>.
+      Empty, the hub reads the platform's silver topics instead.
+    default: ""
+  subscription_table_partition:
+    description: SQL over a table's columns giving a record's partition (notifications carry its coordinates).
+    default: "0"
+  subscription_table_offset:
+    description: SQL giving a record's offset within its partition (unique and increasing).
+    default: _metadata.row_id
+  subscription_table_ts:
+    description: SQL giving a record's source timestamp (what latency is measured from).
+    default: _ingested_at
+  subscription_table_max_files:
+    description: Most files the hub reads per micro-batch per table (maxFilesPerTrigger).
+    default: "100"
+
+  # Event Hubs: each app's own topic, written by the hub
+  eh_namespace:
+    description: Event Hubs namespace of the apps' topics (bootstrap <namespace>.servicebus.windows.net:9093).
+  eh_service_credential:
+    description: UC service credential the hub writes the apps' topics with (Event Hubs Data Sender on them).
+  hub_service_credential:
+    description: The hub pipelines' UC service credential (edp_shared's; defaults to eh_service_credential).
+    default: ${var.eh_service_credential}
+
+  # Silver topics: read only when subscription_tables is empty (the platform's silver, <catalog>.<schema>.<table>)
+  schema:
+    description: The platform's silver schema; only names the silver topics below.
+    default: hl7_realtime
+  hl7_silver_encounters_topic:
+    description: Silver, one record per ADT event.
+    default: ${var.catalog}.${var.schema}.silver_encounters
+  hl7_silver_observations_topic:
+    description: Silver, one record per OBX result.
+    default: ${var.catalog}.${var.schema}.silver_observations
+  hl7_silver_orders_topic:
+    description: Silver, one record per ORM order.
+    default: ${var.catalog}.${var.schema}.silver_orders
+  hl7_silver_diagnoses_topic:
+    description: Silver, one record per DG1 diagnosis.
+    default: ${var.catalog}.${var.schema}.silver_diagnoses
+  hl7_silver_documents_topic:
+    description: Silver, one record per MDM document.
+    default: ${var.catalog}.${var.schema}.silver_documents
+
+  # The subscription registry (Lakebase; setup creates the project)
+  registry_project:
+    description: Lakebase project holding the subscription registry.
+    default: hl7-subscriptions
+  registry_endpoint:
+    description: Lakebase endpoint the API and the hubs connect to.
+    default: projects/${var.registry_project}/branches/production/endpoints/primary
+  registry_database:
+    description: Postgres database with the registry schemas.
+    default: databricks_postgres
+  registry_catalog:
+    description: Register the registry database in Unity Catalog under this name (for monitoring); empty skips it.
+    default: ""
+
+  # The Subscription API
+  subscription_api_app:
+    description: Name of the Subscription API app (Databricks App names are at most 30 characters).
+    default: hl7-subscriptions-${bundle.target}
+  app_min_instances:
+    description: Subscription API instances (horizontal scaling). Equal to app_max_instances unless autoscaling is enabled.
+    default: 2
+  app_max_instances:
+    description: Subscription API instances (maximum).
+    default: 2
+
+  # The hub (edp_shared: realtime, and every app's deferred rules); the platform's defaults, see the root databricks.yml
+  subscription_hub:
+    description: The hub this bundle deploys (src/registry/registry.sql seeds it).
+    default: edp_shared
+  hub_rules_per_projection:
+    description: Rules the hub evaluates per Spark projection (rules that aren't plain filters).
+    default: 200
+  hub_max_records_per_batch:
+    description: Most records the hub reads per micro-batch per source (it holds a batch in memory).
+    default: 20000
+  hub_trigger_interval_seconds:
+    description: Trigger interval of the realtime hub, in seconds. Unset, SDP's streaming default (4 s) is most of delivery.
+    default: 1
+  hub_deferred_interval_seconds:
+    description: Trigger interval of the deferred-tier hub (subscriptions with tier deferred, e.g. billing), in seconds.
+    default: 60
+  hub_registry_connections:
+    description: Lakebase connections a hub pipeline keeps for its batches.
+    default: "4"
+  hub_on_failure:
+    description: When an app's topic refuses writes. park = keep its notifications in the registry and deliver them in
+      order once it's back, while the other apps go on; block = wait for it (one app per hub only).
+    default: park
+
+  # Onboarding (read by setup, not by the deployed resources; target.example.yml shows the shape)
+  subscriber_apps:
+    description: "Apps: name -> {principal (an SP's application ID or a user's email), topic, eventhubs_credential,
+      sources, fields (or [\"*\"]), templates, subscription_hub}."
+    type: complex
+    default: {}
+  subscriber_templates:
+    description: "Data templates: name -> {sources, fields}, a narrower grant apps name in templates."
+    type: complex
+    default: {}
+  subscriber_hubs:
+    description: "Team hubs (bring your own hub, hub/): name -> {application_id, max_enabled_rules}. Usually none."
+    type: complex
+    default: {}
