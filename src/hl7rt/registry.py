@@ -31,6 +31,7 @@ from dataclasses import dataclass
 
 from pg8000.exceptions import InterfaceError
 
+from hl7rt import subscriptions
 from hl7rt.subscriptions import SOURCES, Rule
 from subscription_api.db import TOKEN_SECONDS, connect
 
@@ -39,8 +40,10 @@ LOCK_POLL_S = 2.0
 
 
 def lane_of(tier: str, sources: list[str]) -> str:
-    """A pipeline's lane: its tier when it runs every source, else '<tier>:<its sources>' (the per-source option)."""
-    return tier if set(sources) == set(SOURCES) else f"{tier}:{','.join(sorted(sources))}"
+    """A pipeline's lane: its tier when it runs every source (every configured table, else every silver topic), else
+    '<tier>:<its sources>' (the per-source option)."""
+    every = subscriptions.TABLES or set(subscriptions.SILVER)
+    return tier if set(sources) == every else f"{tier}:{','.join(sorted(sources))}"
 
 
 class HubAlreadyRunning(RuntimeError):

@@ -104,6 +104,19 @@ def test_a_lane_is_the_tier_or_the_tier_and_its_sources():
     assert lane_of("deferred", ["silver_orders", "silver_diagnoses"]) == "deferred:silver_diagnoses,silver_orders"
 
 
+def test_a_hub_reading_every_configured_table_runs_in_its_tiers_lane():
+    from pyspark.sql.types import StringType, StructField, StructType
+
+    from hl7rt import subscriptions
+
+    try:
+        subscriptions.add_table_source("epic_realtime", StructType([StructField("patient_id", StringType())]))
+        assert lane_of("realtime", ["epic_realtime"]) == "realtime"
+        assert lane_of("realtime", list(SOURCES)) == f"realtime:{','.join(sorted(SOURCES))}"
+    finally:
+        subscriptions.reset_sources()
+
+
 # -- against the registry --------------------------------------------------------------------------------------------
 OBS = "silver_observations"
 
