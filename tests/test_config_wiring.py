@@ -112,8 +112,38 @@ def test_every_hub_sets_its_settings_and_a_topic_for_every_source():
     from hl7rt import subscriptions
 
     for name, hub in _hubs().items():
-        needed = HUB_KEYS | {f"hl7.topics.{s}" for s in subscriptions.SOURCES}
+        needed = HUB_KEYS | {f"hl7.topics.{s}" for s in subscriptions.SILVER}
         assert needed <= set(hub["configuration"]), f"{name} lacks {sorted(needed - set(hub['configuration']))}"
+
+
+# Delta tables instead of the silver topics (hub key -> bundle variable): which tables, and how a row gets the
+# coordinates notifications carry (partition, offset, source_ts) and the batch bound.
+TABLE_KEYS = {
+    "hl7.subscriptions.tables": "subscription_tables",
+    "hl7.subscriptions.table_partition": "subscription_table_partition",
+    "hl7.subscriptions.table_offset": "subscription_table_offset",
+    "hl7.subscriptions.table_ts": "subscription_table_ts",
+    "hl7.subscriptions.table_max_files": "subscription_table_max_files",
+}
+
+
+def test_every_hub_can_read_delta_tables_instead_of_the_silver_topics():
+    for name, hub in _hubs().items():
+        for key, var in TABLE_KEYS.items():
+            assert hub["configuration"].get(key) == f"${{var.{var}}}", f"{name}: {key}"
+    root, team = _variables("databricks.yml"), _variables("hub/databricks.yml")
+    for var in TABLE_KEYS.values():
+        assert root[var] == team[var], f"{var}: the same default and description in both bundles"
+    assert {var: root[var]["default"] for var in TABLE_KEYS.values()} == {
+        "subscription_tables": "",  # the silver topics, as before
+        "subscription_table_partition": "0",
+        "subscription_table_offset": "_metadata.row_id",
+        "subscription_table_ts": "_ingested_at",
+        "subscription_table_max_files": "100",
+    }
+    (api,) = _yaml("resources/apps/subscription_api.yml")["resources"]["apps"].values()
+    env = {e["name"]: e.get("value") for e in api["config"]["env"]}
+    assert env["HL7_SOURCE_TABLES"] == "${var.subscription_tables}", "the API accepts the sources the hub reads"
 
 
 def test_one_hub_definition_serves_both_patterns():

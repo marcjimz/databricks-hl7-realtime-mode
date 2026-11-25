@@ -14,6 +14,7 @@ from subscription_api import app as api  # noqa: E402
 VIEW_COLUMNS = {
     "cat.sub_app_a.silver_observations": {"patient_id", "value_num", "observation_cd_desc"},
     "cat.sub_app_c.silver_observations": {"patient_id", "value_num", "observation_cd_desc"},
+    "cat.sub_app_a.epic_realtime": {"patient_id", "msg_type", "observation_cd"},  # a Delta table source's view
 }
 POTASSIUM = (
     "SELECT patient_id, value_num FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num > 6"
@@ -25,7 +26,7 @@ def fake_databricks(sql, schema):
     from subscription_api.rules import columns, parse
 
     try:
-        r = parse(sql, {"silver_observations", "silver_encounters", "silver_orders"}, schema)
+        r = parse(sql, {"silver_observations", "silver_encounters", "silver_orders", "epic_realtime"}, schema)
     except Exception:  # noqa: BLE001
         return {"code": "PARSE_SYNTAX_ERROR", "message": "[PARSE_SYNTAX_ERROR] Syntax error"}
     cols = VIEW_COLUMNS.get(f"{schema}.{r.source}")
@@ -137,6 +138,58 @@ def test_the_caller_is_the_verified_identity_only(client):
     assert client.get("/api/v1/subscriptions").status_code == 401
     r = client.get("/api/v1/subscriptions", headers={"X-Forwarded-Email": "not-onboarded"})
     assert r.status_code == 403 and r.json()["code"] == "APP_NOT_ONBOARDED"
+
+
+def test_the_caller_is_matched_whatever_the_case_of_its_identity(client, pg):
+    """Onboarding stores each principal lowercase: an SP's application ID (a lowercase UUID), or a user's email, which
+    the proxy may send in another case."""
+    assert client.get("/api/v1/subscriptions", headers={"X-Forwarded-Email": "SP-A"}).json()["app"] == "app-a"
+    owner = pg()
+    owner.run("CREATE ROLE app_d LOGIN IN ROLE subscriber")
+    owner.run("GRANT app_d TO subscription_service")
+    owner.run("INSERT INTO subscription_registry.apps (app_role, app_name, destination_topic, allowed_sources, "
+              "allowed_fields, service_principal, eventhubs_credential) VALUES ('app_d', 'app-d', "
+              "'cat.subscribers.app-d', '{silver_observations}', '{patient_id}', 'dana@example.com', "
+              "'sub_app_d_eventhubs')")  # fmt: skip
+    try:
+        r = client.get("/api/v1/subscriptions", headers={"X-Forwarded-Email": "Dana@Example.com"})
+        assert r.status_code == 200 and r.json()["app"] == "app-d"
+    finally:
+        owner.run("DELETE FROM subscription_registry.apps WHERE app_role = 'app_d'")
+        owner.run("DROP ROLE app_d")
+
+
+EPIC_RULE = "SELECT patient_id, msg_type FROM epic_realtime WHERE msg_type = 'ORU^R01'"
+
+
+def test_rules_name_the_delta_tables_the_hub_reads_when_it_reads_tables(client, monkeypatch):
+    """HL7_SOURCE_TABLES (= the hub's hl7.subscriptions.tables): rules say FROM <table>, and not a silver source."""
+    from subscription_api import rules
+
+    def check(*items):
+        r = client.post("/api/v1/validate", json={"subscriptions": [{"name": n, "sql": s} for n, s in items]},
+                        headers=A).json()  # fmt: skip
+        return [a["name"] for a in r["accepted"]], {x["name"]: x["code"] for x in r["refused"]}
+
+    assert api.SOURCES == rules.SOURCES, "unset: the silver sources"
+    assert check(("table", EPIC_RULE), ("silver", POTASSIUM)) == (["silver"], {"table": "SQL_NOT_ALLOWED"})
+    monkeypatch.setattr(api, "SOURCES", rules.sources("cat.epic.epic_realtime"))
+    assert check(("table", EPIC_RULE), ("silver", POTASSIUM)) == (["table"], {"silver": "SQL_NOT_ALLOWED"})
+
+
+def test_the_apps_sources_come_from_hl7_source_tables():
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    out = subprocess.run(
+        [sys.executable, "-c", "from subscription_api import app; print(sorted(app.SOURCES))"],
+        env={**os.environ, "PYTHONPATH": str(root / "src"), "HL7_SOURCE_TABLES": "cat.epic.epic_realtime"},
+        capture_output=True, text=True, check=True,
+    )  # fmt: skip
+    assert out.stdout.strip() == "['epic_realtime']"
 
 
 def test_a_dropped_registry_connection_is_replaced_not_reused(client, pg):

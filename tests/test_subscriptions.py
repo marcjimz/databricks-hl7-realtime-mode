@@ -315,10 +315,13 @@ def test_a_record_matches_an_indexed_rule_once_even_if_several_values_could_inde
 
 
 def test_the_api_accepts_exactly_the_hubs_sources():
-    """The API checks rules without importing the hub (its own deploy), so its source list is kept in step here."""
+    """The API checks rules without importing the hub (its own deploy), so its source list is kept in step here: the
+    silver topics, or the Delta tables both are given instead (hub hl7.subscriptions.tables, API HL7_SOURCE_TABLES)."""
     from subscription_api import rules
 
-    assert set(subscriptions.SOURCES) == rules.SOURCES
+    assert set(subscriptions.SILVER) == rules.SOURCES == rules.sources("")
+    spec = "cat.epic.epic_realtime, cat.lab.Lab_Feed"
+    assert rules.sources(spec) == set(subscriptions.table_sources(spec)) == {"epic_realtime", "lab_feed"}
 
 
 def test_the_index_key_is_the_most_selective_equality_not_the_first():
