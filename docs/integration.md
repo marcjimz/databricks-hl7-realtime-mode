@@ -11,7 +11,7 @@ equal), with Swagger UI at `<api>/docs`. Generate a client from it in any langua
 
 Two things to configure:
 1. **A Databricks service principal** (workspace URL, client ID, OAuth secret). It's the app's identity, and the
-   secret is the app's own.
+   secret is the app's own. (A person can be onboarded too, for a first test: see "As a person, or from a notebook".)
 2. **The Subscription API's app name** (a Databricks App, e.g. `hl7-subscriptions-dev`). Its URL changes when the
    workspace is rebuilt, so look it up: `GET $WS/api/2.0/apps/<name>` returns `url` to any caller with CAN_USE on it.
 
@@ -61,6 +61,24 @@ curl -s -X POST "$WS/api/2.1/unity-catalog/temporary-service-credentials" -H "Au
 Test a rule in the SQL editor first, against `<catalog>.sub_<app>.<source>`: it returns the records the app will
 receive. `POST /api/v1/validate` runs every check without applying anything.
 
+### As a person, or from a notebook
+
+An app's identity is usually a service principal, but the platform can onboard a person: their email is the app's
+principal ([subscriptions/README.md](../subscriptions/README.md), phase 1). Two things differ:
+- **Step 1's token** is the person's OAuth token (`databricks auth token`, or U2M in any SDK) instead of M2M.
+- **From a Databricks notebook**, the notebook's own token isn't one a Databricks App accepts. Exchange it for a token
+  whose audience is the App (`oauth2_app_client_id` from `GET $WS/api/2.0/apps/<name>`):
+
+```bash
+curl -s "$WS/oidc/v1/token" -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+  -d subject_token="$NOTEBOOK_TOKEN" -d subject_token_type=urn:databricks:params:oauth:token-type:personal-access-token \
+  -d requested_token_type=urn:ietf:params:oauth:token-type:access_token -d scope=all-apis \
+  -d audience="$APP_CLIENT_ID" | jq -r .access_token
+```
+
+The exchanged token works only for that App: step 5 (the Kafka token) still uses the notebook's own token. The Python
+example does both in a notebook (`examples/subscribers/python/notebook.py`).
+
 ## Reading the topic
 
 Use any Kafka client on the app's topic (`topic` from the connection; each accepted rule's `destination` is the same topic). Settings:
@@ -90,7 +108,7 @@ Each message is keyed by patient ID. The value is JSON:
 | HTTP | `code` |
 |---|---|
 | 401 | `UNAUTHENTICATED`: no valid token |
-| 403 | `APP_NOT_ONBOARDED`: the service principal isn't a subscriber app |
+| 403 | `APP_NOT_ONBOARDED`: the caller (service principal or person) isn't a subscriber app |
 | 422 | Databricks' error class (`UNRESOLVED_COLUMN…`, `PARSE_SYNTAX_ERROR`, …), `SQL_NOT_ALLOWED` (not one filter over one record), `INVALID_NAME`, `DUPLICATE_NAME`, `TEMPLATE_DENIED`, `RULE_LIMIT_REACHED` (the hub's cap, 2,000 rules per tier by default). Nothing applied. |
 | 404 | `NOT_FOUND_OR_INACCESSIBLE`: `DELETE` of a name with no active subscription |
 | 503 | `NOT_CONFIGURED`: `GET /api/v1/connection` before the platform has finished onboarding the app (its topic or credential isn't set) |
