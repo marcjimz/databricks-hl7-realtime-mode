@@ -25,6 +25,9 @@ LAKEHOUSE PATH (SDP micro-batch, off the hot path)
   and the same example client in Python and Java (`examples/subscribers/`) shows the client side. Two ways to run an
   app's rules, same rules and API: the platform's shared hub `edp_shared` (default), or a team's own hub deployed from
   the `hub/` bundle. See "Subscription rules" and docs/subscriptions.md.
+- **The subscription layer also deploys on its own** (`subscriptions/`), over a streaming table a workspace already has
+  (an Epic JSON table, say): the registry, the API, and `edp_shared` reading that Delta table, with no Terraform and
+  nothing else from this repo, driven from notebooks in a Git folder. See subscriptions/README.md.
 - Phases 0–5 were built on an AWS workspace (cross-cloud to Event Hubs); the repo now targets one Azure region end
   to end. New work: one branch + one PR per unit, verified on dev before merging.
 
@@ -61,6 +64,9 @@ databricks.yml        variables + targets; include: resources/**
 resources/<type>/     bundle resources grouped by type: jobs/, pipelines/, schemas/, dashboards/
 hub/                  the subscription hub's ONE pipeline definition (resources/subscription_hub.yml, which the main
                       bundle includes as edp_shared) and the bundle a team deploys to run its own hub
+subscriptions/        the subscription layer on its own, for a workspace with its own data: a bundle that includes the
+                      App and both edp_shared pipelines from resources/ and hub/; preflight + setup notebooks;
+                      targets/<env>.yml (gitignored: one environment's values, copied from target.example.yml)
 src/hl7rt/            shared library: pure DataFrame transforms, Event Hubs helpers, generators (unit-tested)
 src/pipelines/<name>/ thin SDP sources that call into hl7rt (pipeline root_path = src/)
 src/dashboards/       the AI/BI dashboard definitions (.lvdash.json); powerbi/: the live Power BI dashboard's views and
@@ -191,7 +197,8 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   (`make registry`, from `subscriber_apps`). The API's SP may read them; apps don't need to. Filtering on a column is
   reading it, and an ungranted column is Databricks' own `UNRESOLVED_COLUMN`.
 - **The API is the only way in.**
-  - **Identity:** the caller is the `X-Forwarded-Email` the Apps proxy sets (the SP's application ID). The proxy
+  - **Identity:** the caller is the `X-Forwarded-Email` the Apps proxy sets: the SP's application ID, or a person's
+    email when the platform onboards one (matched case-insensitively; onboarding stores it lowercase). The proxy
     overwrites a forged copy (verified live).
   - **Registry access:** app roles are NOLOGIN and granted only to `subscription_service` (the API's SP). The API writes
     with `SET LOCAL ROLE <app>`, so the owner trigger and RLS see the app.
@@ -225,7 +232,8 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
     an SP that reads all of silver): it deploys under the deployer's home, CAN_VIEW for the SP. Deploy each hub from
     one identity.
 - **No silent states in the app.** It exits non-zero on a refused or failed rule, an unconfirmed activation, a stopped
-  hub (heartbeat), a non-SP identity, or an app that isn't onboarded. It prints only the revisions it just registered.
+  hub (heartbeat), a non-SP identity (unless `identity=user`: a person, explicitly), or an app that isn't onboarded. It
+  prints only the revisions it just registered.
   - **It never skips a match.** Its consumer group resumes from its last commit, so after time away it works through the
     backlog and reports it as a count ("catching up" / "caught up") before printing live matches. Re-registering an
     identical rule keeps the revision and prints `(unchanged)`.
@@ -337,7 +345,14 @@ docs/                 integration.md + api/openapi.json (the contract), latency,
   nothing granted to `subscriber`). Views there are dropped and recreated: `CREATE OR REPLACE VIEW` can't change a
   column's type. `tests/test_dashboard.py` keeps both dashboards portable.
 - **The Databricks SDK lets `DATABRICKS_*` environment variables override a profile.** The app pins
-  `auth_type=oauth-m2m` from its profile and refuses to run as anything but a service principal.
+  `auth_type=oauth-m2m` from a service principal's profile and refuses to run as anything else, unless `identity=user`
+  (a person's own profile, unpinned, or a notebook's identity; both languages).
+- **A notebook's token can't call a Databricks App.** Exchange it at `/oidc/v1/token` (token exchange, `audience` = the
+  App's `oauth2_app_client_id`); the Python example does when `DATABRICKS_RUNTIME_VERSION` is set and there's no
+  profile (`api.Exchanged`). The exchanged token works for that App only: UC calls keep the notebook's own.
+- **Serverless notebooks can start on environment version 1** (Python 3.10, databricks-sdk 0.20, seen on a one-time job
+  run): notebooks `%pip install` the SDK they need, pinned to `uv.lock` (`tests/test_subscriber_notebook.py`). The
+  subscriber notebook needs Python 3.11+ (its client generator does): environment version 2 or later, 4 recommended.
 - **`--e2e` is the acceptance test** (26 live checks, local or as the subscriber bundle's `e2e` job). Add a check there for
   every new guarantee, in both languages (`tests/test_subscriber_examples.py` fails if their lists differ), and update
   docs/subscriptions.md's table by hand. Checks read what the app is granted from
