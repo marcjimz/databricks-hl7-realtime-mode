@@ -38,6 +38,9 @@ SUBSCRIPTIONS (seconds)
 **Deploy:** `make up` (Azure and Unity Catalog), then `make demo dev` (pipelines, feeds, the API, and the shared hub).
 Details below in "Set up" and "Run the demo".
 
+**Already have your data?** Deploy only the subscription layer (the registry, the API, and the hub, reading your own
+streaming table) from a Git folder in your workspace, with no Terraform: [subscriptions/README.md](subscriptions/README.md).
+
 ## Subscribe from any application
 
 The interface for external apps is the **Subscription API** (OpenAPI: [`docs/api/openapi.json`](docs/api/openapi.json),

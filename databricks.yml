@@ -8,12 +8,14 @@ include:
   - resources/**/*.yml
   - hub/resources/*.yml  # the subscription hub, shared with hub/databricks.yml (a team's own hub); here: edp_shared
 
-# Pipelines only need src/; examples (including the Java subscriber), Terraform, and the team hub bundle stay local.
+# Pipelines only need src/; examples (including the Java subscriber), Terraform, and the hub and subscriptions bundles
+# stay local.
 sync:
   exclude:
     - examples/**
     - infra/**
     - hub/**
+    - subscriptions/**
 
 artifacts:
   hl7rt:

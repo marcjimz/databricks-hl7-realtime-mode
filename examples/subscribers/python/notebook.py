@@ -1,6 +1,6 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Subscribe to silver records as yourself
+# MAGIC # Subscribe as yourself
 # MAGIC
 # MAGIC This runs the example subscriber (`subscriber.py`, in this folder) as **you**, not a service principal
 # MAGIC (`identity=user`). It declares the rules in `RULES` to the Subscription API, waits until the subscription hub runs

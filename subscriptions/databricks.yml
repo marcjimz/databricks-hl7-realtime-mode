@@ -47,16 +47,16 @@ variables:
       Empty, the hub reads the platform's silver topics instead.
     default: ""
   subscription_table_partition:
-    description: SQL over a table's columns giving a record's partition (notifications carry its coordinates).
+    description: SQL expression over a table source's columns (or Delta _metadata) giving each row's partition, an int.
     default: "0"
   subscription_table_offset:
-    description: SQL giving a record's offset within its partition (unique and increasing).
+    description: SQL expression giving each row's stable 64-bit offset, unique within its partition (notification IDs are built from it). _metadata.row_id needs row tracking on the table.
     default: _metadata.row_id
   subscription_table_ts:
-    description: SQL giving a record's source timestamp (what latency is measured from).
+    description: SQL expression giving each row's source timestamp (the notifications' source_ts).
     default: _ingested_at
   subscription_table_max_files:
-    description: Most files the hub reads per micro-batch per table (maxFilesPerTrigger).
+    description: Most new files the hub reads per micro-batch per table source (maxFilesPerTrigger; it holds a batch in memory).
     default: "100"
 
   # Event Hubs: each app's own topic, written by the hub

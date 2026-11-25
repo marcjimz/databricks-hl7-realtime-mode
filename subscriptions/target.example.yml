@@ -14,8 +14,10 @@ targets:
       # Your Delta streaming tables apps may subscribe to, comma-separated. Each is a source named after its table
       # (epic_realtime here), and apps' rules read FROM it.
       subscription_tables: <catalog>.<schema>.epic_realtime
-      # How the hub reads a table's records, as SQL over its columns: a record's partition, its offset within the
-      # partition (unique and increasing), and its source timestamp. Then the most files per micro-batch.
+      # How the hub identifies a table's rows, as SQL over its columns (or Delta _metadata): a row's partition, its
+      # stable offset, unique within the partition (notification IDs are built from it; _metadata.row_id needs row
+      # tracking on the table), and its source timestamp. Then the most files per micro-batch. preflight.py suggests
+      # all three for your table.
       subscription_table_partition: "0"
       subscription_table_offset: _metadata.row_id
       subscription_table_ts: _ingested_at

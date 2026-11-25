@@ -18,6 +18,7 @@
 
 # COMMAND ----------
 
+# ruff: noqa: F821 - a notebook: spark, dbutils, and display are its globals
 import json
 import os
 import socket
@@ -82,6 +83,7 @@ def pct(values, p):
     s = sorted(values)
     return s[min(len(s) - 1, int(p * len(s)))] if s else None
 
+
 # COMMAND ----------
 
 # MAGIC %md ## A. You and the workspace
@@ -135,8 +137,8 @@ else:
         SCHEMA_FIELDS = attempt("table", "schema", lambda: list(spark.table(SOURCE).schema)) or []
         FACTS["columns"] = [[f.name, f.dataType.simpleString()] for f in SCHEMA_FIELDS]
         record("table", "columns", "INFO", f"{len(SCHEMA_FIELDS)} columns: {[c for c, _ in FACTS['columns']]}")
-        attempt("table", "read", lambda: spark.sql(f"SELECT 1 FROM {Q} LIMIT 1").collect()) is not None and record(
-            "table", "read", "PASS", "you can read it")
+        if attempt("table", "read", lambda: spark.sql(f"SELECT 1 FROM {Q} LIMIT 1").collect()) is not None:
+            record("table", "read", "PASS", "you can read it")
 
 # COMMAND ----------
 
@@ -440,7 +442,7 @@ record("verdict", "row ID for the hub", "PASS" if offset else "FAIL",
        offset or "no stable row ID: enable row tracking (ALTER TABLE ... SET TBLPROPERTIES "
        "('delta.enableRowTracking' = 'true')) or add an integer ID column")  # fmt: skip
 record("verdict", "source timestamp", "PASS" if FACTS["suggested"]["subscription_table_ts"] else "FAIL",
-       FACTS["suggested"]["subscription_table_ts"] or "no timestamp column")
+       FACTS["suggested"]["subscription_table_ts"] or "no timestamp column")  # fmt: skip
 for need, ok in (("Lakebase", "lakebase_projects" in FACTS), ("Databricks Apps", "apps" in FACTS),
                  ("a SQL warehouse", bool(FACTS.get("warehouses"))),
                  ("PyPI from serverless", FACTS["network"].get("pypi.org:443", False))):  # fmt: skip
