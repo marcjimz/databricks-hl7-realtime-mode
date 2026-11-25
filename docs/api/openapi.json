@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HL7 Subscription API",
-    "description": "\nThe contract any application uses to receive HL7 records it chooses with Databricks SQL. The full guide, with\nexamples: docs/integration.md in the repo.\n\n**Authentication.** Call with `Authorization: Bearer <token>`. The token is your app's Databricks service principal's\nOAuth token (machine-to-machine, from `https://<workspace>/oidc/v1/token`). The Databricks Apps proxy verifies it and\ntells the API who is calling. The service principal must be an onboarded subscriber app.\n\n**The handshake.** An app needs only its service principal and this API's Databricks App name (its URL is\n`GET https://<workspace>/api/2.0/apps/<name>` \u2192 `url`, which your CAN_USE grant allows).\n0. `GET /api/v1/connection`: your topic and how to read it (Kafka bootstrap servers, your Unity Catalog credential, and\n   the token scope to request), the hub that runs your rules, and the sources and columns you're granted.\n1. `PUT /api/v1/subscriptions` with the app's whole set of `{name, sql}`. Databricks compiles every rule in that call.\n   Either all are accepted (each with a `revision` and your `destination` topic), or nothing is applied and each refusal\n   carries Databricks' own error.\n2. `GET /api/v1/subscriptions?wait=25`, repeated until `state` is `READY`: the hub is running exactly those revisions.\n   `FAILED` and `HUB_STALE` are final answers too. Keep each call short (\u2264 25 s): a proxy in between may cut long\n   requests.\n3. Read your topic (Kafka protocol on Azure Event Hubs, OAUTHBEARER with a token Unity Catalog issues for your\n   credential: `POST /api/2.1/unity-catalog/temporary-service-credentials` on the workspace).\n   Deduplicate on `notificationId`, and act only on the `(subscriptionId, revision)` pairs you registered.\n\nA rule is `SELECT <columns> FROM <silver source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The\nsame SQL against your views in the SQL editor returns the records you'll receive.\n\n**Hubs.** A hub is the pipeline that runs rules and delivers matches. The platform assigns each app one: `edp_shared`\n(the default), or a team's own hub, which serves only the apps assigned to it. Every app's `deferred` rules run on\n`edp_shared`'s deferred pipeline. Either way your calls, rules, and topic are the same; `hub` fields say which hub runs\nwhat, and only that hub's verdict and heartbeat count.\n\n**Compatibility.** Version 1 only adds fields: clients must ignore fields they don't know.\n",
+    "description": "\nThe contract any application uses to receive HL7 records it chooses with Databricks SQL. The full guide, with\nexamples: docs/integration.md in the repo.\n\n**Authentication.** Call with `Authorization: Bearer <token>`. The token is your app's Databricks service principal's\nOAuth token (machine-to-machine, from `https://<workspace>/oidc/v1/token`). The Databricks Apps proxy verifies it and\ntells the API who is calling. The service principal must be an onboarded subscriber app.\n\n**The handshake.** An app needs only its service principal and this API's Databricks App name (its URL is\n`GET https://<workspace>/api/2.0/apps/<name>` \u2192 `url`, which your CAN_USE grant allows).\n0. `GET /api/v1/connection`: your topic and how to read it (Kafka bootstrap servers, your Unity Catalog credential, and\n   the token scope to request), the hub that runs your rules, and the sources and columns you're granted.\n1. `PUT /api/v1/subscriptions` with the app's whole set of `{name, sql}`. Databricks compiles every rule in that call.\n   Either all are accepted (each with a `revision` and your `destination` topic), or nothing is applied and each refusal\n   carries Databricks' own error.\n2. `GET /api/v1/subscriptions?wait=25`, repeated until `state` is `READY`: the hub is running exactly those revisions.\n   `FAILED` and `HUB_STALE` are final answers too. Keep each call short (\u2264 25 s): a proxy in between may cut long\n   requests.\n3. Read your topic (Kafka protocol on Azure Event Hubs, OAUTHBEARER with a token Unity Catalog issues for your\n   credential: `POST /api/2.1/unity-catalog/temporary-service-credentials` on the workspace).\n   Deduplicate on `notificationId`, and act only on the `(subscriptionId, revision)` pairs you registered.\n\nA rule is `SELECT <columns> FROM <source> WHERE <filter>`, with any Databricks SQL built-in in the filter: a source is\none of the tables `/connection` lists (`sources`). The same SQL against your views in the SQL editor returns the\nrecords you'll receive.\n\n**Hubs.** A hub is the pipeline that runs rules and delivers matches. The platform assigns each app one: `edp_shared`\n(the default), or a team's own hub, which serves only the apps assigned to it. Every app's `deferred` rules run on\n`edp_shared`'s deferred pipeline. Either way your calls, rules, and topic are the same; `hub` fields say which hub runs\nwhat, and only that hub's verdict and heartbeat count.\n\n**Compatibility.** Version 1 only adds fields: clients must ignore fields they don't know.\n",
     "version": "1"
   },
   "paths": {
@@ -603,7 +603,7 @@
             },
             "type": "array",
             "title": "Sources",
-            "description": "The silver sources you may subscribe to"
+            "description": "The sources you may subscribe to"
           },
           "fields": {
             "items": {
@@ -739,7 +739,7 @@
           "source": {
             "type": "string",
             "title": "Source",
-            "description": "The silver source it read"
+            "description": "The source it read"
           },
           "lastBatchAt": {
             "type": "string",
@@ -781,7 +781,7 @@
           "sql": {
             "type": "string",
             "title": "Sql",
-            "description": "SELECT <columns> FROM <silver source> WHERE <filter>, in Databricks SQL",
+            "description": "SELECT <columns> FROM <source> WHERE <filter>, in Databricks SQL",
             "examples": [
               "SELECT patient_id, value_num, units FROM silver_observations WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"
             ]
@@ -824,7 +824,7 @@
           "sql": {
             "type": "string",
             "title": "Sql",
-            "description": "SELECT <columns> FROM <silver source> WHERE <filter>, in Databricks SQL"
+            "description": "SELECT <columns> FROM <source> WHERE <filter>, in Databricks SQL"
           },
           "template": {
             "anyOf": [
@@ -1165,7 +1165,7 @@
             "type": "integer"
           },
           "source": {
-            "description": "The silver source the record came from",
+            "description": "The source the record came from",
             "title": "Source",
             "type": "string"
           },

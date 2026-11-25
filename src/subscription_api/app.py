@@ -79,8 +79,9 @@ tells the API who is calling. The service principal must be an onboarded subscri
    credential: `POST /api/2.1/unity-catalog/temporary-service-credentials` on the workspace).
    Deduplicate on `notificationId`, and act only on the `(subscriptionId, revision)` pairs you registered.
 
-A rule is `SELECT <columns> FROM <silver source> WHERE <filter>`, with any Databricks SQL built-in in the filter. The
-same SQL against your views in the SQL editor returns the records you'll receive.
+A rule is `SELECT <columns> FROM <source> WHERE <filter>`, with any Databricks SQL built-in in the filter: a source is
+one of the tables `/connection` lists (`sources`). The same SQL against your views in the SQL editor returns the
+records you'll receive.
 
 **Hubs.** A hub is the pipeline that runs rules and delivers matches. The platform assigns each app one: `edp_shared`
 (the default), or a team's own hub, which serves only the apps assigned to it. Every app's `deferred` rules run on
@@ -116,7 +117,7 @@ class Item(BaseModel):
     name: str = Field(description="1-63 lowercase letters, digits, or '-'; unique within your app",
                       examples=["critical-potassium"])  # fmt: skip
     sql: str = Field(
-        description="SELECT <columns> FROM <silver source> WHERE <filter>, in Databricks SQL",
+        description="SELECT <columns> FROM <source> WHERE <filter>, in Databricks SQL",
         examples=["SELECT patient_id, value_num, units FROM silver_observations "
                   "WHERE observation_cd_desc = 'Potassium' AND value_num >= 6.5"],
     )  # fmt: skip
@@ -129,7 +130,7 @@ class Declared(BaseModel):
 
 
 class One(BaseModel):
-    sql: str = Field(description="SELECT <columns> FROM <silver source> WHERE <filter>, in Databricks SQL")
+    sql: str = Field(description="SELECT <columns> FROM <source> WHERE <filter>, in Databricks SQL")
     template: str | None = _TEMPLATE
     tier: Literal["realtime", "deferred"] = _TIER
 
@@ -213,7 +214,7 @@ class Subscription(_Open):
 class Heartbeat(_Open):
     hub: str = Field(description="The hub", examples=["edp_shared"])
     tier: str = Field(description="realtime or deferred: which of its pipelines")
-    source: str = Field(description="The silver source it read")
+    source: str = Field(description="The source it read")
     lastBatchAt: str = Field(description="When it last processed a batch of the source (ISO 8601)")
     batchId: int = Field(json_schema_extra={"format": "int64"})
     rules: int = Field(description="Rules it ran on the source in that batch")
@@ -257,7 +258,7 @@ class Connection(_Open):
     hub: str = Field(description="The hub that runs your realtime rules (the platform assigns it): edp_shared, or "
                      "your team's own hub. Your deferred rules run on edp_shared.",
                      examples=["edp_shared"])  # fmt: skip
-    sources: list[str] = Field(description="The silver sources you may subscribe to")
+    sources: list[str] = Field(description="The sources you may subscribe to")
     fields: list[str] = Field(description="The columns you may read and filter on (a data template may narrow them)")
 
 
@@ -269,7 +270,7 @@ class Notification(_Open):
     subscriptionId: str
     subscription: str = Field(description="The subscription's name")
     revision: int = Field(description="Act only on the (subscriptionId, revision) pairs your last declare returned")
-    source: str = Field(description="The silver source the record came from")
+    source: str = Field(description="The source the record came from")
     sourcePartition: int
     sourceOffset: int = Field(json_schema_extra={"format": "int64"})
     source_ts: str = Field(description="When the source record was produced (ISO 8601, broker time)")
