@@ -3,7 +3,8 @@
 The same app as the [Java example](../java/README.md), run from the repo root with the repo's `uv` environment and a
 Databricks CLI profile. It isn't part of the platform: any language can do the same through the contract
 ([docs/integration.md](../../../docs/integration.md)). It subscribes to silver records at runtime with Databricks SQL,
-then consumes its own Event Hub, signing in only as its Databricks service principal.
+then consumes its own Event Hub, signing in as its Databricks service principal (or, explicitly, as you: see
+[Run as yourself](#run-as-yourself)).
 
 **The API client is generated from the contract.** `build.py` runs openapi-python-client on
 [`docs/api/openapi.json`](../../../docs/api/openapi.json) whenever the client is missing or the contract is newer. That
@@ -53,7 +54,7 @@ uv run python examples/subscribers/python/monitor.py --duration=600    # dynamic
 - **Edit `my_subscriptions.py`**, then run again. No build: the API compiles the SQL, and the hub applies it at its next
   micro-batch.
 - **Exit codes and output match the Java example:** 2 refused, 3 the hub can't run a rule, 4 not confirmed or the hub
-  stopped, 5 not a service principal, 6 not onboarded.
+  stopped, 5 not the identity the settings name (a service principal unless `identity=user`), 6 not onboarded.
 - **Same service principal, same rules.** An app declares its service principal's whole set. This example starts with
   the same rule as the Java one, so either can run as `sp-hl7-realtime-demo` and they agree (`(unchanged)`). If you
   change one, the other's next run puts its own set back.
@@ -61,6 +62,27 @@ uv run python examples/subscribers/python/monitor.py --duration=600    # dynamic
   Java example and each gets every notification.
 - With more than one file in `examples/subscribers/apps/`, name the app:
   `uv run python examples/subscribers/python/subscriber.py examples/subscribers/apps/<app>.properties`.
+
+## Run as yourself
+
+By default the app must sign in as a service principal (exit 5 otherwise). To run it as yourself, say so with
+`identity=user`, and use your own Databricks CLI profile (`databricks auth login`; it isn't pinned to OAuth M2M) or none
+for the ambient identity. The platform team onboards you as an app with your email as its principal.
+
+```bash
+uv run python examples/subscribers/python/subscriber.py identity=user databricks.profile=<yours> api.app=<the API's app>
+```
+
+`--e2e` stays a service principal's: as a person, its first check fails and the run stops.
+
+## From a Databricks notebook
+
+[`notebook.py`](notebook.py) runs the same app as you from a serverless notebook. Open it from a Git folder of this repo.
+Its first cells check for Python 3.11 or later (pick Environment version 4) and install the example's packages at the
+versions in `uv.lock`. It then declares its own `RULES` (`subscriber.main(argv, rules=...)`) and listens for `seconds`;
+its last cell cancels them. A notebook's token can't call a Databricks App, so there the app exchanges it for one whose
+audience is the API's App (`api.Exchanged`). That's why the notebook names the App (`api.app`), not only its URL. Its
+first cell lists what you need.
 
 | File | Role (the Java example's class) |
 |---|---|
@@ -73,6 +95,7 @@ uv run python examples/subscribers/python/monitor.py --duration=600    # dynamic
 | `build.py` | Generates the client from the contract with openapi-python-client (the Java build's openapi-generator step, for Python) |
 | `monitor.py` | Dynamic patient monitoring: follows ED registrations and edits the patient rules per census change (no Java version) |
 | `patient_rules.py` | The monitor's rules and census logic, with no I/O |
+| `notebook.py` | Run as yourself from a Databricks notebook, with your own rules (no Java version) |
 
 Unit tests (run by `make test`):
 - `tests/test_python_subscriber.py`. Among them, the generated client runs the whole handshake against the real
@@ -80,3 +103,4 @@ Unit tests (run by `make test`):
 - `tests/test_subscriber_examples.py`. It checks that both examples run the same checks in the same order, and that the
   monitor exits from its main thread.
 - `tests/test_monitor_example.py`.
+- `tests/test_subscriber_notebook.py`. The notebook's token exchange, its pins against `uv.lock`, and its cells.

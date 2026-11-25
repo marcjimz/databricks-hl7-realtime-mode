@@ -13,3 +13,7 @@ api.app = hl7-subscriptions-dev
 
 # Optional: consumer group (defaults to the profile name).
 # consumer.group = my-app
+
+# Optional: run as yourself rather than a service principal (the default, service_principal). The profile above is then
+# your own, e.g. from `databricks auth login`.
+# identity = user

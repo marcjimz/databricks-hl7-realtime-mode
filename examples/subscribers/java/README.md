@@ -2,7 +2,8 @@
 
 An example of an external application using the platform. It isn't part of the platform: any language can do the same
 through the contract ([docs/integration.md](../../../docs/integration.md)). It subscribes to silver records at runtime with
-Databricks SQL, then consumes its own Event Hub, signing in only as its Databricks service principal.
+Databricks SQL, then consumes its own Event Hub, signing in as its Databricks service principal (or, explicitly, as
+you: see [Run as yourself](#run-as-yourself)).
 
 **The API client is generated from the contract.** At build time, Maven runs openapi-generator on
 [`docs/api/openapi.json`](../../../docs/api/openapi.json). That produces `SubscriptionsApi` (one Java method per
@@ -67,6 +68,19 @@ With more than one file in `apps/`, name the app: `java -jar … examples/subscr
 [Python only](../python/README.md). The walkthrough with expected output is in the
 [README](../../../README.md#subscriptions-demo).
 
+### Run as yourself
+
+By default the app must sign in as a service principal (exit 5 otherwise). `identity=user` runs it as you, explicitly,
+with your own CLI profile (`databricks.profile=<yours>`, from `databricks auth login`; it isn't pinned to OAuth M2M) or
+the ambient identity. The platform team onboards you as an app with your email as its principal.
+
+```bash
+java -jar examples/subscribers/java/target/hl7-subscriber.jar identity=user databricks.profile=<yours> api.app=<the API's app>
+```
+
+`--e2e` stays a service principal's: as a person, its first check fails and the run stops. To run as yourself from a
+Databricks notebook, use the [Python example's notebook](../python/README.md#from-a-databricks-notebook).
+
 ## Code
 
 Classes by role (`src/main/java/com/databricks/hl7/subscriber/`). Read the first two first:
@@ -74,7 +88,7 @@ Classes by role (`src/main/java/com/databricks/hl7/subscriber/`). Read the first
 | Class | What it does |
 |---|---|
 | `MySubscriptions` | What this app receives: name → SQL. The file you edit: stop the app, edit, rebuild, run. |
-| `App` | The entry point. Settings, sign-in as the SP, then `api.getConnection()`, `api.declare(...)`, `api.getStatus(wait)` until READY, then listen. Exit codes 2–6. |
+| `App` | The entry point. Settings, sign-in as the SP (or you, with `identity=user`), then `api.getConnection()`, `api.declare(...)`, `api.getStatus(wait)` until READY, then listen. Exit codes 2–6. |
 | `api/Api` | Wires the generated `SubscriptionsApi`: the URL, the SP's token on every call, and reading a refusal (`Refusal`: Databricks' error per rule) |
 | `notifications/Listener` | The delivery contract on the generated `Notification`: dedupe by `notificationId`, current revisions only, catch-up summary, commit after handling |
 | `platform/EventHubs` | The Unity Catalog-issued Entra token, the Kafka OAUTHBEARER callback, the consumer settings |

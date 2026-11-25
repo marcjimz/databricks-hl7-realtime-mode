@@ -97,4 +97,23 @@ class E2ETest {
                 + "| this app is granted every source | SKIP |"), printed);
         assertTrue(printed.contains("2 checks, 0 failed, 1 skipped"), printed);
     }
+
+    @Test
+    void runAsAPersonTheFirstCheckFailsAndSaysWhy() {
+        var out = new ByteArrayOutputStream();
+        PrintStream was = System.out;
+        System.setOut(new PrintStream(out, true));
+        try {
+            var t = new E2E(null, null, null, new Properties());
+            assertFalse(t.signedIn("someone@example.com"), "the run stops: the checks are a service principal's");
+            t.print();
+            assertFalse(t.ok());
+            assertTrue(new E2E(null, null, null, new Properties()).signedIn("00000000-0000-4000-8000-000000000001"));
+        } finally {
+            System.setOut(was);
+        }
+        String printed = out.toString();
+        assertTrue(printed.contains("| 1 | Sign in | profile (ambient identity) | a service principal | someone@example.com: "
+                + "a user (--e2e runs as a service principal) | **FAIL** |"), printed);
+    }
 }

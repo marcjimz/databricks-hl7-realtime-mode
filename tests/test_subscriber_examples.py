@@ -45,6 +45,17 @@ def test_both_examples_run_the_same_checks_in_the_same_order():
         assert re.search(r"\b26\b", text) and not re.search(r"\b25\b", text), readme
 
 
+def test_both_examples_take_the_same_identity_setting():
+    """A person runs either one only with identity=user: the same key and values (exit 5 and its messages are pinned
+    by each example's own tests)."""
+    import subscriber
+
+    java = (JAVA / "src/main/java/com/databricks/hl7/subscriber/App.java").read_text()
+    values = re.search(r"IDENTITIES = List\.of\(([^)]*)\)", java)
+    assert values and tuple(re.findall(r'"([^"]+)"', values.group(1))) == subscriber.IDENTITIES
+    assert 'getProperty("identity"' in java and subscriber.IDENTITIES[0] == "service_principal", "the default"
+
+
 def test_the_source_not_granted_is_one_outside_the_apps_grant():
     assert set(e2e.SOURCES) == set(subscriptions.SOURCES), "the e2e knows every silver source"
     assert e2e.ungranted_source(["silver_observations", "silver_diagnoses"]) == "silver_encounters"
@@ -126,6 +137,19 @@ def test_a_skipped_check_is_reported_and_doesnt_fail_the_run(capsys):
     assert "2 checks, 0 failed, 1 skipped" in out and t.ok()
     t.record("Cancel", "-", "CANCELLED", "PENDING", False)
     assert not t.ok()
+
+
+def test_the_e2e_run_as_a_person_fails_its_first_check_and_stops(capsys):
+    """identity=user lets a person sign in, but the checks are an onboarded service principal's: check 1 fails and says
+    so, and nothing else runs (no client or connection is touched)."""
+    me = SimpleNamespace(user_name="someone@example.com")
+    t = e2e.E2E(SimpleNamespace(current_user=SimpleNamespace(me=lambda: me)), None, None, {"identity": "user"})
+    t.all()
+    ((name, _, expected, actual, result),) = t.checks
+    assert (name, expected, result) == ("Sign in", "a service principal", "FAIL")
+    assert actual == "someone@example.com: a user (--e2e runs as a service principal)"
+    assert not t.ok()
+    assert e2e.E2E(None, None, None, {}).signed_in("00000000-0000-4000-8000-000000000001") is True
 
 
 # --- The patient monitor (monitor.py) ---------------------------------------------------------------------------------

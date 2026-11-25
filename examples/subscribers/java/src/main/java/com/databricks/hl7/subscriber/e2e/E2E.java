@@ -144,10 +144,19 @@ public final class E2E {
         return v == null || v.isBlank() ? null : v.trim();
     }
 
+    /**
+     * Check 1. True if the checks can go on: they're an onboarded service principal's, so as a person (identity=user)
+     * this one fails and says so, and the run stops.
+     */
+    boolean signedIn(String me) {
+        boolean sp = App.isServicePrincipal(me);
+        record("Sign in", "profile " + cfg.getProperty("databricks.profile", "(ambient identity)"), "a service principal",
+                sp ? me : me + ": a user (--e2e runs as a service principal)", sp);
+        return sp;
+    }
+
     private void all() throws Exception {
-        String me = workspace.currentUser().me(new MeRequest()).getUserName();
-        record("Sign in", "profile " + cfg.getProperty("databricks.profile", "(ambient identity)"), "a service principal", me,
-                App.isServicePrincipal(me));
+        if (!signedIn(workspace.currentUser().me(new MeRequest()).getUserName())) return;
 
         // Isolation on Event Hubs and the registry: only this app's own credential and hub, read-only; no way around the API.
         String own = setting("e2e.own_topic");

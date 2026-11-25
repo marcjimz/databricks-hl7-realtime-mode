@@ -36,8 +36,8 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
  * The API does the rest: Databricks compiles each rule, the registry keeps it, the hub runs it.
  *
  * <p>Nothing is silent. Exit 2: a rule was refused (Databricks' error, or a shape the hub won't run). 3: the hub can't run
- * one. 4: the hub didn't confirm in time or isn't processing. 5: not signed in as a service principal. 6: this service
- * principal isn't an onboarded subscriber app.
+ * one. 4: the hub didn't confirm in time or isn't processing. 5: not signed in as the identity the settings name (a
+ * service principal unless identity=user). 6: this identity isn't an onboarded subscriber app.
  *
  * <pre>
  *   java -jar hl7-subscriber.jar [file.properties] [key=value ...] [--duration=300|PT5M] [--e2e]
@@ -49,10 +49,16 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
  * else the one file in apps/, which `make registry` writes to examples/subscribers/apps; looked up in the current directory,
  * then the app's home and its parent)
  * plus key=value arguments. --e2e runs the end-to-end checks instead.
+ *
+ * <p>A person runs it as themselves only explicitly, with identity=user (their own CLI profile, or none for the ambient
+ * identity). Notebooks are the Python example's (notebook.py): a notebook's token needs exchanging for one the API's App
+ * accepts, which this app, run as a jar, never does.
  */
 public final class App {
     static final int WAIT_SECONDS = 120;
     static final int POLL_SECONDS = 25;
+    /** The identity setting; the first is the default. */
+    static final List<String> IDENTITIES = List.of("service_principal", "user");
     private static final Duration HEALTH_CHECK_EVERY = Duration.ofSeconds(30);
 
     public static void main(String[] args) throws Exception {
@@ -161,20 +167,48 @@ public final class App {
 
     // ---------------------------------------------------------------------------------------------------------------
     /**
-     * With a profile: OAuth M2M from that profile only (DATABRICKS_* environment variables would otherwise take
-     * precedence). Without one: the ambient identity, e.g. a workspace job's run-as service principal. Either way it
-     * must be a service principal, whose user name is its application ID.
+     * With a profile: from that profile only, OAuth M2M for a service principal (DATABRICKS_* environment variables
+     * would otherwise take precedence; a user's profile signs in its own way, e.g. databricks-cli). Without one: the
+     * ambient identity, e.g. a workspace job's run-as service principal. It must be the identity the settings name: a
+     * service principal (the default), whose user name is its application ID, or with identity=user, a person.
      */
     static WorkspaceClient signIn(Properties cfg) {
-        String profile = cfg.getProperty("databricks.profile", "").trim();
-        var c = profile.isEmpty() ? new DatabricksConfig() : new DatabricksConfig().setProfile(profile).setAuthType("oauth-m2m");
-        var workspace = new WorkspaceClient(c);
+        String who = identity(cfg);
+        var workspace = new WorkspaceClient(signInConfig(cfg));
         var me = workspace.currentUser().me(new MeRequest());
-        if (!isServicePrincipal(me.getUserName())) {
-            exit(5, "signed in as " + me.getUserName() + ", not a service principal" + (profile.isEmpty() ? "" : ": check profile " + profile));
-        }
-        System.out.printf("signed in   as %s (%s)%n", me.getDisplayName(), me.getUserName());
+        String problem = identityProblem(who, me.getUserName(), cfg.getProperty("databricks.profile", "").trim());
+        if (problem != null) exit(5, problem);
+        System.out.printf("signed in   as %s (%s)%s%n", me.getDisplayName(), me.getUserName(),
+                "user".equals(who) ? " as a user" : "");
         return workspace;
+    }
+
+    /** How signIn signs in: the profile, pinned to OAuth M2M unless identity=user; the ambient identity without one. */
+    static DatabricksConfig signInConfig(Properties cfg) {
+        String profile = cfg.getProperty("databricks.profile", "").trim();
+        if (profile.isEmpty()) return new DatabricksConfig();
+        var c = new DatabricksConfig().setProfile(profile);
+        return "user".equals(identity(cfg)) ? c : c.setAuthType("oauth-m2m");
+    }
+
+    /** The identity setting: service_principal (the default) or user. */
+    static String identity(Properties cfg) {
+        String v = cfg.getProperty("identity", "").trim();
+        if (v.isEmpty()) return IDENTITIES.get(0);
+        if (!IDENTITIES.contains(v)) throw new IllegalArgumentException("identity: " + String.join(" or ", IDENTITIES) + ", not " + v);
+        return v;
+    }
+
+    /** Why this sign-in isn't the identity the settings name, or null. Explicit both ways. */
+    static String identityProblem(String who, String userName, String profile) {
+        String check = profile == null || profile.isEmpty() ? "" : ": check profile " + profile;
+        if ("user".equals(who) && isServicePrincipal(userName)) {
+            return "signed in as " + userName + ", a service principal, but identity=user" + check + " (drop identity=user)";
+        }
+        if (!"user".equals(who) && !isServicePrincipal(userName)) {
+            return "signed in as " + userName + ", not a service principal" + check + " (to run as yourself, set identity=user)";
+        }
+        return null;
     }
 
     public static boolean isServicePrincipal(String userName) {
@@ -193,7 +227,7 @@ public final class App {
         }).orElse(null);
     }
 
-    /** The SP's Databricks OAuth token (the SDK refreshes it). */
+    /** The signed-in identity's Databricks OAuth token (the SDK refreshes it). */
     public static String bearer(WorkspaceClient workspace) {
         return workspace.config().authenticate().get("Authorization").replaceFirst("^Bearer ", "");
     }
