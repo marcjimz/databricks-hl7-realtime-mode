@@ -33,7 +33,7 @@ import notifications  # noqa: E402
 import patient_rules  # noqa: E402
 from hl7_subscriptions_client.api.subscriptions import cancel, get_connection, get_status, put_subscription  # noqa: E402
 from hl7_subscriptions_client.models import One  # noqa: E402
-from subscriber import api_url, bearer, duration, exit_with, first_line, settings, sign_in  # noqa: E402
+from subscriber import api_client, duration, exit_with, first_line, settings, sign_in  # noqa: E402
 
 APPLY_EVERY = 1.0  # seconds: census changes in this window are one edit per rule
 WAIT_SECONDS = 60
@@ -171,7 +171,7 @@ class Monitor:
 def main(argv: list[str]):
     cfg = settings(argv)
     workspace = sign_in(cfg)
-    client = api.connect(api_url(workspace, cfg), lambda: bearer(workspace))
+    client = api_client(workspace, cfg)
     try:
         connection = api.call(get_connection, client)
     except api.ApiError as e:

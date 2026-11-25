@@ -6,6 +6,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -277,9 +278,141 @@ def test_the_api_is_found_by_app_name_unless_its_url_is_set():
         subscriber.api_url(None, {})
 
 
+def test_settings_need_no_file(tmp_path, monkeypatch):
+    """A notebook has no .properties: key=value arguments are all the settings."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subscriber, "HERE", tmp_path / "examples/subscribers/python")
+    cfg = subscriber.settings(["api.app=hl7-subscriptions-dev", "identity=user", "consumer.group=me-notebook",
+                               "--duration=300"])  # fmt: skip
+    assert cfg == {"api.app": "hl7-subscriptions-dev", "identity": "user", "consumer.group": "me-notebook"}
+
+
 def test_only_a_service_principal_may_run_the_app():
     assert subscriber.is_service_principal("00000000-0000-4000-8000-000000000001")
     assert not subscriber.is_service_principal("someone@example.com")
+
+
+# --- Who runs it: a service principal by default, a person only with identity=user (the Java example's signIn) -------
+SP = "00000000-0000-4000-8000-000000000001"
+
+
+@pytest.fixture
+def signing_in(monkeypatch):
+    """sign_in against a stand-in WorkspaceClient that signs in as `user_name`; returns how each one was built."""
+
+    def as_(user_name, display_name="Someone"):
+        built = []
+
+        def workspace(**kwargs):
+            built.append(kwargs)
+            me = SimpleNamespace(user_name=user_name, display_name=display_name)
+            return SimpleNamespace(current_user=SimpleNamespace(me=lambda: me))
+
+        monkeypatch.setattr(subscriber, "WorkspaceClient", workspace)
+        return built
+
+    return as_
+
+
+def test_a_person_is_refused_unless_identity_is_user(signing_in, capsys):
+    built = signing_in("someone@example.com")
+    with pytest.raises(SystemExit) as e:
+        subscriber.sign_in({"databricks.profile": "me"})
+    assert e.value.code == 5
+    assert built == [{"profile": "me", "auth_type": "oauth-m2m"}], "a service principal's profile: OAuth M2M only"
+    out = capsys.readouterr().out
+    assert out.startswith("ERROR       signed in as someone@example.com, not a service principal: check profile me")
+    assert "identity=user" in out, "says how to run as yourself"
+
+
+def test_identity_user_signs_in_as_yourself(signing_in, capsys):
+    built = signing_in("someone@example.com", "Some One")
+    subscriber.sign_in({"databricks.profile": "me", "identity": "user"})
+    assert built == [{"profile": "me"}], "a user's profile signs in its own way (databricks-cli, U2M): not pinned"
+    assert capsys.readouterr().out == "signed in   as Some One (someone@example.com) as a user\n"
+
+    built = signing_in("someone@example.com", "Some One")
+    subscriber.sign_in({"identity": "user"})
+    assert built == [{}], "no profile: the ambient identity, e.g. a notebook's user"
+
+
+def test_identity_user_is_not_a_service_principal(signing_in, capsys):
+    signing_in(SP)
+    with pytest.raises(SystemExit) as e:
+        subscriber.sign_in({"identity": "user"})
+    assert e.value.code == 5
+    assert f"signed in as {SP}, a service principal" in capsys.readouterr().out, "explicit both ways"
+
+
+def test_identity_problems_read_like_the_java_examples():
+    assert subscriber.identity_problem("service_principal", "someone@example.com", "me") == (
+        "signed in as someone@example.com, not a service principal: check profile me "
+        "(to run as yourself, set identity=user)")  # fmt: skip
+    assert subscriber.identity_problem("user", SP, "") == (
+        f"signed in as {SP}, a service principal, but identity=user (drop identity=user)")  # fmt: skip
+    assert subscriber.identity_problem("user", "someone@example.com", "") is None
+    assert subscriber.identity_problem("service_principal", SP, "") is None
+
+
+def test_a_service_principal_signs_in_as_before(signing_in, capsys):
+    built = signing_in(SP, "sp-hl7-app")
+    subscriber.sign_in({})
+    subscriber.sign_in({"identity": "service_principal"})
+    assert built == [{}, {}]
+    assert capsys.readouterr().out == f"signed in   as sp-hl7-app ({SP})\n" * 2
+    with pytest.raises(ValueError, match="identity"):
+        subscriber.sign_in({"identity": "person"})
+
+
+# --- main(argv, rules): the rules a caller (a notebook) passes, else my_subscriptions.py ------------------------------
+@pytest.fixture
+def run_main(client, monkeypatch, tmp_path):
+    """subscriber.main against the real API in-process, signed in as app `sp`, with no settings file around and no hub
+    running (so a declare that is accepted ends with exit 4, not confirmed)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(subscriber, "HERE", tmp_path / "examples/subscribers/python")
+    monkeypatch.setattr(subscriber, "WAIT_SECONDS", 1)
+    monkeypatch.setattr(subscriber, "sign_in", lambda cfg: None)
+
+    def run(sp, argv, **kwargs):
+        monkeypatch.setattr(subscriber, "api_client", lambda workspace, cfg: client(sp))
+        with pytest.raises(SystemExit) as e:
+            subscriber.main(argv, **kwargs)
+        return e.value.code
+
+    return run
+
+
+def enabled(client, sp) -> set[str]:
+    return {s.name for s in api.call(get_status, client(sp), wait=0).subscriptions if s.enabled}
+
+
+def test_main_declares_the_rules_it_is_given_and_an_empty_set_cancels_them(run_main, client, capsys):
+    assert run_main("sp-c", ["api.app=x", "identity=user"], rules={"critical-k": POTASSIUM}) == 4, "no hub here"
+    assert "subscribed  critical-k             revision 1 ACCEPTED" in capsys.readouterr().out
+    assert enabled(client, "sp-c") == {"critical-k"}
+
+    assert run_main("sp-c", ["api.app=x", "identity=user"], rules={}) == 0
+    out = capsys.readouterr().out
+    assert "cancelled   critical-k             (no longer in your rules)" in out
+    assert out.rstrip().endswith("done        no subscriptions declared in your rules")
+    assert enabled(client, "sp-c") == set(), "nothing left behind"
+
+
+def test_main_without_rules_declares_my_subscriptions(run_main, client, monkeypatch, capsys):
+    monkeypatch.setattr(subscriber.my_subscriptions, "all", lambda: {"from-the-file": POTASSIUM})
+    assert run_main("sp-c", []) == 4
+    assert "subscribed  from-the-file" in capsys.readouterr().out
+    assert enabled(client, "sp-c") == {"from-the-file"}
+
+
+def test_a_refusal_names_where_the_rules_came_from(run_main, monkeypatch, capsys):
+    typo = {"typo": "SELECT patient_id FROM silver_observations WHERE value_numm > 6"}
+    assert run_main("sp-c", [], rules=typo) == 2
+    assert capsys.readouterr().out.rstrip().endswith("1 subscription(s) refused; fix your rules")
+    monkeypatch.setattr(subscriber.my_subscriptions, "all", lambda: typo)
+    assert run_main("sp-c", []) == 2
+    assert capsys.readouterr().out.rstrip().endswith("1 subscription(s) refused; fix my_subscriptions.py")
 
 
 def test_durations_read_like_the_java_examples():

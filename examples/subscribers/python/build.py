@@ -4,6 +4,7 @@ one model per schema, including the Kafka message (Notification), into generated
 client is missing or the contract is newer, the way Maven's openapi-generator does for the Java example.
 """
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -19,12 +20,13 @@ def ensure() -> bool:
     marker = OUT / PACKAGE / "__init__.py"
     stale = not marker.exists() or CONTRACT.stat().st_mtime > marker.stat().st_mtime
     if stale:
-        generator = Path(sys.executable).with_name("openapi-python-client")
-        if not generator.exists():
-            sys.exit("openapi-python-client isn't installed: run `uv sync` in the repo root")
+        # Run as a module of this interpreter: in a notebook, its console script needn't sit beside sys.executable.
+        if importlib.util.find_spec("openapi_python_client") is None:
+            sys.exit("openapi-python-client isn't installed: run `uv sync` in the repo root (notebook: its %pip cell)")
         OUT.mkdir(parents=True, exist_ok=True)
-        r = subprocess.run([str(generator), "generate", "--path", str(CONTRACT), "--meta", "none", "--overwrite",
-                            "--output-path", str(OUT / PACKAGE)], capture_output=True, text=True)  # fmt: skip
+        r = subprocess.run([sys.executable, "-m", "openapi_python_client", "generate", "--path", str(CONTRACT),
+                            "--meta", "none", "--overwrite", "--output-path", str(OUT / PACKAGE)],
+                           capture_output=True, text=True)  # fmt: skip
         if r.returncode != 0:
             sys.exit(f"generating the API client from {CONTRACT} failed:\n{r.stdout}{r.stderr}")
         marker.touch()

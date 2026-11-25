@@ -70,6 +70,42 @@ class AppTest {
         assertFalse(App.isServicePrincipal(null));
     }
 
+    // --- Who runs it: a service principal by default, a person only with identity=user (the Python example's sign_in)
+    private static final String SP = "00000000-0000-4000-8000-000000000001";
+
+    @Test
+    void aPersonIsRefusedUnlessIdentityIsUser() {
+        assertEquals("signed in as someone@example.com, not a service principal: check profile me "
+                + "(to run as yourself, set identity=user)", App.identityProblem("service_principal", "someone@example.com", "me"));
+        assertNull(App.identityProblem("user", "someone@example.com", ""), "identity=user: a person may");
+        assertEquals("signed in as " + SP + ", a service principal, but identity=user (drop identity=user)",
+                App.identityProblem("user", SP, ""), "explicit both ways");
+        assertNull(App.identityProblem("service_principal", SP, ""));
+    }
+
+    @Test
+    void identityIsAServicePrincipalUnlessSetToUser() {
+        var p = new java.util.Properties();
+        assertEquals("service_principal", App.identity(p), "the default");
+        p.setProperty("identity", " user ");
+        assertEquals("user", App.identity(p));
+        p.setProperty("identity", "person");
+        assertThrows(IllegalArgumentException.class, () -> App.identity(p));
+    }
+
+    @Test
+    void aServicePrincipalsProfileIsOAuthM2mOnlyAndAUsersSignsInItsOwnWay() {
+        var p = new java.util.Properties();
+        p.setProperty("databricks.profile", "me");
+        assertEquals("oauth-m2m", App.signInConfig(p).getAuthType());
+        p.setProperty("identity", "user");
+        assertEquals("me", App.signInConfig(p).getProfile());
+        assertNull(App.signInConfig(p).getAuthType(), "a user's profile signs in its own way (databricks-cli, U2M)");
+        var ambient = App.signInConfig(new java.util.Properties());
+        assertNull(ambient.getProfile(), "no profile: the ambient identity");
+        assertNull(ambient.getAuthType());
+    }
+
     @Test
     void theApiIsHttpsOnly() {
         assertThrows(IllegalArgumentException.class, () -> Api.connect("http://example.com", () -> "t"));

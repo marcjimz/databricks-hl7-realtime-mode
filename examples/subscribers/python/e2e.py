@@ -82,11 +82,18 @@ class E2E:
     def ok(self) -> bool:
         return all(c[4] != "FAIL" for c in self.checks)
 
+    def signed_in(self, me: str) -> bool:
+        """Check 1. True if the checks can go on: they're an onboarded service principal's, so as a person
+        (identity=user) this one fails and says so, and the run stops."""
+        sp, profile = is_service_principal(me), self.cfg.get("databricks.profile", "(ambient identity)")
+        self.record("Sign in", f"profile {profile}", "a service principal",
+                    me if sp else f"{me}: a user (--e2e runs as a service principal)", sp)  # fmt: skip
+        return sp
+
     def all(self):
         c, conn = self.client, self.connection
-        me = self.workspace.current_user.me().user_name
-        profile = self.cfg.get("databricks.profile", "(ambient identity)")
-        self.record("Sign in", f"profile {profile}", "a service principal", me, is_service_principal(me))
+        if not self.signed_in(self.workspace.current_user.me().user_name):
+            return
 
         # Isolation on Event Hubs and the registry: only this app's own credential and hub, read-only; no way around.
         own = self.setting("e2e.own_topic")
